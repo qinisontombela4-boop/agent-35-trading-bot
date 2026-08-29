@@ -131,6 +131,11 @@ def auto_update_trades_loop():
         time.sleep(180)
 threading.Thread(target=auto_update_trades_loop, daemon=True).start()
 
+.step{border-left:4px solid #10b981;background:#0e1625;border-radius:12px;padding:18px;margin:14px 0}
+.step-num{background:#10b981;color:#000;width:32px;height:32px;border-radius:50%;display:inline-flex;align-items:center;justify-content:center;font-weight:800;margin-right:10px}
+.broker-card{background:#121d30;border:1px solid #1e2d45;border-radius:12px;padding:14px;display:flex;justify-content:space-between;align-items:center;margin:8px 0}
+.warn{background:#f59e0b22;border:1px solid #f59e0b;color:#f59e0b;padding:12px;border-radius:10px;text-align:center;font-weight:700}
+
 STYLE = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
@@ -169,15 +174,78 @@ document.addEventListener('click', function(e){let box=document.getElementById('
 
 def layout(content, email="", active="dashboard"):
     is_creator = "creator" in email.lower()
-    ad = "active" if active=="dashboard" else ""; aj = "active" if active=="journal" else ""; aset = "active" if active=="settings" else ""; am = "active" if active=="master" else ""
+    ad = "active" if active=="dashboard" else ""
+    aj = "active" if active=="journal" else ""
+    aset = "active" if active=="settings" else ""
+    am = "active" if active=="master" else ""
+    ag = "active" if active=="guide" else ""
     master_tab = f'<a href="/master" class="{am}">Master</a>' if is_creator else ""
-    tabs = f'<div class="nav-tabs"><a href="/dashboard" class="{ad}">Dashboard</a><a href="/journal" class="{aj}">Journal</a><a href="/settings" class="{aset}">Settings</a><a href="/payment">Plans</a>{master_tab}</div>'
-    return f'<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent35 V5.9</title>{STYLE}</head><body><div class="header"><div class="logo">{LOGO_SVG} AGENT 35 V5.9</div><div><span style="font-size:11px;color:#94a3b8">{email}</span> <a href="/logout" style="color:#94a3b8;text-decoration:none;margin-left:10px">Logout</a></div></div><div style="padding:14px;max-width:1400px;margin:auto">{tabs}{content}</div></body></html>'
-
+    guide_tab = f'<a href="/guide" class="{ag}">Guide</a>'
+    tabs = f'<div class="nav-tabs"><a href="/dashboard" class="{ad}">Dashboard</a><a href="/journal" class="{aj}">Journal</a><a href="/settings" class="{aset}">Settings</a><a href="/payment">Plans</a>{guide_tab}{master_tab}</div>'
 @app.route('/')
 def home():
     return f'<html><head><meta name="viewport" content="width=device-width, initial-scale=1">{STYLE}</head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;padding:16px"><div class="card" style="max-width:400px;width:100%;text-align:center;padding:28px"><div style="display:flex;justify-content:center;margin-bottom:16px">{LOGO_SVG.replace("34","72")}</div><h1 style="color:#10b981;margin:0">AGENT 35</h1><p style="color:#64748b;margin-top:8px;font-size:13px">V5.9 Asia+Sydney+Reason @Sniper035_bot</p><form method="POST" action="/auth" style="text-align:left;margin-top:24px"><label>Email</label><input name="email" placeholder="your@email.com" required><label>Password</label><input name="password" type="password" placeholder="••••••••" required><button class="btn" style="margin-top:16px">Login</button></form></div></body></html>'
+@app.route('/guide')
+def guide_page():
+    email = session.get('email','')
+    content = """
+<h1 style='color:#10b981;text-align:center'>How To Start With Agent 35</h1>
+<div class='warn'>⚠️ Recommended Minimum: R1000 Total<br>R500 for Bot + R500 to Fund Trading Account</div>
+<p style='text-align:center;color:#94a3b8'>From broker to first signal in 10 minutes - 7 steps</p>
 
+<div class='step'>
+<div style='display:flex;align-items:center'><div class='step-num'>1</div><h3>Sign Up For A Broker</h3></div>
+<p style='color:#cbd5e1'>We recommend low-spread brokers tested with Agent 35:</p>
+<div class='broker-card'><div><b>Headway</b><br><span style='font-size:11px;color:#10b981'>Best for small accounts</span></div><a class='btn' style='width:auto;padding:8px 14px' href='https://headway.com' target='_blank'>Join</a></div>
+<div class='broker-card'><div><b>RCG Markets</b><br><span style='font-size:11px;color:#10b981'>ZAR local support</span></div><a class='btn' style='width:auto;padding:8px 14px' href='https://rcgmarkets.com' target='_blank'>Join</a></div>
+<div class='broker-card'><div><b>VT Markets</b><br><span style='font-size:11px;color:#10b981'>Gold & NAS100</span></div><a class='btn' style='width:auto;padding:8px 14px' href='https://vtmarkets.com' target='_blank'>Join</a></div>
+</div>
+
+<div class='step'>
+<div style='display:flex;align-items:center'><div class='step-num'>2</div><h3>Fund Your Trading Account</h3></div>
+<p><b>Minimum R500 in broker</b> (so R1000 total with bot). Deposit via EFT or Crypto. Use Standard account, leverage 1:500.</p>
+</div>
+
+<div class='step'>
+<div style='display:flex;align-items:center'><div class='step-num'>3</div><h3>Create Agent 35 Profile</h3></div>
+<p>Enter email + password on home page -> Ref auto-generated e.g. AG35-0829-AB12. Save it, it's your payment reference.</p>
+<a class='btn-outline' href='/'>Create Profile Now</a>
+</div>
+
+<div class='step'>
+<div style='display:flex;align-items:center'><div class='step-num'>4</div><h3>Pay For Preferred Plan</h3></div>
+<p>Go to Plans -> Choose Yearly R500 or Lifetime R5000 -> Pay with your Ref as reference -> Click I Paid. Admin approves in 10 min.</p>
+<a class='btn' href='/payment'>View Plans</a>
+</div>
+
+<div class='step'>
+<div style='display:flex;align-items:center'><div class='step-num'>5</div><h3>Link Telegram - Critical</h3></div>
+<p>1. Install Telegram<br>2. Dashboard -> Link TG -> Opens @Sniper035_bot<br>3. Press START -> Bot says Linked!<br>Test: Click Test with Reason button.</p>
+</div>
+
+<div class='step'>
+<div style='display:flex;align-items:center'><div class='step-num'>6</div><h3>Set Account Details & Pairs</h3></div>
+<p>Settings page:<br>• Size: 1000 • Currency: ZAR • Lot: 0.01 • RR: 1:3<br>• Sessions: Tick London + New York</p>
+<div style='background:#070d1a;padding:10px;border-radius:8px;font-size:12px;border:1px solid #1e2d45'>
+<b style='color:#10b981'>For accounts UNDER R1000 we recommend:</b><br>
+Pairs: EURUSD, XAUUSD only (max 2)<br>Sessions: London + New York only<br>Lot: 0.01 fixed<br>Why: Lower spread, lower risk, highest 6/8+ confluence
+</div>
+</div>
+
+<div class='step' style='border-left-color:#3b82f6'>
+<div style='display:flex;align-items:center'><div class='step-num' style='background:#3b82f6'>7</div><h3>Wait For Signals & Mark Taken</h3></div>
+<p>Bot scans every 15 min (your sessions only, red news ±60m blocked).<br><br>
+Telegram: 🚀 XAUUSD BUY | HIGH 🔥 7/8<br>Entry/SL/TP + Reason + Score<br><br>
+<b>Click:</b> ✅ TOOK or ❌ SKIP → Active → Close as ✅ WIN / ❌ LOSS / ➖ BE<br>Auto-saved to Journal.</p>
+</div>
+
+<div class='card' style='text-align:center'>
+<h3 style='color:#10b981'>Ready to Start?</h3>
+<a class='btn' href='/dashboard'>Go To Dashboard</a>
+<p style='font-size:11px;color:#64748b;margin-top:10px'>Support: Telegram @Sniper035_bot<br>Not financial advice - Trade responsibly</p>
+</div>
+"""
+    return layout(content, email, "guide")
 @app.route('/auth', methods=['POST'])
 def auth():
     email = request.form['email'].lower().strip()
