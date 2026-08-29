@@ -1,0 +1,9 @@
+services:
+    - type: web
+    name: agent-35-trading-bot
+    env: python
+    buildCommand: pip install -r requirements.txt
+    startCommand: gunicorn app:app
+    envVars:
+            - key: PYTHON_VERSION
+        value: 3.11.10
