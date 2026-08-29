@@ -38,21 +38,31 @@ init_db()
 
 LOGO_SVG = """<svg width="38" height="38" viewBox="0 0 100 100" xmlns="http://www.w3.org/2000/svg"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#059669"/></linearGradient></defs><rect width="100" height="100" rx="18" fill="#0b111c" stroke="#10b981" stroke-width="3"/><text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" font-family="Arial Black" font-weight="900" font-size="48" fill="url(#g)">35</text><circle cx="78" cy="22" r="4" fill="#10b981"/></svg>"""
 CUR = {'USD':'$','ZAR':'R','EUR':'€','GBP':'£'}
-MAP = {"EURUSD":"EURUSD=X","XAUUSD":"GC=F","BTCUSD":"BTC-USD","GBPUSD":"GBPUSD=X","NAS100":"^NDX","USDJPY":"JPY=X","GBPJPY":"GBPJPY=X","AUDUSD":"AUDUSD=X","US30":"^DJI","GER40":"^GDAXI"}
+
+# FULL 60 SYMBOL MAP
+MAP = {
+    "EURUSD":"EURUSD=X", "GBPUSD":"GBPUSD=X", "USDJPY":"JPY=X", "AUDUSD":"AUDUSD=X", "USDCAD":"CAD=X", "USDCHF":"CHF=X", "NZDUSD":"NZDUSD=X",
+    "EURGBP":"EURGBP=X", "EURJPY":"EURJPY=X", "GBPJPY":"GBPJPY=X", "AUDJPY":"AUDJPY=X", "EURAUD":"EURAUD=X", "GBPAUD":"GBPAUD=X", "EURCAD":"EURCAD=X", "GBPCAD":"GBPCAD=X", "CADJPY":"CADJPY=X", "CHFJPY":"CHFJPY=X", "AUDCAD":"AUDCAD=X",
+    "USDZAR":"ZAR=X", "EURZAR":"EURZAR=X", "GBPZAR":"GBPZAR=X", "USDTRY":"TRY=X", "USDMXN":"MXN=X",
+    "XAUUSD":"GC=F", "GOLD":"GC=F", "XAGUSD":"SI=F", "SILVER":"SI=F", "USOIL":"CL=F", "WTI":"CL=F", "UKOIL":"BZ=F", "BRENT":"BZ=F", "NATGAS":"NG=F", "COPPER":"HG=F",
+    "BTCUSD":"BTC-USD", "ETHUSD":"ETH-USD", "SOLUSD":"SOL-USD", "XRPUSD":"XRP-USD", "BNBUSD":"BNB-USD", "DOGEUSD":"DOGE-USD", "ADAUSD":"ADA-USD",
+    "NAS100":"^NDX", "NASDAQ":"^NDX", "US30":"^DJI", "DOW":"^DJI", "SPX500":"^GSPC", "SP500":"^GSPC", "US2000":"^RUT", "VIX":"^VIX",
+    "GER40":"^GDAXI", "DAX":"^GDAXI", "UK100":"^FTSE", "FTSE":"^FTSE", "FRA40":"^FCHI", "EU50":"^STOXX50E", "JP225":"^N225", "NIKKEI":"^N225", "HK50":"^HSI", "AUS200":"^AXJO",
+    "AAPL":"AAPL", "TSLA":"TSLA", "NVDA":"NVDA", "MSFT":"MSFT", "META":"META", "GOOGL":"GOOGL", "AMZN":"AMZN"
+}
 
 def get_live_price(symbol):
     try:
-        yfs = MAP.get(symbol, "EURUSD=X")
+        yfs = MAP.get(symbol.upper(), f"{symbol.upper()}=X")
         df = yf.download(yfs, period="1d", interval="5m", progress=False, auto_adjust=True)
         if df.empty: return None
-        if isinstance(df.columns, yf.data.MultiIndex if hasattr(yf,'data') else type(df.columns)) or hasattr(df.columns,'get_level_values'):
-            try: df.columns = df.columns.get_level_values(0)
-            except: pass
+        try: df.columns = df.columns.get_level_values(0)
+        except: pass
         return float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
     except: return None
 
 def auto_update_trades():
-    print("🔄 Auto-Update Worker Started - checking every 5 min")
+    print("🔄 Auto-Update Worker Started")
     while True:
         try:
             conn = get_conn(); cur = conn.cursor()
@@ -63,47 +73,27 @@ def auto_update_trades():
                 if not live: continue
                 close, high, low = live
                 entry, sl, tp, direction = tr['entry'], tr['sl'], tr['tp'], tr['direction']
-                status = tr['status']; new_status = status; pnl = tr['pnl']; closed = False
-
-                # 1. Check if entry hit
+                status = tr['status']; new_status = status; pnl = tr['pnl']; closed=False
                 if status == 'sent':
                     if low <= entry <= high:
-                        new_status = 'took'; cur.execute("UPDATE agent35_trades SET status=%s, hit_entry_at=NOW() WHERE id=%s", (new_status, tr['id']))
-                        conn.commit()
-                        # notify
-                        if tr['telegram_id'] and TELEGRAM_TOKEN:
-                            try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id":tr['telegram_id'],"text":f"▶️ {tr['symbol']} {direction} ACTIVE\nEntry {entry} hit!\nSL {sl} TP {tp}"}, timeout=5)
-                            except: pass
-                        continue
-
-                # 2. If active, check SL/TP
+                        new_status='took'; cur.execute("UPDATE agent35_trades SET status=%s, hit_entry_at=NOW() WHERE id=%s", (new_status, tr['id'])); conn.commit(); continue
                 if new_status in ('took','active'):
-                    rr_val = 3
-                    try: rr_val = int(tr['risk_reward'].split(':')[1])
+                    rr_val=3
+                    try: rr_val=int(tr['risk_reward'].split(':')[1])
                     except: pass
-                    risk_amt = tr['account_size'] * 0.01 # 1% risk
-                    if direction == 'BUY':
-                        if low <= sl: new_status='loss'; pnl = -risk_amt; closed=True
-                        elif high >= tp: new_status='win'; pnl = risk_amt*rr_val; closed=True
-                    else: # SELL
-                        if high >= sl: new_status='loss'; pnl = -risk_amt; closed=True
-                        elif low <= tp: new_status='win'; pnl = risk_amt*rr_val; closed=True
-
+                    risk_amt = tr['account_size']*0.01
+                    if direction=='BUY':
+                        if low <= sl: new_status='loss'; pnl=-risk_amt; closed=True
+                        elif high >= tp: new_status='win'; pnl=risk_amt*rr_val; closed=True
+                    else:
+                        if high >= sl: new_status='loss'; pnl=-risk_amt; closed=True
+                        elif low <= tp: new_status='win'; pnl=risk_amt*rr_val; closed=True
                     if closed:
-                        cur.execute("UPDATE agent35_trades SET status=%s, pnl=%s, closed_at=NOW(), result_price=%s, auto_updated=TRUE WHERE id=%s", (new_status, pnl, close, tr['id']))
-                        conn.commit()
-                        if tr['telegram_id'] and TELEGRAM_TOKEN:
-                            emoji = "✅ WIN" if new_status=='win' else "❌ LOSS"
-                            txt = f"{emoji} {tr['symbol']} {direction}\nResult: {CUR.get(tr['currency'],'$')}{round(pnl,2)}\nEntry {entry} -> Closed {close}\nRR 1:{rr_val}"
-                            try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id":tr['telegram_id'],"text":txt}, timeout=5)
-                            except: pass
-                        print(f"Updated trade {tr['id']} {tr['symbol']} {new_status} PNL {pnl}")
+                        cur.execute("UPDATE agent35_trades SET status=%s, pnl=%s, closed_at=NOW(), result_price=%s, auto_updated=TRUE WHERE id=%s", (new_status,pnl,close,tr['id'])); conn.commit()
             cur.close(); conn.close()
-        except Exception as e:
-            print(f"Auto-update error: {e}")
-        time.sleep(300) # 5 minutes
+        except Exception as e: print(f"Auto-update error: {e}")
+        time.sleep(300)
 
-# Start background thread
 threading.Thread(target=auto_update_trades, daemon=True).start()
 
 STYLE = """
@@ -119,26 +109,31 @@ body{background:#05080f;color:#e5e7eb;font-family:'Inter',sans-serif;margin:0}
 .badge{padding:4px 10px;border-radius:20px;font-size:11px;font-weight:800}
 .bull{background:rgba(16,185,129,0.12);color:#10b981;border:1px solid rgba(16,185,129,0.3)}
 .bear{background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.3)}
-.win{background:rgba(16,185,129,0.2);color:#10b981}
-.loss{background:rgba(239,68,68,0.2);color:#ef4444}
+.win{background:rgba(16,185,129,0.2);color:#10b981}.loss{background:rgba(239,68,68,0.2);color:#ef4444}
 .chip{display:inline-flex;align-items:center;gap:6px;background:#111a2a;border:1px solid #1e2d45;padding:6px 10px;border-radius:20px;margin:4px;font-size:13px;cursor:pointer}
-.chip b{color:#10b981}
-.chip.x{background:#ef4444;color:#fff;border-radius:50%;width:18px;height:18px;display:inline-flex;justify-content:center;align-items:center;font-size:11px}
+.chip b{color:#10b981}.x{background:#ef4444;color:#fff;border-radius:50%;width:18px;height:18px;display:inline-flex;justify-content:center;align-items:center;font-size:11px}
 table{width:100%;border-collapse:collapse} th{color:#6b7280;text-align:left;padding:12px;font-size:11px;text-transform:uppercase} td{padding:10px;border-top:1px solid #1a2535;font-size:13px}
+.searchbox{background:#05080f;border:1px solid #10b981;color:#fff;padding:12px;border-radius:10px;width:100%;margin:6px 0}
+.dropdown{background:#111a2a;border:1px solid #1e2d45;border-radius:10px;max-height:160px;overflow:auto;margin-top:4px;display:none}
+.dropdown div{padding:8px 12px;cursor:pointer;border-bottom:1px solid #1a2535;font-size:13px}
+.dropdown div:hover{background:#1a2535;color:#10b981}
 a{color:#10b981}
 </style>
 <script>
-function addSym(s){let i=document.getElementById('symInput');let v=i.value;let arr=v?v.split(','):[];if(arr.length>=5){alert('Max 5 symbols');return}if(!arr.includes(s)){arr.push(s);i.value=arr.join(',');document.getElementById('symForm').submit()}}
-function removeSym(s){let i=document.getElementById('symInput');let arr=i.value.split(',').filter(x=>x.trim()!=s.trim());i.value=arr.join(',');document.getElementById('symForm').submit()}
+const ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","AUDUSD","USDCAD","USDCHF","NZDUSD","EURGBP","EURJPY","GBPJPY","AUDJPY","EURAUD","GBPAUD","EURCAD","GBPCAD","CADJPY","CHFJPY","USDZAR","EURZAR","GBPZAR","XAUUSD","GOLD","XAGUSD","SILVER","USOIL","WTI","UKOIL","BRENT","NATGAS","COPPER","BTCUSD","ETHUSD","SOLUSD","XRPUSD","BNBUSD","DOGEUSD","NAS100","US30","SPX500","SP500","US2000","GER40","DAX","UK100","FTSE","FRA40","JP225","NIKKEI","HK50","AAPL","TSLA","NVDA","MSFT","META","GOOGL","AMZN"];
+function addSym(s){let i=document.getElementById('symInput');let v=i.value;let arr=v?v.split(',').filter(x=>x.trim()!=''):[];if(arr.length>=5){alert('Max 5 symbols - upgrade for more');return}if(!arr.includes(s)){arr.push(s);i.value=arr.join(',');document.getElementById('symForm').submit()}}
+function removeSym(s){let i=document.getElementById('symInput');let arr=i.value.split(',').filter(x=>x.trim()!=s.trim() && x.trim()!='');i.value=arr.join(',');document.getElementById('symForm').submit()}
+function filterSyms(){let q=document.getElementById('symSearch').value.toUpperCase();let dd=document.getElementById('symDropdown');if(!q){dd.style.display='none';return}let filtered=ALL_SYMBOLS.filter(s=>s.includes(q)).slice(0,10);if(filtered.length==0){dd.style.display='none';return}dd.innerHTML=filtered.map(s=>`<div onclick="addSym('${s}')">${s} - Click to add</div>`).join('');dd.style.display='block'}
+function hideDD(){setTimeout(()=>{document.getElementById('symDropdown').style.display='none'},200)}
 </script>
 """
 
 def layout(content, email=""):
-    return f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{STYLE}</head><body><div class='header'><div class='logo'>{LOGO_SVG} AGENT 35 <span style='font-size:10px;background:#10b981;color:#000;padding:2px 6px;border-radius:10px;margin-left:8px'>V4 AUTO</span></div><div style='display:flex;gap:12px;align-items:center'><span style='font-size:11px;color:#9ca3af'>{email}</span><a href='/logout' class='btn-outline'>Logout</a></div></div><div style='padding:20px;max-width:1250px;margin:auto'>{content}</div></body></html>"
+    return f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{STYLE}</head><body><div class='header'><div class='logo'>{LOGO_SVG} AGENT 35 <span style='font-size:10px;background:#10b981;color:#000;padding:2px 6px;border-radius:10px;margin-left:8px'>60 SYMBOLS</span></div><div style='display:flex;gap:12px;align-items:center'><span style='font-size:11px;color:#9ca3af'>{email}</span><a href='/logout' class='btn-outline'>Logout</a></div></div><div style='padding:20px;max-width:1250px;margin:auto'>{content}</div></body></html>"
 
 @app.route('/')
 def home():
-    return f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{STYLE}</head><body style='display:flex;justify-content:center;align-items:center;height:100vh'><div class='card' style='width:380px;text-align:center;padding:32px'><div style='display:flex;justify-content:center;margin-bottom:12px'>{LOGO_SVG.replace('38','80')}</div><h1 style='color:#10b981;margin:0'>AGENT 35</h1><p style='color:#9ca3af;margin-top:4px'>V4 Auto-Tracking</p><form method='POST' action='/auth' style='margin-top:20px;text-align:left'><input name='email' placeholder='Email' value='test@agent35.com' required><input name='password' type='password' placeholder='Password' value='Test123!' required><button class='btn' style='width:100%;margin-top:12px'>LOGIN</button></form></div></body></html>"
+    return f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{STYLE}</head><body style='display:flex;justify-content:center;align-items:center;height:100vh'><div class='card' style='width:380px;text-align:center;padding:32px'><div style='display:flex;justify-content:center;margin-bottom:12px'>{LOGO_SVG.replace('38','80')}</div><h1 style='color:#10b981;margin:0'>AGENT 35</h1><p style='color:#9ca3af;margin-top:4px'>V4.2 - 60 Symbols Auto</p><form method='POST' action='/auth' style='margin-top:20px;text-align:left'><input name='email' placeholder='Email' value='test@agent35.com' required><input name='password' type='password' placeholder='Password' value='Test123!' required><button class='btn' style='width:100%;margin-top:12px'>LOGIN</button></form></div></body></html>"
 
 @app.route('/auth', methods=['POST'])
 def auth():
@@ -154,16 +149,17 @@ def dashboard():
     cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s ORDER BY created_at DESC LIMIT 30", (session['email'],)); trades=cur.fetchall(); cur.close(); conn.close()
     pnl = sum([t['pnl'] for t in trades]); winrate = len([t for t in trades if t['pnl']>0])/len([t for t in trades if t['status'] in ('win','loss')])*100 if [t for t in trades if t['status'] in ('win','loss')] else 0
     took = len([t for t in trades if t['status']!='sent']); curr_sym = CUR.get(user['currency'],'$'); last_scan = user['last_scan_at'].strftime('%Y-%m-%d %H:%M') if user['last_scan_at'] else 'Never'; tg_status = f"✅ @{user['telegram_username']}" if user['telegram_username'] else "❌ Not linked"
-    syms = [s for s in (user['symbols'] or '').split(',') if s.strip()]; chips = "".join([f"<span class='chip'><b>{s}</b> <span class='x' onclick=\"removeSym('{s}')\">x</span></span>" for s in syms])
-    popular = ["EURUSD","GBPUSD","XAUUSD","BTCUSD","NAS100","USDJPY","GBPJPY","AUDUSD","US30","GER40"]; popular_btns = "".join([f"<span class='chip' onclick=\"addSym('{s}')\">+ {s}</span>" for s in popular if s not in syms])
+    syms = [s for s in (user['symbols'] or '').split(',') if s.strip()]; chips = "".join([f"<span class='chip'><b>{s}</b> <span class='x' style='margin-left:6px;background:#ef4444;color:#fff;border-radius:50%;width:18px;height:18px;display:inline-flex;justify-content:center;align-items:center;font-size:11px;cursor:pointer' onclick=\"removeSym('{s}')\">x</span></span>" for s in syms])
+    popular = ["EURUSD","GBPUSD","XAUUSD","BTCUSD","NAS100","USDJPY","GBPJPY","US30","USDZAR","GER40","ETHUSD","USOIL","AUDUSD","SPX500","AAPL","TSLA"]
+    popular_btns = "".join([f"<span class='chip' onclick=\"addSym('{s}')\">+ {s}</span>" for s in popular if s not in syms])
     content = f"""
     <div class='grid4'>
-      <div class='card'><div style='color:#9ca3af;font-size:11px'>TOTAL PNL ({user['currency']}) - AUTO</div><div style='font-size:24px;font-weight:800;margin-top:6px'>{curr_sym}{round(pnl,2)} <span class='badge {"bull" if pnl>=0 else "bear"}'>{round(winrate,1)}% WR</span></div><div style='font-size:12px;color:#6b7280;margin-top:6px'>{took} trades taken • Last: {last_scan}</div><div style='font-size:11px;color:#10b981;margin-top:8px'>🤖 Auto-updates every 5 min</div><div style='font-size:11px;color:#9ca3af'>{user['last_scan_summary'] or 'Hit SCAN'}</div></div>
-      <div class='card'><div style='color:#9ca3af;font-size:11px'>ACCOUNT ({user['currency']})</div><div style='font-size:18px;font-weight:700;margin-top:6px'>{curr_sym}{user['account_size']} | Lot {user['lot_size']}</div><div style='font-size:12px;color:#6b7280'>{user['leverage']} | RR {user['risk_reward']} | {user['currency']}</div><div style='font-size:11px;color:#9ca3af;margin-top:6px'>Risk: 1% per trade = {curr_sym}{round(user['account_size']*0.01,2)}</div><a href='/settings' class='btn-outline' style='display:block;margin-top:10px;font-size:12px;text-align:center'>Edit Currency / Account</a></div>
-      <div class='card'><div style='color:#9ca3af;font-size:11px'>WATCHLIST (5 MAX)</div><div style='margin-top:10px'>{chips or 'No symbols'}</div><form id='symForm' method='POST' action='/quick-symbols'><input type='hidden' name='symbols' id='symInput' value="{user['symbols']}"></form><div style='margin-top:10px'><div style='font-size:11px;color:#6b7280'>Quick Add:</div>{popular_btns}</div></div>
-      <div class='card'><div style='color:#9ca3af;font-size:11px'>ACTIONS & TELEGRAM</div><div style='margin-top:10px;display:grid;gap:8px'><a class='btn' href='/scan'>🔍 SCAN MARKET</a><a class='btn-outline' href='/cron/update-trades'>🔄 Force Update Trades</a><a class='btn-outline' href='https://t.me/{TELEGRAM_BOT_USERNAME}?start={session['email']}' target='_blank' style='border-color:#10b981;color:#10b981'>📲 {tg_status} - Link Telegram</a></div><div style='font-size:11px;color:#6b7280;margin-top:8px'>Sessions: {user['sessions']}</div></div>
+      <div class='card'><div style='color:#9ca3af;font-size:11px'>TOTAL PNL ({user['currency']}) AUTO</div><div style='font-size:24px;font-weight:800;margin-top:6px'>{curr_sym}{round(pnl,2)} <span class='badge {"bull" if pnl>=0 else "bear"}'>{round(winrate,1)}% WR</span></div><div style='font-size:12px;color:#6b7280;margin-top:6px'>{took} taken • Last: {last_scan}</div><div style='font-size:11px;color:#10b981;margin-top:8px'>🤖 Auto every 5 min</div><div style='font-size:11px;color:#9ca3af'>{user['last_scan_summary'] or ''}</div></div>
+      <div class='card'><div style='color:#9ca3af;font-size:11px'>ACCOUNT ({user['currency']})</div><div style='font-size:18px;font-weight:700;margin-top:6px'>{curr_sym}{user['account_size']} | Lot {user['lot_size']}</div><div style='font-size:12px;color:#6b7280'>{user['leverage']} | RR {user['risk_reward']}</div><div style='font-size:11px;color:#9ca3af;margin-top:6px'>1% Risk = {curr_sym}{round(user['account_size']*0.01,2)}</div><a href='/settings' class='btn-outline' style='display:block;margin-top:10px;font-size:12px;text-align:center'>Edit</a></div>
+      <div class='card' style='position:relative'><div style='color:#9ca3af;font-size:11px'>WATCHLIST (5 MAX) - SEARCH & ADD</div><div style='margin-top:10px'>{chips or 'No symbols'}</div><form id='symForm' method='POST' action='/quick-symbols'><input type='hidden' name='symbols' id='symInput' value="{user['symbols']}"></form><input id='symSearch' class='searchbox' placeholder='🔍 Search 60 symbols e.g. ZAR, OIL, BTC...' oninput='filterSyms()' onblur='hideDD()' onfocus='filterSyms()' autocomplete='off'><div id='symDropdown' class='dropdown'></div><div style='margin-top:10px'><div style='font-size:11px;color:#6b7280'>Quick Add:</div>{popular_btns}</div></div>
+      <div class='card'><div style='color:#9ca3af;font-size:11px'>ACTIONS & TELEGRAM</div><div style='margin-top:10px;display:grid;gap:8px'><a class='btn' href='/scan'>🔍 SCAN MARKET</a><a class='btn-outline' href='/cron/update-trades'>🔄 Force Update</a><a class='btn-outline' href='https://t.me/{TELEGRAM_BOT_USERNAME}?start={session['email']}' target='_blank' style='border-color:#10b981;color:#10b981'>📲 {tg_status}</a></div></div>
     </div>
-    <div class='card'><h3 style='margin:0 0 12px 0;color:#10b981'>Trading Journal - AUTO TRACKED (Updates every 5 min)</h3><table><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>Entry/SL/TP</th><th>Status</th><th>PNL ({user['currency']})</th><th>Confluence</th></tr>{''.join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}<br><span style='font-size:10px;color:#6b7280'>{(t['closed_at'].strftime('%H:%M')+' closed') if t['closed_at'] else (t['hit_entry_at'].strftime('%H:%M')+' active') if t['hit_entry_at'] else 'waiting'}</span></td><td><b>{t['symbol']}</b></td><td><span class='badge { 'bull' if t['direction']=='BUY' else 'bear'}'>{t['direction']}</span></td><td style='font-size:11px'>{round(t['entry'],5)}<br>SL {round(t['sl'],5)}<br>TP {round(t['tp'],5)}</td><td><span class='badge { 'win' if t['status']=='win' else 'loss' if t['status']=='loss' else 'bull' if t['status']=='took' else ''}'>{t['status'].upper()}</span>{'<br><span style=font-size:10px>🤖 auto</span>' if t['auto_updated'] else ''}</td><td style='font-weight:800;color:{'#10b981' if t['pnl']>0 else '#ef4444' if t['pnl']<0 else '#9ca3af'}'>{curr_sym}{round(t['pnl'],2)}</td><td style='font-size:10px'>{t['confluence'][:70]}</td></tr>" for t in trades]) or '<tr><td colspan=7 style=text-align:center;color:#6b7280>No trades yet</td></tr>'}</table></div>
+    <div class='card'><h3 style='margin:0 0 12px 0;color:#10b981'>Journal - Auto Tracked</h3><table><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>Entry/SL/TP</th><th>Status</th><th>PNL</th></tr>{''.join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}<br><span style='font-size:10px;color:#6b7280'>{(t['closed_at'].strftime('%H:%M')+' closed') if t['closed_at'] else (t['hit_entry_at'].strftime('%H:%M')+' active') if t['hit_entry_at'] else 'waiting'}</span></td><td><b>{t['symbol']}</b></td><td><span class='badge { 'bull' if t['direction']=='BUY' else 'bear'}'>{t['direction']}</span></td><td style='font-size:11px'>{round(t['entry'],4)}<br>SL {round(t['sl'],4)}<br>TP {round(t['tp'],4)}</td><td><span class='badge { 'win' if t['status']=='win' else 'loss' if t['status']=='loss' else 'bull' if t['status']=='took' else ''}'>{t['status'].upper()}</span>{'<br><span style=font-size:10px>🤖</span>' if t['auto_updated'] else ''}</td><td style='font-weight:800;color:{'#10b981' if t['pnl']>0 else '#ef4444' if t['pnl']<0 else '#9ca3af'}'>{curr_sym}{round(t['pnl'],2)}</td></tr>" for t in trades]) or '<tr><td colspan=6 style=text-align:center;color:#6b7280>No trades</td></tr>'}</table></div>
     """
     return layout(content, session['email'])
 
@@ -191,16 +187,14 @@ def scan():
     html=""
     for r in results:
         if r.get('signal'): html+= f"<div class='card' style='border-left:4px solid #10b981;margin:10px 0'><b>{r['symbol']} {r['direction']} Score {r['score']}/8</b><br>Entry {r['entry']} SL {r['sl']} TP {r['tp']}<br><span style='font-size:12px'>{r['confluence']}</span></div>"
-        else: html+= f"<div class='card' style='opacity:0.6;margin:10px 0'><b>{r['symbol']} - No A+ Setup</b> Score {r.get('score',0)}/8</div>"
-    return layout(f"<h2>Scan {datetime.now().strftime('%H:%M:%S')} - Auto tracker will monitor</h2>{html}<br><a class='btn' href='/dashboard'>Back</a>", session['email'])
+        else: html+= f"<div class='card' style='opacity:0.6;margin:10px 0'><b>{r['symbol']} - No Setup</b></div>"
+    return layout(f"<h2>Scan {datetime.now().strftime('%H:%M:%S')}</h2>{html}<br><a class='btn' href='/dashboard'>Back</a>", session['email'])
 
 @app.route('/cron/update-trades')
 def cron_update():
-    # Manual trigger for auto-update
-    live_count=0
     try:
         conn=get_conn(); cur=conn.cursor()
-        cur.execute("SELECT t.*, u.account_size, u.lot_size, u.currency, u.risk_reward FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.status IN ('sent','took') LIMIT 20")
+        cur.execute("SELECT t.*, u.account_size, u.risk_reward FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.status IN ('sent','took') LIMIT 20")
         for tr in cur.fetchall():
             live = get_live_price(tr['symbol'])
             if not live: continue
@@ -220,7 +214,6 @@ def cron_update():
             if new_status and new_status!=tr['status']:
                 if new_status in ('win','loss'): cur.execute("UPDATE agent35_trades SET status=%s, pnl=%s, closed_at=NOW(), result_price=%s, auto_updated=TRUE WHERE id=%s", (new_status,pnl,close,tr['id']))
                 else: cur.execute("UPDATE agent35_trades SET status=%s, hit_entry_at=NOW() WHERE id=%s", (new_status,tr['id']))
-                live_count+=1
         conn.commit(); cur.close(); conn.close()
     except Exception as e: return jsonify({"error":str(e)})
     return redirect('/dashboard')
@@ -232,7 +225,9 @@ def settings():
         curr = request.form['currency']
         conn=get_conn(); cur=conn.cursor(); cur.execute("UPDATE agent35_users SET symbols=%s, sessions=%s, risk_reward=%s, account_size=%s, lot_size=%s, currency=%s, currency_symbol=%s, telegram_username=%s WHERE email=%s",(request.form['symbols'][:100], request.form['sessions'], request.form['rr'], float(request.form['acc']), float(request.form['lot']), curr, CUR.get(curr,'$'), request.form['tg'], session['email'])); conn.commit(); cur.close(); conn.close(); return redirect('/dashboard')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s",(session['email'],)); u=cur.fetchone(); cur.close(); conn.close()
-    return layout(f"<div class='card' style='max-width:650px'><h3>Settings - Currency & Easy Symbols</h3><form method='POST'><label>Currency</label><select name='currency'><option value='USD' {'selected' if u['currency']=='USD' else ''}>USD ($)</option><option value='ZAR' {'selected' if u['currency']=='ZAR' else ''}>ZAR (R)</option><option value='EUR' {'selected' if u['currency']=='EUR' else ''}>EUR (€)</option><option value='GBP' {'selected' if u['currency']=='GBP' else ''}>GBP (£)</option></select><label>Symbols</label><input name='symbols' value=\"{u['symbols']}\"><label>Sessions</label><input name='sessions' value=\"{u['sessions']}\"><label>RR</label><select name='rr'><option {'selected' if u['risk_reward']=='1:2' else ''}>1:2</option><option {'selected' if u['risk_reward']=='1:3' else ''}>1:3</option><option {'selected' if u['risk_reward']=='1:4' else ''}>1:4</option></select><label>Account Size (in your currency)</label><input name='acc' type='number' value=\"{u['account_size']}\"><label>Lot Size</label><input name='lot' type='number' step='0.01' value=\"{u['lot_size']}\"><label>Telegram @</label><input name='tg' value=\"{u['telegram_username'] or ''}\"><button class='btn' style='width:100%;margin-top:12px'>Save</button></form></div>", session['email'])
+    opts = "".join([f"<option value='{k}' {'selected' if u['currency']==k else ''}>{k} ({v})</option>" for k,v in CUR.items()])
+    all_opts = "".join([f"<option value='{s}'>" for s in sorted(MAP.keys())])
+    return layout(f"<div class='card' style='max-width:650px'><h3>Settings - 60 Symbols Available</h3><form method='POST'><label>Currency</label><select name='currency'>{opts}</select><label>Symbols (searchable)</label><input list='allSymbols' name='symbols' value=\"{u['symbols']}\" placeholder='Type to search 60 symbols'><datalist id='allSymbols'>{all_opts}</datalist><div style='font-size:11px;color:#6b7280;margin-bottom:8px'>Available: {', '.join(sorted(MAP.keys())[:20])} + {len(MAP)-20} more</div><label>Sessions</label><input name='sessions' value=\"{u['sessions']}\"><label>RR</label><select name='rr'><option {'selected' if u['risk_reward']=='1:2' else ''}>1:2</option><option {'selected' if u['risk_reward']=='1:3' else ''}>1:3</option><option {'selected' if u['risk_reward']=='1:4' else ''}>1:4</option></select><label>Account Size</label><input name='acc' type='number' value=\"{u['account_size']}\"><label>Lot Size</label><input name='lot' type='number' step='0.01' value=\"{u['lot_size']}\"><label>Telegram @</label><input name='tg' value=\"{u['telegram_username'] or ''}\"><button class='btn' style='width:100%;margin-top:12px'>Save</button></form></div>", session['email'])
 
 @app.route('/master')
 def master():
@@ -242,9 +237,9 @@ def master():
     for u in users:
         cur.execute("SELECT COALESCE(SUM(pnl),0) as s, COUNT(*) as c FROM agent35_trades WHERE user_email=%s", (u['email'],)); r=cur.fetchone(); pnl_map[u['email']] = (r['s'], r['c'])
     cur.close(); conn.close()
-    users_html="".join([f"<tr><td>{u['email']}<br><span style='font-size:10px;color:#6b7280'>@{u['telegram_username'] or 'no TG'} | {u['telegram_id'] or ''}</span></td><td>{u['plan']}<br>{u['payment_status']}</td><td style='font-weight:800;color:{'#10b981' if pnl_map.get(u['email'],(0,0))[0]>=0 else '#ef4444'}'>{CUR.get(u['currency'],'$')}{round(pnl_map.get(u['email'],(0,0))[0],2)}<br><span style='font-size:10px;font-weight:400'>{pnl_map.get(u['email'],(0,0))[1]} trades</span></td><td>{u['created_at'].strftime('%Y-%m-%d')}<br><span style='font-size:10px'>Joined</span></td><td>{u['paid_at'].strftime('%Y-%m-%d %H:%M') if u['paid_at'] else 'Not paid'}<br><span style='font-size:10px'>{u['payment_ref'] or ''}</span></td><td>{u['last_scan_at'].strftime('%m-%d %H:%M') if u['last_scan_at'] else 'Never'}<br><span style='font-size:10px'>{u['last_scan_summary'] or ''}</span></td></tr>" for u in users])
-    pays_html="".join([f"<div class='card' style='margin:8px 0;display:flex;justify-content:space-between'><span>{p['user_email']} - R{p['amount']} - {p['plan']} - {p['ref_code']} - {p['created_at'].strftime('%Y-%m-%d %H:%M')}</span><a class='btn' href='/approve/{p['id']}'>Approve</a></div>" for p in pays])
-    return layout(f"<h1 style='color:#10b981'>MASTER - Joined | Paid | PNL | TG | Last Scan</h1><div class='grid4'><div class='card'>Users: {len(users)}</div><div class='card'>Total PNL: {CUR.get('USD','$')}{round(sum([v[0] for v in pnl_map.values()]),2)}</div><div class='card'>Capitec: {CAPITEC_ACC}</div><div class='card'><a class='btn' href='/cron/update-trades'>🔄 Update All Trades Now</a></div></div><div class='card'><h3>Payments with Date Paid</h3>{pays_html or 'None'}</div><div class='card' style='margin-top:14px;overflow:auto'><table><tr><th>User / TG ID</th><th>Plan</th><th>PNL / Count</th><th>Date Joined</th><th>Date Paid</th><th>Last Scan</th></tr>{users_html}</table></div>", session['email'])
+    users_html="".join([f"<tr><td>{u['email']}<br><span style='font-size:10px;color:#6b7280'>@{u['telegram_username'] or 'no TG'}</span></td><td>{u['plan']}<br>{u['payment_status']}</td><td style='font-weight:800;color:{'#10b981' if pnl_map.get(u['email'],(0,0))[0]>=0 else '#ef4444'}'>{CUR.get(u['currency'],'$')}{round(pnl_map.get(u['email'],(0,0))[0],2)}<br><span style='font-size:10px'>{pnl_map.get(u['email'],(0,0))[1]} trades</span></td><td>{u['created_at'].strftime('%Y-%m-%d')}<br><span style='font-size:10px'>Joined</span></td><td>{u['paid_at'].strftime('%Y-%m-%d %H:%M') if u['paid_at'] else 'Not paid'}<br><span style='font-size:10px'>{u['payment_ref'] or ''}</span></td><td>{u['last_scan_at'].strftime('%m-%d %H:%M') if u['last_scan_at'] else 'Never'}</td></tr>" for u in users])
+    pays_html="".join([f"<div class='card' style='margin:8px 0;display:flex;justify-content:space-between'><span>{p['user_email']} - R{p['amount']} - {p['plan']} - {p['ref_code']}</span><a class='btn' href='/approve/{p['id']}'>Approve</a></div>" for p in pays])
+    return layout(f"<h1 style='color:#10b981'>MASTER - 60 SYMBOLS + PNL</h1><div class='grid4'><div class='card'>Users: {len(users)}</div><div class='card'>Total PNL: ${round(sum([v[0] for v in pnl_map.values()]),2)}</div><div class='card'>Symbols: {len(MAP)} available</div><div class='card'><a class='btn' href='/cron/update-trades'>Update All</a></div></div><div class='card'><h3>Payments</h3>{pays_html or 'None'}</div><div class='card' style='margin-top:14px;overflow:auto'><table><tr><th>User</th><th>Plan</th><th>PNL</th><th>Joined</th><th>Paid</th><th>Scan</th></tr>{users_html}</table></div>", session['email'])
 
 @app.route('/payment')
 def payment_page():
@@ -274,12 +269,12 @@ def tg_webhook():
             email = text.split('/start ')[-1].strip() if '/start' in text else None
             if email and '@' in email:
                 conn=get_conn(); cur=conn.cursor(); cur.execute("UPDATE agent35_users SET telegram_id=%s, telegram_username=%s WHERE email=%s", (str(chat_id), username, email.lower())); conn.commit(); cur.close(); conn.close()
-                if TELEGRAM_TOKEN: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id":chat_id,"text":f"✅ Agent 35 V4 linked to {email}! Auto-tracking active."})
+                if TELEGRAM_TOKEN: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id":chat_id,"text":f"✅ Agent 35 V4.2 linked! 60 symbols ready."})
     except Exception as e: print(e)
     return jsonify({"ok":True})
 
 @app.route('/healthz')
-def health(): return jsonify({"status":"ok","bot":"Agent35 V4 Auto"})
+def health(): return jsonify({"status":"ok","bot":"Agent35 V4.2 60 Symbols"})
 
 @app.route('/logout')
 def logout(): session.clear(); return redirect('/')
