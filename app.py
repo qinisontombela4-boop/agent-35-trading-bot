@@ -76,5 +76,76 @@ def dashboard():
     if 'email' not in session: return redirect('/')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); user=cur.fetchone()
     cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s ORDER BY created_at DESC LIMIT 25", (session['email'],)); trades=cur.fetchall(); cur.close(); conn.close()
-    pnl = sum([t['pnl'] for t in trades]); winrate = len([t for t in trades if t['pnl']>0])/len(trades)*100 if trades else 0; took = len([t for t in trades if t['status']=='took'])
-    content = f"""<div class='grid4'><div class='card
+    pnl = sum([t['pnl'] for t in trades]); winrate = len([t for t in trades if t['pnl']>0])/len(trades)*100 if trades else 0; took = len([t for t in
+         trades if t['status']=='took'])
+    content = f"""<div class='grid4'><div class='card'><div style='color:#9ca3af;font-size:12px'>TOTAL PNL</div><div style='font-size:22px;font-weight:800;margin-top:6px'>${round(pnl,2)} <span class='badge bull'>{round(winrate,1)}% WR</span></div><div style='font-size:12px;color:#6b7280;margin-top:6px'>{took} trades taken</div></div><div class='card'><div style='color:#9ca3af;font-size:12px'>ACCOUNT</div><div style='font-size:16px;font-weight:700;margin-top:6px'>${user['account_size']} | Lot {user['lot_size']}</div><div style='font-size:12px;color:#6b7280'>{user['leverage']} | RR {user['risk_reward']}</div></div><div class='card'><div style='color:#9ca3af;font-size:12px'>WATCHLIST (5 MAX)</div><div style='margin-top:8px'>{user['symbols']}</div><a href='/settings' style='font-size:12px'>Edit Symbols / Sessions</a></div><div class='card'><div style='color:#9ca3af;font-size:12px'>ACTIONS</div><div style='margin-top:10px;display:flex;gap:8px'><a class='btn' href='/scan'>🔍 SCAN MARKET</a><a class='btn-outline' href='/payment'>💳 Pay</a></div><div style='font-size:11px;color:#6b7280;margin-top:8px'>Sessions: {user['sessions']}</div></div></div><div class='card'><h3 style='margin:0 0 12px 0;color:#10b981'>Trading Journal - Auto Tracked from Telegram</h3><table><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>Entry/SL/TP</th><th>Confluence</th><th>Status</th><th>PNL</th></tr>{''.join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td><b>{t['symbol']}</b></td><td><span class='badge { 'bull' if t['direction']=='BUY' else 'bear'}'>{t['direction']}</span></td><td>{t['entry']} / {t['sl']} / {t['tp']}</td><td style='font-size:11px'>{t['confluence'][:80]}</td><td>{t['status']}</td><td>{t['pnl']}</td></tr>" for t in trades])}</table></div>"""
+    return layout(content, session['email'])
+
+@app.route('/scan')
+def scan():
+    if 'email' not in session: return redirect('/')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT symbols FROM agent35_users WHERE email=%s",(session['email'],)); row=cur.fetchone()
+    symbols = (row['symbols'] if row else "EURUSD").split(",")[:5]; results=[]
+    for sym in symbols:
+        sym=sym.strip().upper()
+        if not sym: continue
+        try: res = engine.full_multi_tf_analysis(sym)
+        except Exception as e: res={"signal":False,"symbol":sym,"reason":str(e)}
+        res['symbol']=sym; results.append(res)
+        if res.get('signal'):
+            cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,timeframe_bias,confluence) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",(session['email'],res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['bias'],res['confluence']))
+            if TELEGRAM_TOKEN and TELEGRAM_CHAT:
+                text = f"🎯 AGENT 35 {res['score']}/8\n{res['symbol']} {res['direction']}\nEntry {res['entry']} SL {res['sl']} TP {res['tp']}\n{res['confluence']}"
+                try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id":TELEGRAM_CHAT,"text":text}, timeout=5)
+                except: pass
+    conn.commit(); cur.close(); conn.close()
+    html_results=""
+    for r in results:
+        if r.get('signal'): html_results+= f"<div class='card' style='margin:12px 0;border-left:4px solid #10b981'><div style='display:flex;justify-content:space-between'><b>{r['symbol']} {r['direction']} - Score {r['score']}/8</b><span class='badge bull'>{r['zone']}</span></div><div style='margin:8px 0'>Entry {r['entry']} | SL {r['sl']} | TP {r['tp']}</div><div style='font-size:12px;color:#9ca3af'>{r['confluence']}</div></div>"
+        else: html_results+= f"<div class='card' style='margin:12px 0;opacity:0.6'><b>{r['symbol']} - NO A+ SETUP</b> Score {r.get('score',0)}/8<br><span style='font-size:12px'>{r.get('reasons',r.get('reason','Waiting alignment'))}</span></div>"
+    return layout(f"<h2 style='color:#10b981'>Scan Results - Multi TF SMC</h2><p style='color:#9ca3af'>Daily → 4H → 1H → 15M → 5M | OB, FVG, Liquidity Sweeps</p>{html_results}<br><a class='btn' href='/dashboard'>Back</a>", session['email'])
+
+@app.route('/settings', methods=['GET','POST'])
+def settings():
+    if 'email' not in session: return redirect('/')
+    if request.method=='POST':
+        conn=get_conn(); cur=conn.cursor(); cur.execute("UPDATE agent35_users SET symbols=%s, sessions=%s, risk_reward=%s, account_size=%s, lot_size=%s WHERE email=%s",(request.form['symbols'][:100], request.form['sessions'], request.form['rr'], float(request.form['acc']), float(request.form['lot']), session['email'])); conn.commit(); cur.close(); conn.close(); return redirect('/dashboard')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s",(session['email'],)); u=cur.fetchone(); cur.close(); conn.close()
+    return layout(f"<div class='card' style='max-width:600px'><h3>Settings - Max 5 Symbols</h3><form method='POST'><label>Symbols</label><input name='symbols' value=\"{u['symbols']}\"><label>Sessions</label><input name='sessions' value=\"{u['sessions']}\"><label>RR</label><select name='rr'><option>1:2</option><option selected>1:3</option><option>1:4</option></select><label>Account Size</label><input name='acc' type='number' value=\"{u['account_size']}\"><label>Lot Size</label><input name='lot' type='number' step='0.01' value=\"{u['lot_size']}\"><button class='btn' style='margin-top:10px;width:100%'>Save</button></form></div>", session['email'])
+
+@app.route('/master')
+def master():
+    if not session.get('is_creator'): return redirect('/')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users ORDER BY created_at DESC"); users=cur.fetchall(); cur.execute("SELECT * FROM agent35_payments ORDER BY created_at DESC"); pays=cur.fetchall(); cur.close(); conn.close()
+    users_html="".join([f"<tr><td>{u['email']}</td><td>{u['plan']}</td><td>{u['payment_status']}</td><td>{u['symbols']}</td><td>{u['created_at'].strftime('%Y-%m-%d')}</td></tr>" for u in users])
+    pays_html="".join([f"<div class='card' style='margin:8px 0;display:flex;justify-content:space-between'><span>{p['user_email']} - R{p['amount']} - {p['plan']} - Ref: {p['ref_code']} - {p['status']}</span><a class='btn' href='/approve/{p['id']}'>Approve</a></div>" for p in pays])
+    return layout(f"<h1 style='color:#10b981'>MASTER DASHBOARD</h1><div class='grid4'><div class='card'>Users: {len(users)}</div><div class='card'>Pending: {len([p for p in pays if p['status']=='pending'])}</div><div class='card'>Capitec: {CAPITEC_ACC}</div><div class='card'><a class='btn' href='/scan'>Run Global Scan</a></div></div><div class='card'><h3>Payments</h3>{pays_html if pays_html else 'No payments'}</div><div class='card' style='margin-top:14px'><h3>All Users</h3><table><tr><th>Email</th><th>Plan</th><th>Status</th><th>Symbols</th><th>Joined</th></tr>{users_html}</table></div>", session['email'])
+
+@app.route('/payment')
+def payment_page():
+    ref = f"AG35-{datetime.now().strftime('%m%d')}-{os.urandom(2).hex().upper()}"
+    return layout(f"<div class='card' style='max-width:480px;margin:auto;text-align:center;padding:32px'><h2 style='color:#10b981'>Upgrade Agent 35</h2><p>Capitec: <b style='font-size:18px'>{CAPITEC_ACC}</b></p><div class='grid4' style='grid-template-columns:1fr 1fr'><div class='card' style='border:2px solid #10b981'><h3>R500</h3><p>Year</p></div><div class='card'><h3>R5000</h3><p>Lifetime</p></div></div><p>Ref: <b style='color:#10b981;font-size:18px'>{ref}</b><br><span style='font-size:11px;color:#9ca3af'>Use ref when paying. 24h verification</span></p><a class='btn' style='width:100%;margin:8px 0' href='/submit-payment?ref={ref}&plan=yearly'>I Paid R500 - {ref}</a><a class='btn' style='width:100%;background:#fff;color:#000' href='/submit-payment?ref={ref}&plan=lifetime'>I Paid R5000 - {ref}</a></div>", session.get('email',''))
+
+@app.route('/submit-payment')
+def submit_payment():
+    if 'email' not in session: return redirect('/')
+    ref=request.args.get('ref'); plan=request.args.get('plan'); amount = 500 if plan=='yearly' else 5000
+    conn=get_conn(); cur=conn.cursor(); cur.execute("INSERT INTO agent35_payments (user_email,plan,ref_code,amount) VALUES (%s,%s,%s,%s)", (session['email'],plan,ref,amount)); cur.execute("UPDATE agent35_users SET payment_ref=%s, plan=%s, payment_status='pending' WHERE email=%s", (ref,plan,session['email'])); conn.commit(); cur.close(); conn.close()
+    return layout(f"<div class='card' style='text-align:center'><h2>Payment Submitted ✅</h2><p>Ref {ref} - R{amount}</p><p>Verification up to 24h</p><a class='btn' href='/dashboard'>Back</a></div>", session['email'])
+
+@app.route('/approve/<int:pid>')
+def approve(pid):
+    if not session.get('is_creator'): return "Not allowed"
+    conn=get_conn(); cur=conn.cursor(); cur.execute("UPDATE agent35_payments SET status='approved' WHERE id=%s RETURNING user_email,plan", (pid,)); row=cur.fetchone()
+    if row: cur.execute("UPDATE agent35_users SET payment_status='approved', plan=%s WHERE email=%s", (row['plan'], row['user_email']))
+    conn.commit(); cur.close(); conn.close(); return redirect('/master')
+
+@app.route('/healthz')
+def health():
+    try: conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT 1"); cur.close(); conn.close(); return jsonify({"status":"ok","bot":"Agent35"})
+    except Exception as e: return jsonify({"status":"error","error":str(e)}),500
+
+@app.route('/logout')
+def logout(): session.clear(); return redirect('/')
+
+if __name__ == '__main__': app.run(host='0.0.0.0', port=int(os.environ.get('PORT',10000)))                                                                                                                                  
