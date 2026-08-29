@@ -149,7 +149,8 @@ def guide_page():
 <div class='card' style='text-align:center'><h3 style='color:#10b981'>Ready to Start?</h3><a class='btn' href='/dashboard'>Go To Dashboard</a><p style='font-size:11px;color:#64748b;margin-top:10px'>Support: Telegram @Sniper035_bot<br>Not financial advice</p></div>
 """
     return layout(content, email, "guide")
-    @app.route('/auth', methods=['POST'])
+
+@app.route('/auth', methods=['POST'])
 def auth():
     email = request.form['email'].lower().strip()
     pw = hashlib.sha256(request.form['password'].encode()).hexdigest()
