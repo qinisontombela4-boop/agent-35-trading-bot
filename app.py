@@ -1,9 +1,10 @@
 import os, hashlib, requests, psycopg
 from psycopg.rows import dict_row
-from flask import Flask, request, redirect, session, render_template_string, jsonify
+from flask import Flask, request, redirect, session, jsonify
 from datetime import datetime
+import trading_engine as engine
 
-app = Flask(__name__)
+app = Flask(__name__, static_folder='static')
 app.secret_key = os.environ.get('SECRET_KEY', 'agent35-secret-2025')
 DATABASE_URL = os.environ.get('DATABASE_URL','').strip()
 TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN','')
@@ -16,18 +17,16 @@ def get_conn():
 def init_db():
     try:
         conn = get_conn(); cur = conn.cursor()
-        # Users Table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS agent35_users (
             id SERIAL PRIMARY KEY, email TEXT UNIQUE, password TEXT,
             is_creator BOOLEAN DEFAULT FALSE, plan TEXT DEFAULT 'none',
             payment_ref TEXT, payment_status TEXT DEFAULT 'pending',
-            risk_reward TEXT DEFAULT '1:3', symbols TEXT DEFAULT 'EURUSD,XAUUSD,BTCUSD',
+            risk_reward TEXT DEFAULT '1:3', symbols TEXT DEFAULT 'EURUSD,XAUUSD,BTCUSD,GBPUSD,NAS100',
             sessions TEXT DEFAULT 'London,New York', account_size FLOAT DEFAULT 10000,
             lot_size FLOAT DEFAULT 0.1, leverage TEXT DEFAULT '1:500',
             telegram_id TEXT, created_at TIMESTAMP DEFAULT NOW()
         );""")
-        # Trades Table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS agent35_trades (
             id SERIAL PRIMARY KEY, user_email TEXT, symbol TEXT,
@@ -35,7 +34,6 @@ def init_db():
             status TEXT DEFAULT 'sent', pnl FLOAT DEFAULT 0,
             timeframe_bias TEXT, confluence TEXT, created_at TIMESTAMP DEFAULT NOW()
         );""")
-        # Payments Table
         cur.execute("""
         CREATE TABLE IF NOT EXISTS agent35_payments (
             id SERIAL PRIMARY KEY, user_email TEXT, plan TEXT,
@@ -43,13 +41,12 @@ def init_db():
             created_at TIMESTAMP DEFAULT NOW()
         );""")
         conn.commit()
-        # Create Creator + Test User
         cur.execute("SELECT * FROM agent35_users WHERE email='creator@agent35.com'")
         if not cur.fetchone():
             pw = hashlib.sha256('Agent35Creator!'.encode()).hexdigest()
             cur.execute("INSERT INTO agent35_users (email,password,is_creator,plan,payment_status) VALUES (%s,%s,TRUE,'lifetime','approved')", ('creator@agent35.com', pw))
             pw2 = hashlib.sha256('Test123!'.encode()).hexdigest()
-            cur.execute("INSERT INTO agent35_users (email,password,plan,payment_status) VALUES (%s,%s,'yearly','approved')", ('test@agent35.com', pw2))
+            cur.execute("INSERT INTO agent35_users (email,password,plan,payment_status,symbols) VALUES (%s,%s,'yearly','approved','EURUSD,XAUUSD')", ('test@agent35.com', pw2))
             conn.commit()
         cur.close(); conn.close()
         print("✅ Agent 35 DB Ready")
@@ -58,57 +55,46 @@ def init_db():
 
 init_db()
 
-# --- TRADING LOGIC CORE ---
-def analyze_market(symbol="EURUSD"):
-    """
-    Agent 35 Logic: Daily -> 4H -> 2H -> 1H -> 30M -> 15M -> 5M entry
-    Checks: OB, MB, BB, RB, EQH/EQL, PDH/PDL, FVG, iFVG, BSL/SSL sweeps, BOS/CHOCH, Premium/Discount
-    """
-    # For V1 we scan structure - real logic uses yfinance + SMC detection
-    # This is the framework you expand
-    bias = "BULLISH" # from Daily HTF analysis
-    confluences = []
-    # Example checks (you will replace with real SMC detection)
-    # 1. Daily Structure - BOS
-    # 2. 4H,2H,1H alignment
-    # 3. 5M Order Block + FVG + Liquidity Sweep
-    confluences.append("Daily BOS Confirmed")
-    confluences.append("4H/2H/1H Aligned")
-    confluences.append("5M Bullish OB + FVG + SSL Sweep")
-    confluences.append("Entry at Discount Zone")
-
-    if len(confluences) >= 3:
-        return {"signal": True, "bias": bias, "confluence": ", ".join(confluences), "entry_zone": "Discount"}
-    return {"signal": False}
-
-def send_telegram_signal(user_email, trade):
-    if not TELEGRAM_TOKEN: return False
-    text = f"""🎯 AGENT 35 SIGNAL
-Symbol: {trade['symbol']}
-Direction: {trade['direction']} {trade['timeframe_bias']}
-Entry: {trade['entry']} | SL: {trade['sl']} | TP: {trade['tp']}
-Confluence: {trade['confluence']}
-RR: 1:3 | Zone: {trade.get('entry_zone','OB')}
-[TOOK TRADE] [SKIPPED]"""
-    try:
-        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-        requests.post(url, json={"chat_id": TELEGRAM_CHAT, "text": text})
-        return True
-    except: return False
-
-# --- ROUTES ---
-LOGIN_HTML = """
-<body style="background:#0a0e14;color:#fff;font-family:Inter,Arial;display:flex;justify-content:center;align-items:center;height:100vh;margin:0">
-<div style="background:#111827;border:1px solid #1f2937;padding:40px;border-radius:16px;width:360px;box-shadow:0 0 30px rgba(16,185,129,0.1)">
-<h1 style="color:#10b981;text-align:center">AGENT 35</h1><p style="text-align:center;color:#9ca3af">Trading Bot</p>
-<form method="POST" action="/auth"><input name="email" value="{{email}}" placeholder="Email" style="width:100%;padding:12px;margin:8px 0;background:#0a0e14;border:1px solid #374151;color:#fff;border-radius:8px" required>
-<input name="password" type="password" placeholder="Password" style="width:100%;padding:12px;margin:8px 0;background:#0a0e14;border:1px solid #374151;color:#fff;border-radius:8px" required>
-<button style="width:100%;padding:12px;background:#10b981;color:#000;font-weight:bold;border:none;border-radius:8px;margin-top:10px">LOGIN</button></form>
-<p style="font-size:12px;color:#6b7280;text-align:center;margin-top:15px">Creator: creator@agent35.com / Agent35Creator!<br>Test: test@agent35.com / Test123!</p></div></body>
+STYLE = """
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
+body{background:#05080f;color:#e5e7eb;font-family:'Inter',sans-serif;margin:0}
+.header{background:#0b111c;border-bottom:1px solid #1a2535;padding:14px 24px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:10}
+.logo{display:flex;align-items:center;gap:10px;color:#10b981;font-weight:800;font-size:20px}
+.card{background:#0b111c;border:1px solid #1a2535;border-radius:14px;padding:18px;transition:0.2s}
+.card:hover{border-color:#10b98122;transform:translateY(-1px)}
+.btn{background:#10b981;color:#000;font-weight:800;padding:11px 18px;border:none;border-radius:10px;cursor:pointer;text-decoration:none;display:inline-block}
+.btn-outline{background:transparent;border:1px solid #1a2535;color:#fff;padding:11px 18px;border-radius:10px}
+.grid4{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:14px;margin:20px 0}
+.badge{padding:4px 10px;border-radius:20px;font-size:11px;font-weight:800;letter-spacing:0.5px}
+.bull{background:rgba(16,185,129,0.12);color:#10b981;border:1px solid rgba(16,185,129,0.3)}
+.bear{background:rgba(239,68,68,0.12);color:#ef4444;border:1px solid rgba(239,68,68,0.3)}
+input,select{background:#05080f;border:1px solid #1a2535;color:#fff;padding:12px;border-radius:10px;width:100%;margin:6px 0}
+table{width:100%;border-collapse:collapse} th{color:#6b7280;text-align:left;padding:12px;font-size:12px;text-transform:uppercase} td{padding:12px;border-top:1px solid #1a2535;font-size:14px}
+a{color:#10b981}
+</style>
 """
 
+def layout(content, email=""):
+    return f"""
+    <html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{STYLE}</head>
+    <body>
+    <div class='header'><div class='logo'><img src='/static/logo.png' style='height:34px;border-radius:8px' onerror="this.style.display='none'"> AGENT 35</div>
+    <div style='display:flex;gap:12px;align-items:center'><span style='font-size:12px;color:#9ca3af'>{email}</span><a href='/logout' class='btn-outline'>Logout</a></div></div>
+    <div style='padding:24px;max-width:1200px;margin:auto'>{content}</div></body></html>
+    """
+
 @app.route('/')
-def home(): return render_template_string(LOGIN_HTML, email="test@agent35.com")
+def home():
+    return f"""<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>{STYLE}</head>
+    <body style='display:flex;justify-content:center;align-items:center;height:100vh'>
+    <div class='card' style='width:380px;text-align:center;padding:32px'><img src='/static/logo.png' style='height:80px;border-radius:12px;margin-bottom:12px' onerror="">
+    <h1 style='color:#10b981;margin:0'>AGENT 35</h1><p style='color:#9ca3af;margin-top:4px'>Professional Trading Intelligence</p>
+    <form method='POST' action='/auth' style='margin-top:20px;text-align:left'>
+    <input name='email' placeholder='Email' value='test@agent35.com' required>
+    <input name='password' type='password' placeholder='Password' value='Test123!' required>
+    <button class='btn' style='width:100%;margin-top:12px'>LOGIN TO DASHBOARD</button></form>
+    <p style='font-size:11px;color:#6b7280;margin-top:14px'>Creator: creator@agent35.com / Agent35Creator!<br>Test: test@agent35.com / Test123!</p></div></body></html>"""
 
 @app.route('/auth', methods=['POST'])
 def auth():
@@ -117,14 +103,12 @@ def auth():
     try:
         conn=get_conn(); cur=conn.cursor()
         cur.execute("SELECT * FROM agent35_users WHERE email=%s AND password=%s", (email, pw))
-        u=cur.fetchone()
-        cur.close(); conn.close()
+        u=cur.fetchone(); cur.close(); conn.close()
         if u:
-            session['email']=u['email']; session['is_creator']=u['is_creator']; session['plan']=u['plan']
-            if u['is_creator']: return redirect('/master')
-            return redirect('/dashboard')
+            session['email']=u['email']; session['is_creator']=u['is_creator']
+            return redirect('/master' if u['is_creator'] else '/dashboard')
     except Exception as e: return f"DB Error: {e} <a href='/'>back</a>"
-    return "Invalid login <a href='/'>back</a>"
+    return "Invalid <a href='/'>back</a>"
 
 @app.route('/dashboard')
 def dashboard():
@@ -132,80 +116,120 @@ def dashboard():
     conn=get_conn(); cur=conn.cursor()
     cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],))
     user=cur.fetchone()
-    cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s ORDER BY created_at DESC LIMIT 20", (session['email'],))
+    cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s ORDER BY created_at DESC LIMIT 25", (session['email'],))
     trades=cur.fetchall()
     cur.close(); conn.close()
-    # PNL Calc
     pnl = sum([t['pnl'] for t in trades]); winrate = len([t for t in trades if t['pnl']>0])/len(trades)*100 if trades else 0
+    took = len([t for t in trades if t['status']=='took'])
 
-    return render_template_string("""
-    <body style="background:#0a0e14;color:#e5e7eb;font-family:Arial;padding:20px">
-    <div style="display:flex;justify-content:space-between;background:#111827;padding:15px;border-radius:12px;border:1px solid #1f2937">
-    <b style="color:#10b981">AGENT 35 - {{user['email']}} | {{user['plan']}}</b><a href="/logout" style="color:#fff">Logout</a></div>
-    <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:15px;margin:20px 0">
-    <div style="background:#111827;padding:15px;border-radius:10px">PNL: ${{pnl}}<br><small>Winrate: {{winrate}}%</small></div>
-    <div style="background:#111827;padding:15px;border-radius:10px">Balance: ${{user['account_size']}}<br><small>Lot: {{user['lot_size']}} Lev: {{user['leverage']}}</small></div>
-    <div style="background:#111827;padding:15px;border-radius:10px">Symbols: {{user['symbols']}}<br><small>RR: {{user['risk_reward']}}</small></div>
-    <div style="background:#111827;padding:15px;border-radius:10px"><button style="background:#10b981;padding:8px;border:none;border-radius:6px">Scan Market</button><br><small>{{user['sessions']}} sessions</small></div>
+    content = f"""
+    <div class='grid4'>
+        <div class='card'><div style='color:#9ca3af;font-size:12px'>TOTAL PNL</div><div style='font-size:22px;font-weight:800;margin-top:6px'>${round(pnl,2)} <span class='badge bull'>{round(winrate,1)}% WR</span></div><div style='font-size:12px;color:#6b7280;margin-top:6px'>{took} trades taken</div></div>
+        <div class='card'><div style='color:#9ca3af;font-size:12px'>ACCOUNT</div><div style='font-size:16px;font-weight:700;margin-top:6px'>${user['account_size']} | Lot {user['lot_size']}</div><div style='font-size:12px;color:#6b7280'>{user['leverage']} | RR {user['risk_reward']}</div></div>
+        <div class='card'><div style='color:#9ca3af;font-size:12px'>WATCHLIST (5 MAX)</div><div style='margin-top:8px'>{user['symbols']}</div><a href='/settings' style='font-size:12px'>Edit Symbols / Sessions</a></div>
+        <div class='card'><div style='color:#9ca3af;font-size:12px'>ACTIONS</div><div style='margin-top:10px;display:flex;gap:8px'><a class='btn' href='/scan'>🔍 SCAN MARKET</a><a class='btn-outline' href='/payment'>💳 Pay</a></div><div style='font-size:11px;color:#6b7280;margin-top:8px'>Sessions: {user['sessions']}</div></div>
     </div>
-    <h3 style="color:#10b981">Trading Journal</h3><table style="width:100%;background:#111827;border-radius:10px;padding:10px"><tr><th>Symbol</th><th>Dir</th><th>Entry</th><th>PNL</th><th>Status</th></tr>
-    {% for t in trades %}<tr><td>{{t['symbol']}}</td><td>{{t['direction']}}</td><td>{{t['entry']}}</td><td>{{t['pnl']}}</td><td>{{t['status']}}</td></tr>{% endfor %}</table>
-    <h3>Payment</h3><p>Capitec: {{capitec}} | <a href="/payment">Pay / Upgrade</a></p>
-    </body>
-    """, user=user, trades=trades, pnl=round(pnl,2), winrate=round(winrate,1), capitec=CAPITEC_ACC)
+    <div class='card'><h3 style='margin:0 0 12px 0;color:#10b981'>Trading Journal - Auto Tracked from Telegram</h3>
+    <table><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>Entry/SL/TP</th><th>Confluence</th><th>Status</th><th>PNL</th></tr>
+    {''.join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td><b>{t['symbol']}</b></td><td><span class='badge { 'bull' if t['direction']=='BUY' else 'bear'}'>{t['direction']}</span></td><td>{t['entry']} / {t['sl']} / {t['tp']}</td><td style='font-size:11px'>{t['confluence'][:80]}</td><td>{t['status']}</td><td>{t['pnl']}</td></tr>" for t in trades])}
+    </table></div>
+    <div class='card' style='margin-top:14px'><b>How it works:</b> Bot scans Daily → 4H → 1H → 15M → 5M for OB, FVG, Liquidity Sweep, Premium/Discount. When HTF aligned (4H+1H), sends Telegram signal. You click Took/Skipped → auto fills journal + PNL.</div>
+    """
+    return layout(content, session['email'])
+
+@app.route('/scan')
+def scan():
+    if 'email' not in session: return redirect('/')
+    conn=get_conn(); cur=conn.cursor()
+    cur.execute("SELECT symbols FROM agent35_users WHERE email=%s",(session['email'],))
+    row=cur.fetchone()
+    symbols = (row['symbols'] if row else "EURUSD").split(",")[:5]
+    results=[]
+    for sym in symbols:
+        sym=sym.strip().upper()
+        if not sym: continue
+        try: res = engine.full_multi_tf_analysis(sym)
+        except Exception as e: res={"signal":False,"symbol":sym,"reason":str(e)}
+        res['symbol']=sym
+        results.append(res)
+        if res.get('signal'):
+            cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,timeframe_bias,confluence) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
+                        (session['email'],res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['bias'],res['confluence']))
+            if TELEGRAM_TOKEN and TELEGRAM_CHAT:
+                text = f"🎯 AGENT 35 SIGNAL {res['score']}/8\n{res['symbol']} {res['direction']}\nEntry: {res['entry']} SL:{res['sl']} TP:{res['tp']}\nBias:{res['bias']} Zone:{res['zone']}\n{res['confluence']}"
+                try: requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json={"chat_id":TELEGRAM_CHAT,"text":text}, timeout=5)
+                except: pass
+    conn.commit(); cur.close(); conn.close()
+
+    html_results=""
+    for r in results:
+        if r.get('signal'):
+            html_results+= f"<div class='card' style='margin:12px 0;border-left:4px solid #10b981'><div style='display:flex;justify-content:space-between'><b>{r['symbol']} {r['direction']} - Score {r['score']}/8</b><span class='badge bull'>{r['zone']}</span></div><div style='margin:8px 0'>Entry {r['entry']} | SL {r['sl']} | TP {r['tp']} | RR 1:3</div><div style='font-size:12px;color:#9ca3af'>{r['confluence']}</div><div style='margin-top:8px'><span class='badge bull'>Daily: {r['bias']}</span> HTF Aligned: {r['htf_aligned']}</div></div>"
+        else:
+            html_results+= f"<div class='card' style='margin:12px 0;opacity:0.6'><b>{r['symbol']} - NO A+ SETUP</b> Score {r.get('score',0)}/8<br><span style='font-size:12px'>{r.get('reasons',r.get('reason','Waiting for 4H+1H alignment & liquidity sweep'))}</span></div>"
+    return layout(f"<h2 style='color:#10b981'>Scan Results - Multi TF SMC Analysis</h2><p style='color:#9ca3af'>Daily → 4H → 1H → 30M → 15M → 5M | Looking for OB, MB, BB, RB, EQH/EQL, PDH/PDL, FVG/iFVG, BSL/SSL sweeps</p>{html_results}<br><a class='btn' href='/dashboard'>Back to Dashboard</a>", session['email'])
+
+@app.route('/settings', methods=['GET','POST'])
+def settings():
+    if 'email' not in session: return redirect('/')
+    if request.method=='POST':
+        conn=get_conn(); cur=conn.cursor()
+        cur.execute("UPDATE agent35_users SET symbols=%s, sessions=%s, risk_reward=%s, account_size=%s, lot_size=%s WHERE email=%s",
+                    (request.form['symbols'][:100], request.form['sessions'], request.form['rr'], float(request.form['acc']), float(request.form['lot']), session['email']))
+        conn.commit(); cur.close(); conn.close()
+        return redirect('/dashboard')
+    conn=get_conn(); cur=conn.cursor()
+    cur.execute("SELECT * FROM agent35_users WHERE email=%s",(session['email'],))
+    u=cur.fetchone(); cur.close(); conn.close()
+    return layout(f"""
+    <div class='card' style='max-width:600px'><h3>Settings - Max 5 Symbols</h3>
+    <form method='POST'><label>Symbols comma separated (Forex,Crypto,Stocks)</label><input name='symbols' value="{u['symbols']}">
+    <label>Sessions</label><input name='sessions' value="{u['sessions']}" placeholder='London,New York,Asia'>
+    <label>Risk Reward</label><select name='rr'><option>1:2</option><option selected>1:3</option><option>1:4</option></select>
+    <label>Account Size</label><input name='acc' type='number' value="{u['account_size']}">
+    <label>Lot Size</label><input name='lot' type='number' step='0.01' value="{u['lot_size']}">
+    <button class='btn' style='margin-top:10px;width:100%'>Save Settings</button></form></div>
+    """, session['email'])
 
 @app.route('/master')
 def master():
     if not session.get('is_creator'): return redirect('/')
     conn=get_conn(); cur=conn.cursor()
-    cur.execute("SELECT * FROM agent35_users"); users=cur.fetchall()
+    cur.execute("SELECT * FROM agent35_users ORDER BY created_at DESC"); users=cur.fetchall()
     cur.execute("SELECT * FROM agent35_payments ORDER BY created_at DESC"); pays=cur.fetchall()
+    cur.execute("SELECT COUNT(*), SUM(pnl) FROM agent35_trades"); stats=cur.fetchone()
     cur.close(); conn.close()
-    return render_template_string("""
-    <body style="background:#0a0e14;color:#fff;font-family:Arial;padding:20px">
-    <h1 style="color:#10b981">MASTER DASHBOARD - CREATOR</h1>
-    <h3>Users ({{users|length}})</h3>{% for u in users %}<div style="background:#111827;margin:5px;padding:10px;border-radius:8px">{{u['email']}} - {{u['plan']}} - {{u['payment_status']}} - {{u['symbols']}}</div>{% endfor %}
-    <h3>Payments to Approve - Capitec {{capitec}}</h3>{% for p in pays %}<div style="background:#111827;margin:5px;padding:10px;border-radius:8px">{{p['user_email']}} - R{{p['amount']}} - Ref: {{p['ref_code']}} - {{p['status']}} <a href="/approve/{{p['id']}}">Approve</a></div>{% endfor %}
-    <p><a href="/scan">Run Market Scan Now</a> | <a href="/healthz">Health</a></p></body>
-    """, users=users, pays=pays, capitec=CAPITEC_ACC)
-
-@app.route('/scan')
-def scan():
-    if 'email' not in session: return redirect('/')
-    result = analyze_market()
-    if result['signal']:
-        conn=get_conn(); cur=conn.cursor()
-        cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,timeframe_bias,confluence) VALUES (%s,%s,%s,%s,%s,%s,%s,%s)",
-                    (session['email'],"EURUSD","BUY",1.0850,1.0830,1.0910,result['bias'],result['confluence']))
-        conn.commit(); cur.close(); conn.close()
-        send_telegram_signal(session['email'], {"symbol":"EURUSD","direction":"BUY","entry":1.0850,"sl":1.0830,"tp":1.0910,"timeframe_bias":result['bias'],"confluence":result['confluence']})
-        return "Signal Sent + Telegram ✅ <a href='/dashboard'>Back</a>"
-    return "No A+ setup now - Trend not aligned <a href='/dashboard'>Back</a>"
+    users_html="".join([f"<tr><td>{u['email']}</td><td>{u['plan']}</td><td>{u['payment_status']}</td><td>{u['symbols']}</td><td>{u['account_size']}</td><td>{u['created_at'].strftime('%Y-%m-%d')}</td></tr>" for u in users])
+    pays_html="".join([f"<div class='card' style='margin:8px 0;display:flex;justify-content:space-between'><span>{p['user_email']} - R{p['amount']} - {p['plan']} - Ref: {p['ref_code']} - {p['status']}</span><a class='btn' href='/approve/{p['id']}'>Approve</a></div>" for p in pays])
+    return layout(f"""
+    <h1 style='color:#10b981'>MASTER DASHBOARD</h1><div class='grid4'><div class='card'>Users: {len(users)}</div><div class='card'>Payments Pending: {len([p for p in pays if p['status']=='pending'])}</div><div class='card'>Capitec: {CAPITEC_ACC}</div><div class='card'><a class='btn' href='/scan'>Run Global Scan</a></div></div>
+    <div class='card'><h3>Approve Payments</h3>{pays_html if pays_html else 'No payments'}</div>
+    <div class='card' style='margin-top:14px'><h3>All Users</h3><table><tr><th>Email</th><th>Plan</th><th>Status</th><th>Symbols</th><th>Acc</th><th>Joined</th></tr>{users_html}</table></div>
+    """, session['email'])
 
 @app.route('/payment')
 def payment_page():
-    ref = f"AG35-{datetime.now().strftime('%y%m%d')}-{os.urandom(2).hex().upper()}"
-    return render_template_string("""
-    <body style="background:#0a0e14;color:#fff;padding:30px;font-family:Arial;text-align:center">
-    <div style="background:#111827;padding:30px;border-radius:16px;max-width:400px;margin:auto">
-    <h2 style="color:#10b981">Pay for Agent 35</h2><p>Capitec: 2586572676</p>
-    <p>Plan 1: R500 / year</p><p>Plan 2: R5000 Lifetime</p>
-    <p>Your Ref: <b style="color:#10b981">{{ref}}</b><br>Use this ref when paying</p>
-    <p style="font-size:12px;color:#9ca3af">Verification up to 24h</p>
-    <a href="/submit-payment?ref={{ref}}&plan=yearly" style="background:#10b981;color:#000;padding:10px 20px;border-radius:8px;text-decoration:none;display:block;margin:10px">I Paid R500 Yearly - {{ref}}</a>
-    <a href="/submit-payment?ref={{ref}}&plan=lifetime" style="background:#fff;color:#000;padding:10px 20px;border-radius:8px;text-decoration:none;display:block">I Paid R5000 Lifetime - {{ref}}</a>
-    </div></body>
-    """, ref=ref)
+    ref = f"AG35-{datetime.now().strftime('%m%d')}-{os.urandom(2).hex().upper()}"
+    return layout(f"""
+    <div class='card' style='max-width:480px;margin:auto;text-align:center;padding:32px'>
+    <h2 style='color:#10b981'>Upgrade Agent 35</h2><p>Direct EFT to Capitec: <b style='color:#fff;font-size:18px'>{CAPITEC_ACC}</b></p>
+    <div class='grid4' style='grid-template-columns:1fr 1fr'><div class='card' style='border:2px solid #10b981'><h3>R500</h3><p>Per Year</p></div><div class='card'><h3>R5000</h3><p>Lifetime</p></div></div>
+    <p>Your Payment Ref: <b style='color:#10b981;font-size:18px'>{ref}</b><br><span style='font-size:11px;color:#9ca3af'>Use this ref as reference when paying. Verification up to 24h</span></p>
+    <a class='btn' style='width:100%;margin:8px 0' href='/submit-payment?ref={ref}&plan=yearly'>I Paid R500 Yearly - {ref}</a>
+    <a class='btn' style='width:100%;background:#fff;color:#000' href='/submit-payment?ref={ref}&plan=lifetime'>I Paid R5000 Lifetime - {ref}</a>
+    </div>
+    """, session.get('email',''))
 
 @app.route('/submit-payment')
 def submit_payment():
+    if 'email' not in session: return redirect('/')
     ref=request.args.get('ref'); plan=request.args.get('plan')
     conn=get_conn(); cur=conn.cursor()
     amount = 500 if plan=='yearly' else 5000
     cur.execute("INSERT INTO agent35_payments (user_email,plan,ref_code,amount) VALUES (%s,%s,%s,%s)", (session['email'],plan,ref,amount))
     cur.execute("UPDATE agent35_users SET payment_ref=%s, plan=%s, payment_status='pending' WHERE email=%s", (ref,plan,session['email']))
     conn.commit(); cur.close(); conn.close()
-    return f"Payment submitted Ref {ref}. Wait 24h for approval. <a href='/dashboard'>Back</a>"
+    return layout(f"<div class='card' style='text-align:center'><h2>Payment Submitted ✅</h2><p>Ref {ref} for {plan} - R{amount}</p><p>Verification can take up to 24h. You will get Telegram confirmation.</p><a class='btn' href='/dashboard'>Back</a></div>", session['email'])
 
 @app.route('/approve/<int:pid>')
 def approve(pid):
