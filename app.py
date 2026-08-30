@@ -38,10 +38,11 @@ def init_db():
     cur.close(); conn.close()
 init_db()    
 cur.execute("SELECT email FROM agent35_users WHERE referral_code IS NULL")
-    for r in cur.fetchall():
-        code = f"AG35-{r['email'][:3].upper()}-{os.urandom(2).hex().upper()}"
-        cur.execute("UPDATE agent35_users SET referral_code=%s WHERE email=%s", (code, r['email']))
-    conn.commit()
+    cur.execute("SELECT email FROM agent35_users WHERE referral_code IS NULL")
+for r in cur.fetchall():
+    code = f"AG35-{r['email'][:3].upper()}-{os.urandom(2).hex().upper()}"
+    cur.execute("UPDATE agent35_users SET referral_code=%s WHERE email=%s", (code, r['email']))
+conn.commit()
 
 def send_telegram(chat_id, text, trade_id=None, stage="signal"):
     if not TELEGRAM_TOKEN or not chat_id: return False
