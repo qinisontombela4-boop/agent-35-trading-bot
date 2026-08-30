@@ -209,12 +209,18 @@ def auth():
     return redirect('/dashboard')
     @app.route('/approve/<int:pid>')
 def approve(pid):
-    if 'email' not in session: return redirect('/')
-    conn=get_conn(); cur=conn.cursor()
-    cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); chk=cur.fetchone()
-    if not chk or not chk['is_creator']: cur.close(); conn.close(); return "Not allowed"
+    if 'email' not in session:
+        return redirect('/')
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],))
+    chk = cur.fetchone()
+    if not chk or not chk['is_creator']:
+        cur.close()
+        conn.close()
+        return "Not allowed"
     cur.execute("UPDATE agent35_payments SET status='approved' WHERE id=%s RETURNING user_email, plan, ref_code", (pid,))
-    row=cur.fetchone()
+    row = cur.fetchone()
     if row:
         cur.execute("UPDATE agent35_users SET payment_status='approved', plan=%s, paid_at=NOW(), payment_ref=%s WHERE email=%s", (row['plan'], row['ref_code'], row['user_email']))
         # === NEW: REFERRAL TRACKING ON APPROVAL ===
@@ -225,8 +231,9 @@ def approve(pid):
             referrer = cur.fetchone()
             if referrer and referrer['referral_count'] >= 10:
                 cur.execute("UPDATE agent35_users SET plan='lifetime', payment_status='approved', paid_at=NOW() WHERE email=%s", (referrer['email'],))
-        conn.commit()
-    cur.close(); conn.close()
+    conn.commit()
+    cur.close()
+    conn.close()
     return redirect('/master')
 
 @app.route('/approve-user')
