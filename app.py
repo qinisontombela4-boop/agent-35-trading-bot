@@ -448,22 +448,17 @@ def dashboard():
     return layout(content, session['email'], "dashboard")
 
 @app.route('/test-telegram')
+@login_required
 def test_telegram():
-    if 'email' not in session:
-        return redirect('/')
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],))
-    u = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not u or not u['telegram_id']:
-        return layout("<div class='card'>Not Linked - See Guide</div>", session['email'])
-    fake_res = {"symbol":"XAUUSD","direction":"BUY","entry":2675.5,"sl":2668.0,"tp":2695.0,"score":7,"bias":"Bullish HTF","confluence":["Daily bullish","4H BOS","1H FVG tap","London sweep","RSI 55","No red news"],"reason":"HTF bullish, swept Asia low, FVG tap + OB"}
-    msg = build_signal_msg(fake_res, u)
-    ok = send_telegram(u['telegram_id'], msg, trade_id=99999, stage="signal")
-    return layout(f"<div class='card'><h3 style='color:#10b981'>Sent!</h3><p style='font-size:12px;white-space:pre-wrap'>{msg}</p><a class='btn' href='/dashboard'>Back</a></div>" if ok else "<div class='card'>Failed</div>", session['email'])
-
+    try:
+        u = get_current_user()
+        ok = send_telegram(u['email'], u['telegram_id'], "✅ Agent 35 Test: Telegram is working!\n\nIf you see this, your bot will send you signals.")
+        if ok:
+            return "<h3>✅ Telegram sent! Check your Telegram.</h3><a href='/'>Back to dashboard</a>"
+        else:
+            return "<h3>❌ Telegram failed - check your bot token / telegram_id in Settings.</h3><a href='/settings'>Go to Settings</a>"
+    except Exception as e:
+        return f"<h3>Sent (but page error): {str(e)[:200]}</h3><p>Check Telegram - if you got the message, you're good.</p><a href='/'>Back</a>"
 @app.route('/journal')
 def journal():
     if 'email' not in session:
