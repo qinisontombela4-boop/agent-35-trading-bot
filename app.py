@@ -1,4 +1,4 @@
- import os, hashlib, requests, psycopg, threading, time, csv, io
+import os, hashlib, requests, psycopg, threading, time, csv, io
 from psycopg.rows import dict_row
 from flask import Flask, request, redirect, session, jsonify, Response
 from datetime import datetime
@@ -114,7 +114,8 @@ def get_live_price(symbol):
             pass
         return float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
     except:
-        return None   def auto_update_trades_loop():
+        return None
+     def auto_update_trades_loop():
     while True:
         try:
             conn = get_conn()
@@ -340,7 +341,8 @@ def delete_user():
     conn.commit()
     cur.close()
     conn.close()
-    return redirect('/master') @app.route('/master')
+    return redirect('/master')
+@app.route('/master')
 def master():
     if 'email' not in session:
         return redirect('/')
@@ -764,4 +766,4 @@ def logout():
     return redirect('/')
 
 if __name__ == '__main__':
-    app.run(host='0.0.0.0', port=int(os.environ.get("PORT",10000)))           
+    app.run(host='0.0.0.0', port=int(os.environ.get("PORT",10000)))
