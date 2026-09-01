@@ -107,27 +107,26 @@ def get_live_price(symbol):
         yfs = MAP.get(symbol.upper(), symbol.upper()+"=X")
         df = yf.download(yfs, period="1d", interval="5m", progress=False, auto_adjust=True)
         if df.empty:
+           MAP = {"EURUSD":"EURUSD=X","GBPUSD":"GBPUSD=X","USDJPY":"JPY=X","USDZAR":"ZAR=X","EURZAR":"EURZAR=X","XAUUSD":"GC=F","GOLD":"GC=F","BTCUSD":"BTC-USD","ETHUSD":"ETH-USD","NAS100":"^NDX","US30":"^DJI","SPX500":"^GSPC","GER40":"^GDAXI","USOIL":"CL=F"}
+
+def get_live_price(symbol):
+    try:
+        yfs = MAP.get(symbol.upper(), symbol.upper()+"=X")
+        df = yf.download(yfs, period="1d", interval="5m", progress=False, auto_adjust=True)
+        if df.empty:
             return None
         try:
             df.columns = df.columns.get_level_values(0)
-        except:
+        except Exception:
             pass
         return float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
-    except:
+    except Exception:
         return None
 
 def auto_update_trades_loop():
     while True:
         try:
             conn = get_conn()
-def auto_update_trades_loop():
-    while True:
-        try:
-            conn = get_conn()
-            cur = conn.cursor()
-            cur.execute("SELECT t.*, u.account_size, u.risk_reward FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.status IN ('sent','took','active') LIMIT 30")
-            for tr in cur.fetchall():
-                live = get_live_price(tr['symbol'])
                 if not live:
                     continue
                 close, high, low = live
