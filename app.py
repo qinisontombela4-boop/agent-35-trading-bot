@@ -114,22 +114,26 @@ def get_live_price(symbol):
         return float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
     except Exception:
         return None
-
 def auto_update_trades_loop():
     while True:
         try:
             conn = get_conn()
+            cur = conn.cursor()
+            cur.execute("SELECT t.*, u.account_size, u.risk_reward FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.status IN ('sent','took','active') LIMIT 30")
+            rows = cur.fetchall()
+            for tr in rows:
+                live = get_live_price(tr['symbol'])
                 if not live:
                     continue
                 close, high, low = live
-                rr=3
+                rr = 3
                 try:
-                    rr=int(tr['risk_reward'].split(':')[1])
-                except:
-                    pass
-                risk=tr['account_size']*0.01
-                new=None
-                pnl=0
+                    rr = int(tr['risk_reward'].split(':')[1])
+                except Exception:
+                    rr = 3
+                risk = tr['account_size']*0.01
+                new = None
+                pnl = 0
                 if tr['status']=='sent' and low <= tr['entry'] <= high:
                     new='took'
                 elif tr['status'] in ('took','active'):
@@ -155,9 +159,12 @@ def auto_update_trades_loop():
             conn.commit()
             cur.close()
             conn.close()
-        except:
+        except Exception:
             pass
         time.sleep(180)
+
+threading.Thread(target=auto_update_trades_loop, daemon=True).start()
+
 
 threading.Thread(target=auto_update_trades_loop, daemon=True).start()
 
