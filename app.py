@@ -114,8 +114,7 @@ def get_live_price(symbol):
             pass
         return float(df['Close'].iloc[-1]), float(df['High'].iloc[-1]), float(df['Low'].iloc[-1])
     except:
-        return None
-        def auto_update_trades_loop():
+        return Nonedef auto_update_trades_loop():
     while True:
         try:
             conn = get_conn()
