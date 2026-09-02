@@ -83,7 +83,7 @@ def is_session_active(user_sessions):
                 return True
     return False
 
-def build_signal_msg(res, score_label):
+def build_signal_msg(res, user=None):
     try:
         sym = res['symbol']
         direction = res['direction']
@@ -94,6 +94,8 @@ def build_signal_msg(res, score_label):
         bias = res.get('bias','')
         confluence = res.get('confluence', [])
         reason = res.get('reason','')
+        quality = res.get('quality', 'STANDARD')
+        tags = res.get('tags', [])
 
         emoji = "🟢" if direction == "BUY" else "🔴"
         rr_val = 0
@@ -103,22 +105,31 @@ def build_signal_msg(res, score_label):
             else:
                 rr_val = (entry - tp) / (sl - entry) if (sl-entry)!=0 else 0
 
-        # Pretty zones
         bias_parts = bias.split("|")
         htf_line = bias_parts[1].strip() if len(bias_parts)>1 else bias
         ltf_line = bias_parts[2].strip() if len(bias_parts)>2 else ""
-
         conf_text = "\n".join([f"• {c}" for c in confluence[:6]])
 
-        msg = f"""{emoji} {sym} {direction} | {score_label} {score}/8
+        # --- V9 QUALITY HEADER ---
+        if "SNIPER" in quality:
+            header = "🔥🔥 SNIPER - OB + DISCOUNT 🔥🔥\n💎 Highest Win Rate - 2% risk suggested"
+        elif "PREMIUM" in quality:
+            header = "🔥 PREMIUM SIGNAL\n⭐ High Quality - 1.5% risk"
+        elif quality == "HIGH":
+            header = "✅ HIGH QUALITY\nGood setup - 1% risk"
+        else:
+            header = "📊 STANDARD PULLBACK\nStandard - 0.5% risk"
+
+        msg = f"""{emoji} {sym} {direction} | {quality} {score}/8
+{header}
+━━━━━━━━━━━━━━
 {htf_line}
 {ltf_line}
 
 💰 Entry: {entry}
 🛑 SL: {sl}
 🎯 TP: {tp}
-📊 RR: 1:{rr_val:.1f}
-Bias: {bias_parts[0] if bias_parts else bias}
+📊 RR: 1:{rr_val:.1f} | Score: {score}/8
 
 🔍 Confluence:
 {conf_text}
@@ -127,9 +138,7 @@ Bias: {bias_parts[0] if bias_parts else bias}
 """
         return msg
     except Exception as e:
-        return f"{res.get('symbol')} {res.get('direction')} Entry {res.get('entry')} SL {res.get('sl')} TP {res.get('tp')} Score {res.get('score')}"
-LOGO_SVG = '<svg width="34" height="34" viewBox="0 0 100 100"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#059669"/></linearGradient></defs><rect width="100" height="100" rx="18" fill="#0b111c" stroke="#10b981" stroke-width="3"/><text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" font-family="Arial Black" font-weight="900" font-size="48" fill="url(#g)">35</text></svg>'
-CUR = {'USD':'$','ZAR':'R','EUR':'\u20ac','GBP':'\u00a3'}
+        return f"{res.get('symbol')} {res.get('direction')} Entry {res.get('entry')} SL {res.get('sl')} TP {res.get('tp')} Score {res.get('score')} {res.get('quality','')}"
 
 def get_live_price(symbol):
     try:
