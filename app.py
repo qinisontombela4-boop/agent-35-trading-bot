@@ -449,33 +449,15 @@ def dashboard():
 
 @app.route('/test-telegram')
 def test_telegram():
-    if 'user_email' not in session:
-        return redirect(url_for('login'))
+    import requests, os
+    token = os.environ.get('TELEGRAM_BOT_TOKEN','')
+    # put your chat id here to test hard-coded
+    chat_id = "YOUR_TELEGRAM_ID_HERE"  # <-- replace with your id like 123456789
     try:
-        u = get_current_user()
-        ok = send_telegram(u['email'], u['telegram_id'], "✅ Agent 35 Test: Telegram is working!\n\nIf you see this, your bot will send you signals.")
-        if ok:
-            return "<h3>✅ Telegram sent! Check your Telegram.</h3><a href='/'>Back to dashboard</a>"
-        else:
-            return "<h3>❌ Telegram failed - check bot token / telegram_id in Settings.</h3><a href='/settings'>Go to Settings</a>"
+        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id":chat_id,"text":"✅ Agent 35 Test - if you see this, Telegram works!"}, timeout=10)
+        return f"<h3>Sent! Telegram API returned: {r.text[:500]}</h3><a href='/'>Back</a>"
     except Exception as e:
-        return f"<h3>Check Telegram - message should have arrived. Error: {str(e)[:200]}</h3><a href='/'>Back</a>"
-    if 'email' not in session:
-        return redirect('/')
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],))
-    user = cur.fetchone()
-    cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s ORDER BY created_at DESC", (session['email'],))
-    trades = cur.fetchall()
-    cur.execute("SELECT COALESCE(SUM(pnl),0) as total FROM agent35_trades WHERE user_email=%s", (session['email'],))
-    s = cur.fetchone()
-    cur.close()
-    conn.close()
-    curr_sym = CUR.get(user['currency'],'$')
-    rows = "".join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td><b>{t['symbol']}</b></td><td>{t['direction']}</td><td>{t['status']}</td><td>{curr_sym}{round(t['pnl'],2)}</td></tr>" for t in trades])
-    return layout(f"<div class='card'><div class='stat-value'>{curr_sym}{round(s['total'],2)}</div><a href='/export/csv' class='btn'>Export CSV</a></div><div class='card' style='margin-top:14px;overflow:auto'><table><tr><th>Date</th><th>Symbol</th><th>Dir</th><th>Status</th><th>PNL</th></tr>{rows}</table></div>", session['email'], "journal")
-
+        return f"<h3>Error: {e}</h3><a href='/'>Back</a>"
 @app.route('/export/csv')
 def export_csv():
     if 'email' not in session:
