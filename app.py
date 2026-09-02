@@ -494,26 +494,7 @@ def test_telegram():
         return f"<h3>Sent to {u['telegram_id']}! Check Telegram.</h3><a href='/dashboard'>Back</a>"
     else:
         return f"<h3>Telegram API failed for {u['telegram_id']}. Did you /start @Sniper035_bot?</h3><a href='/settings'>Settings</a>"
-@app.route('/test-telegram')
-def test_telegram():
-    if 'email' not in session:
-        return redirect('/')
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],))
-    u = cur.fetchone()
-    cur.close()
-    conn.close()
-    if not u:
-        return "No user found <a href='/'>Home</a>"
-    if not u.get('telegram_id'):
-        return f"<h3>❌ No Telegram ID saved</h3><p>Go to Settings -> set telegram_id. You have only: {u.get('telegram_username','nothing')}</p><a href='/settings'>Settings</a>"
-    # correct order: chat_id first, then text
-    ok = send_telegram(u['telegram_id'], f"✅ Agent 35 Test OK for {u['email']} - Telegram working! Score test 7/8")
-    if ok:
-        return f"<h3>✅ Sent to {u['telegram_id']}! Check Telegram.</h3><a href='/dashboard'>Back</a>"
-    else:
-        return f"<h3>❌ Telegram API failed for {u['telegram_id']}. Did you /start @Sniper035_bot?</h3><a href='/settings'>Settings</a>"
+
 @app.route('/export/csv')
 def export_csv():
     if 'email' not in session:
