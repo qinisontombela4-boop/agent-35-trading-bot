@@ -1,6 +1,5 @@
 import yfinance as yf
 import pandas as pd
-from datetime import datetime
 import math
 
 MAP = {"EURUSD":"EURUSD=X","GBPUSD":"GBPUSD=X","USDJPY":"JPY=X","USDZAR":"ZAR=X","EURZAR":"EURZAR=X","XAUUSD":"GC=F","GOLD":"GC=F","BTCUSD":"BTC-USD","ETHUSD":"ETH-USD","NAS100":"^NDX","US30":"^DJI","SPX500":"^GSPC","GER40":"^GDAXI","USOIL":"CL=F","XAGUSD":"SI=F","GBPJPY":"GBPJPY=X","EURJPY":"EURJPY=X"}
@@ -9,11 +8,9 @@ MIN_SCORE = 4
 def get_df(symbol, period="5d", interval="1h"):
     try:
         yfs = MAP.get(symbol.upper(), symbol.upper()+"=X")
-        # handle 2h via resample
         fetch_interval = interval
         if interval == "2h":
             fetch_interval = "1h"
-            period = "5d"
         df = yf.download(yfs, period=period, interval=fetch_interval, progress=False, auto_adjust=True)
         if df.empty:
             return None
@@ -23,7 +20,6 @@ def get_df(symbol, period="5d", interval="1h"):
             pass
         df = df.dropna()
         if interval == "2h" and df is not None and len(df) > 0:
-            # resample 1h -> 2h
             df.index = pd.to_datetime(df.index)
             df_2h = df.resample('2h').agg({'Open':'first','High':'max','Low':'min','Close':'last','Volume':'sum'}).dropna()
             return df_2h
@@ -44,13 +40,13 @@ def pd_zone(price, high, low):
 
 def premium_discount_zones(df):
     if df is None or len(df) < 20:
-        return {"zone":"neutral", "tap":False, "pct":50, "high":0, "low":0}
+        return {"zone":"neutral", "tap":False, "eq_tap":False, "pct":50, "high":0, "low":0}
     recent = df.tail(50)
     swing_high = float(recent['High'].max())
     swing_low = float(recent['Low'].min())
     rng = swing_high - swing_low
     if rng == 0:
-        return {"zone":"neutral","tap":False,"pct":50,"high":swing_high,"low":swing_low}
+        return {"zone":"neutral","tap":False,"eq_tap":False,"pct":50,"high":swing_high,"low":swing_low,"high_70":swing_high,"low_30":swing_low}
     
     close = float(df['Close'].iloc[-1])
     low = float(df['Low'].iloc[-1])
@@ -58,18 +54,12 @@ def premium_discount_zones(df):
     
     zone, pct = pd_zone(close, swing_high, swing_low)
     
-    # tap = wicked into zone and closed out
     high_70 = swing_low + rng*0.7
     low_30 = swing_low + rng*0.3
-    tap = False
-    if zone == "premium" or (high >= high_70 and close < high_70):
-        tap = True if high >= high_70 else False
-    if zone == "discount" or (low <= low_30 and close > low_30):
-        tap = True if low <= low_30 else False
-
-    # For 5m/15m we want ANY tap of discount/premium OR equilibrium 45-55% retouch
     mid_low = swing_low + rng*0.45
     mid_high = swing_low + rng*0.55
+    
+    tap = (high >= high_70 and close < high_70) or (low <= low_30 and close > low_30)
     eq_tap = mid_low <= close <= mid_high
 
     return {"zone":zone, "tap": tap or eq_tap, "eq_tap": eq_tap, "pct": round(pct,1), "high":swing_high, "low":swing_low, "high_70":high_70, "low_30":low_30}
@@ -113,7 +103,6 @@ def full_multi_tf_analysis(symbol):
         m15 = premium_discount_zones(df_15m)
         m5 = premium_discount_zones(df_5m)
 
-        # count HTF zones
         htf_zones = [h4['zone'], h2['zone'], h1['zone']]
         discount_count = htf_zones.count("discount")
         premium_count = htf_zones.count("premium")
@@ -137,7 +126,6 @@ def full_multi_tf_analysis(symbol):
             score += 1
             conf.append(f"Daily {d['zone']}")
 
-        # BOS
         for name, df in [("4H", df_4h), ("1H", df_1h)]:
             if df is not None and len(df) >= 10:
                 lh = float(df['High'].iloc[-10:-1].max())
@@ -155,37 +143,50 @@ def full_multi_tf_analysis(symbol):
             score += 1
             conf.append(sweep_msg)
 
-        # --- 5M / 15M ENTRY FILTER ---
+        # --- STRICT LTF FILTER (NO CHASING) ---
         entry_ok = False
-        direction = "BUY" if bias == "BULLISH" else "SELL" if bias == "BEARISH" else None
-
+        
         if bias == "BULLISH":
-            # Need 5m or 15m tapping discount / equilibrium for long
-            if (m15['zone'] == "discount" or m15['eq_tap'] or m15['tap']) or (m5['zone'] == "discount" or m5['eq_tap']):
+            # BLOCK if LTF is premium - waiting for pullback
+            if m5['zone'] == "premium" and m15['zone'] == "premium":
+                return {"signal":False, "symbol":symbol, "score":round(score,1), "reason":f"BLOCKED: HTF DISCOUNT {discount_count}/3 but 5M {m5['pct']}% & 15M {m15['pct']}% PREMIUM - waiting for discount pullback", "zones":conf}
+            # ENTRY only when LTF enters discount
+            if m5['zone'] == "discount" or m15['zone'] == "discount":
                 entry_ok = True
                 score += 1.5
-                conf.append(f"ENTRY 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%) -> BUY tap")
-        elif bias == "BEARISH":
-            if (m15['zone'] == "premium" or m15['eq_tap'] or m15['tap']) or (m5['zone'] == "premium" or m5['eq_tap']):
+                conf.append(f"ENTRY PULLBACK 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%) -> BUY")
+            elif m5['eq_tap'] or m15['eq_tap']:
                 entry_ok = True
-                score += 1.5
-                conf.append(f"ENTRY 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%) -> SELL tap")
+                score += 1
+                conf.append(f"ENTRY EQ 5M:{m5['pct']}% 15M:{m15['pct']}% -> BUY")
 
-        if bias == "NEUTRAL" or not direction:
-            return {"signal":False, "symbol":symbol, "score":round(score,1), "zones":[f"{k}:{v['zone']}" for k,v in [("4H",h4),("2H",h2),("1H",h1)]], "reason":f"No HTF premium/discount - 4H {h4['zone']} 2H {h2['zone']} 1H {h1['zone']}"}
+        elif bias == "BEARISH":
+            if m5['zone'] == "discount" and m15['zone'] == "discount":
+                return {"signal":False, "symbol":symbol, "score":round(score,1), "reason":f"BLOCKED: HTF PREMIUM {premium_count}/3 but 5M {m5['pct']}% & 15M {m15['pct']}% DISCOUNT - waiting for premium rally", "zones":conf}
+            if m5['zone'] == "premium" or m15['zone'] == "premium":
+                entry_ok = True
+                score += 1.5
+                conf.append(f"ENTRY PULLBACK 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%) -> SELL")
+            elif m5['eq_tap'] or m15['eq_tap']:
+                entry_ok = True
+                score += 1
+                conf.append(f"ENTRY EQ 5M:{m5['pct']}% 15M:{m15['pct']}% -> SELL")
+
+        if bias == "NEUTRAL":
+            return {"signal":False, "symbol":symbol, "score":round(score,1), "zones":conf, "reason":f"No HTF bias - 4H {h4['zone']} 2H {h2['zone']} 1H {h1['zone']}"}
 
         if not entry_ok:
-            return {"signal":False, "symbol":symbol, "score":round(score,1), "zones":[f"4H:{h4['zone']}","2H:"+h2['zone'],"1H:"+h1['zone']], "reason":f"Waiting for 5m/15m tap - 15M is {m15['zone']} 5M is {m5['zone']}"}
+            return {"signal":False, "symbol":symbol, "score":round(score,1), "zones":conf, "reason":f"Waiting for LTF pullback - 15M {m15['zone']}({m15['pct']}%) 5M {m5['zone']}({m5['pct']}%) | Need { 'discount' if bias=='BULLISH' else 'premium' } for {bias}"}
 
         if score < MIN_SCORE:
             return {"signal":False, "symbol":symbol, "score":round(score,1), "confluence":conf, "reason":f"Score {score}<{MIN_SCORE}"}
 
-        # Build trade
         close = float(df_1h['Close'].iloc[-1])
         atr = float((df_1h['High'] - df_1h['Low']).rolling(14).mean().iloc[-1])
         if math.isnan(atr):
             atr = close * 0.002
 
+        direction = "BUY" if bias == "BULLISH" else "SELL"
         if direction == "BUY":
             entry = close
             sl = min(float(df_1h['Low'].tail(5).min()), close - atr*1.5)
@@ -203,10 +204,10 @@ def full_multi_tf_analysis(symbol):
             "sl":round(sl,2),
             "tp":round(tp,2),
             "score":round(score,1),
-            "bias":f"{bias} | 4H:{h4['zone']} 2H:{h2['zone']} 1H:{h1['zone']} | 5M:{m5['zone']} 15M:{m15['zone']}",
+            "bias":f"{bias} | 4H:{h4['zone']}({h4['pct']}%) 2H:{h2['zone']}({h2['pct']}%) 1H:{h1['zone']}({h1['pct']}%) | 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%)",
             "confluence":conf,
             "zones":conf,
-            "reason":f"HTF in {'DISCOUNT' if bias=='BULLISH' else 'PREMIUM'} {discount_count if bias=='BULLISH' else premium_count}/3 -> 5m/15m entry tap + {sweep_msg}",
+            "reason":f"HTF {'DISCOUNT' if bias=='BULLISH' else 'PREMIUM'} {discount_count if bias=='BULLISH' else premium_count}/3 + LTF PULLBACK into {m5['zone']} + {sweep_msg}",
             "blocked":None
         }
     except Exception as e:
