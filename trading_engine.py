@@ -1,276 +1,263 @@
 import yfinance as yf
 import pandas as pd
+import requests
+from datetime import datetime
+import traceback
 
+# --- SYMBOL MAP ---
 MAP = {
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "JPY=X",
-    "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X", "USDZAR": "USDZAR=X",
+    "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X", "USDZAR": "ZAR=X",
     "EURZAR": "EURZAR=X", "GBPZAR": "GBPZAR=X", "ZARJPY": "ZARJPY=X",
     "XAUUSD": "GC=F", "GOLD": "GC=F", "XAGUSD": "SI=F",
     "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD", "SOLUSD": "SOL-USD",
-    "NAS100": "NQ=F", "US30": "YM=F", "SPX500": "ES=F",
-    "GER40": "^GDAXI", "UK100": "^FTSE", "JP225": "N225=F",
+    "NAS100": "^IXIC", "US30": "^DJI", "SPX500": "^GSPC",
+    "GER40": "^GDAXI", "UK100": "^FTSE", "JP225": "^N225",
     "USOIL": "CL=F", "UKOIL": "BZ=F",
     "AAPL": "AAPL", "TSLA": "TSLA", "NVDA": "NVDA", "MSFT": "MSFT"
 }
 
-def get_data(symbol, period="1mo", interval="1h"):
-    yfs = MAP.get(symbol.upper(), symbol.upper())
+# === V6.6 UNIVERSAL NEWS LOGIC (from your screenshot) ===
+def get_universal_news_bias(symbol, news_event, outcome):
+    """Returns (bias BULL/BEAR/None, reason_text) for ANY pair"""
+    sym = symbol.upper()
+    usd_strong = None
+
+    if (news_event == "NFP" and outcome == "strong") or \
+       (news_event == "CPI" and outcome == "high") or \
+       (news_event == "FOMC" and outcome == "rates_up") or \
+       (news_event == "UNEMPLOYMENT" and outcome == "low"):
+        usd_strong = True
+    elif (news_event == "NFP" and outcome == "weak") or \
+         (news_event == "CPI" and outcome == "low") or \
+         (news_event == "FOMC" and outcome == "rates_down") or \
+         (news_event == "UNEMPLOYMENT" and outcome == "high"):
+        usd_strong = False
+    else:
+        return None, None
+
+    # Map to all pairs
+    if "XAU" in sym or "GOLD" in sym or "XAG" in sym:
+        bias = "BEAR" if usd_strong else "BULL"
+        reason = "$ UP = Gold DOWN" if usd_strong else "$ DOWN = Gold UP"
+    elif sym in ["EURUSD","GBPUSD","AUDUSD","NZDUSD","EURZAR","GBPZAR"]:
+        # USD quote or ZAR risk - strong $ = DOWN for EUR/GBP
+        if sym in ["EURUSD","GBPUSD","AUDUSD","NZDUSD"]:
+            bias = "BEAR" if usd_strong else "BULL"
+            reason = "$ Strong = Sell EUR/GBP" if usd_strong else "$ Weak = Buy EUR/GBP"
+        else:
+            bias = "BEAR" if usd_strong else "BULL"
+            reason = "$ Strong = ZAR weak"
+    elif sym in ["USDJPY","USDZAR","USDCAD","USDCHF"]:
+        bias = "BULL" if usd_strong else "BEAR"
+        reason = "$ Strong = Buy USDJPY/USDZAR" if usd_strong else "$ Weak = Sell USDJPY"
+    elif "JPY" in sym: # EURJPY, GBPJPY, ZARJPY
+        bias = "BEAR" if usd_strong else "BULL"
+        reason = "Risk Off on $ Strong"
+    elif sym in ["NAS100","US30","SPX500","GER40","UK100","BTCUSD","ETHUSD","SOLUSD","USOIL"]:
+        bias = "BEAR" if usd_strong else "BULL"
+        reason = "Rates Up = Indices/Crypto Down" if usd_strong else "Rates Down = Indices Up"
+    else:
+        bias = "BEAR" if usd_strong else "BULL"
+        reason = "$ Strong" if usd_strong else "$ Weak"
+
+    return bias, reason
+
+def fetch_forexfactory_auto():
+    """Fetches ForexFactory this week, finds TODAY high impact USD news + actual vs forecast"""
     try:
-        df = yf.download(yfs, period=period, interval=interval, progress=False, auto_adjust=True)
+        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
+        r = requests.get(url, timeout=12, headers={'User-Agent':'Mozilla/5.0'})
+        data = r.json()
+        today = datetime.utcnow().strftime("%Y-%m-%d")
+        results = []
+        for item in data:
+            date_str = item.get('date','')
+            if today not in date_str: continue
+            if item.get('country')!= 'USD': continue
+            if item.get('impact')!= 'High': continue
+
+            title = item.get('title','').upper()
+            ev = None
+            if 'NON-FARM' in title or 'NFP' in title: ev="NFP"
+            elif 'CPI' in title and 'CORE' not in title: ev="CPI"
+            elif 'FOMC' in title or 'FED' in title and 'RATE' in title: ev="FOMC"
+            elif 'UNEMPLOYMENT' in title or 'JOBLESS CLAIMS' in title: ev="UNEMPLOYMENT"
+            elif 'INTEREST RATE' in title: ev="FOMC"
+
+            if not ev: continue
+
+            # Try parse actual/forecast for auto Strong/Weak
+            actual_raw = str(item.get('actual','')).replace('%','').replace('K','').strip()
+            forecast_raw = str(item.get('forecast','')).replace('%','').replace('K','').strip()
+            outcome = None
+            try:
+                if actual_raw and forecast_raw and actual_raw not in ['','-']:
+                    a = float(actual_raw); f = float(forecast_raw)
+                    if ev == "NFP": outcome = "strong" if a > f else "weak"
+                    elif ev == "CPI": outcome = "high" if a > f else "low"
+                    elif ev == "FOMC": outcome = "rates_up" if a > f else "rates_down"
+                    elif ev == "UNEMPLOYMENT": outcome = "low" if a < f else "high" # low claims = strong $
+            except:
+                outcome = None
+
+            # If no actual yet, we still have event today
+            if not outcome:
+                outcome = "pending" # will warn volatility only
+
+            results.append({
+                "event": ev,
+                "outcome": outcome,
+                "title": item.get('title'),
+                "time": date_str,
+                "actual": item.get('actual'),
+                "forecast": item.get('forecast')
+            })
+        return results
+    except Exception as e:
+        print(f"News fetch err {e}")
+        return []
+
+def get_data(symbol, period="1d", interval="5m"):
+    try:
+        yf_sym = MAP.get(symbol.upper(), symbol)
+        df = yf.download(yf_sym, period=period, interval=interval, progress=False, auto_adjust=True)
         if df.empty: return None
         try: df.columns = df.columns.get_level_values(0)
         except: pass
-        df = df[['Open','High','Low','Close']].dropna()
         return df
-    except: return None
-
-def get_swing_high_low(df, lookback=20):
-    high = df['High'].tail(lookback).max()
-    low = df['Low'].tail(lookback).min()
-    # Find where
-    high_idx = df['High'].tail(lookback).idxmax()
-    low_idx = df['Low'].tail(lookback).idxmin()
-    return high, low, high_idx, low_idx
-
-def get_discount_premium_zone(high, low, price):
-    mid = (high + low) / 2
-    range_size = high - low
-    if range_size == 0: return "mid", 50, mid
-    pct = ((price - low) / range_size) * 100 # 0% = low, 100% = high
-    if pct < 50:
-        discount_pct = (50 - pct) # how deep in discount
-        return "discount", discount_pct, mid
-    else:
-        premium_pct = (pct - 50)
-        return "premium", premium_pct, mid
-
-def detect_trend(df):
-    # Simple HH/HL
-    closes = df['Close'].tail(10).values
-    if closes[-1] > closes[-3] and closes[-2] > closes[-5]:
-        return "bullish"
-    elif closes[-1] < closes[-3] and closes[-2] < closes[-5]:
-        return "bearish"
-    else:
-        return "ranging"
-
-def find_order_block(df, direction):
-    # Bull OB = last bearish candle before impulse
-    try:
-        df5 = df.tail(20)
-        for i in range(len(df5)-3, 2, -1):
-            curr = df5.iloc[i]
-            next_candles = df5.iloc[i+1:i+4]
-            if direction == "BUY":
-                # Last red before green impulse
-                if curr['Close'] < curr['Open']:
-                    # Next 2-3 candles bullish and break high
-                    if next_candles['Close'].iloc[-1] > curr['High'] and (next_candles['Close'] > next_candles['Open']).sum() >= 2:
-                        return float(curr['Low']), float(curr['High']), True
-            else:
-                if curr['Close'] > curr['Open']:
-                    if next_candles['Close'].iloc[-1] < curr['Low'] and (next_candles['Close'] < next_candles['Open']).sum() >= 2:
-                        return float(curr['Low']), float(curr['High']), True
-        return None, None, False
     except:
-        return None, None, False
+        return None
 
-def check_bos(df, direction):
-    try:
-        last_high = df['High'].tail(10).max()
-        last_low = df['Low'].tail(10).min()
-        curr_close = df['Close'].iloc[-1]
-        prev_high = df['High'].iloc[-2]
-        prev_low = df['Low'].iloc[-2]
-        if direction == "BUY":
-            if curr_close > prev_high or curr_close > last_high:
-                return True, f"BOS > {prev_high:.2f}"
-        else:
-            if curr_close < prev_low or curr_close < last_low:
-                return True, f"BOS < {prev_low:.2f}"
-        return False, ""
-    except:
-        return False, ""
-
-def check_engulfing_wick(df, direction):
-    try:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-        # Engulfing
-        engulf = False
-        if direction == "BUY":
-            if last['Close'] > last['Open'] and prev['Close'] < prev['Open']:
-                if last['Close'] > prev['Open'] and last['Open'] < prev['Close']:
-                    engulf = True
-        else:
-            if last['Close'] < last['Open'] and prev['Close'] > prev['Open']:
-                if last['Close'] < prev['Open'] and last['Open'] > prev['Close']:
-                    engulf = True
-        # Wick rejection
-        body = abs(last['Close'] - last['Open'])
-        upper_wick = last['High'] - max(last['Close'], last['Open'])
-        lower_wick = min(last['Close'], last['Open']) - last['Low']
-        wick_reject = False
-        wick_type = ""
-        if direction == "BUY" and lower_wick > body * 0.6:
-            wick_reject = True
-            wick_type = "wick rejection (buyers)"
-        elif direction == "SELL" and upper_wick > body * 0.6:
-            wick_reject = True
-            wick_type = "wick rejection (sellers)"
-
-        if engulf and wick_reject:
-            return True, f"{'bullish' if direction=='BUY' else 'bearish'} engulfing + {wick_type}"
-        elif engulf:
-            return True, f"{'bullish' if direction=='BUY' else 'bearish'} engulfing"
-        elif wick_reject:
-            return True, wick_type
-        return False, ""
-    except:
-        return False, ""
+def analyze_tf(df):
+    if df is None or len(df) < 50: return {"bias":"neutral","discount":50,"ob":False}
+    close = df['Close'].iloc[-1]
+    high = df['High'].rolling(20).max().iloc[-1]
+    low = df['Low'].rolling(20).min().iloc[-1]
+    discount = ((high - close) / (high - low) * 100) if high!= low else 50
+    # simple OB: bullish engulfing + wick
+    ob = False
+    last = df.iloc[-1]; prev = df.iloc[-2]
+    if last['Close'] > last['Open'] and prev['Close'] < prev['Open'] and last['Close'] > prev['Open']:
+        ob = True
+    bias = "bullish" if close > df['Close'].rolling(50).mean().iloc[-1] else "bearish"
+    return {"bias": bias, "discount": discount, "ob": ob, "close": close}
 
 def full_multi_tf_analysis(symbol):
-    symbol = symbol.upper().strip()
     try:
-        # Get TFs
-        df_4h = get_data(symbol, period="1mo", interval="4h")
+        # --- Technicals ---
+        df_4h = get_data(symbol, period="10d", interval="4h")
         df_1h = get_data(symbol, period="5d", interval="1h")
         df_5m = get_data(symbol, period="1d", interval="5m")
 
-        if df_4h is None or df_1h is None or df_5m is None:
-            return {"signal": False, "symbol": symbol, "reason": "No data", "score": 0}
+        tf_4h = analyze_tf(df_4h)
+        tf_1h = analyze_tf(df_1h)
+        tf_5m = analyze_tf(df_5m)
 
-        # 1. HTF BIAS 4H
-        bias_4h = detect_trend(df_4h)
-        if bias_4h == "ranging":
-            # Use 1H for bias if 4H ranging
-            bias_4h = detect_trend(df_1h)
+        if not tf_4h or not tf_1h or not tf_5m:
+            return {"signal": False, "symbol": symbol, "reason": "No data"}
 
-        # 2. 1H DISCOUNT/PREMIUM
-        high_1h, low_1h, _, _ = get_swing_high_low(df_1h, 30)
-        price_1h = df_1h['Close'].iloc[-1]
-        zone_1h, zone_pct_1h, mid_1h = get_discount_premium_zone(high_1h, low_1h, price_1h)
-
-        # 3. 5M DISCOUNT/PREMIUM + STRUCTURE
-        high_5m, low_5m, _, _ = get_swing_high_low(df_5m, 40)
-        price_5m = df_5m['Close'].iloc[-1]
-        zone_5m, zone_pct_5m, mid_5m = get_discount_premium_zone(high_5m, low_5m, price_5m)
-
-        # Determine direction
-        direction = None
-        if bias_4h == "bullish" and zone_1h == "discount":
-            direction = "BUY"
-        elif bias_4h == "bearish" and zone_1h == "premium":
-            direction = "SELL"
-        else:
-            # Counter but still if deep discount/premium
-            if zone_1h == "discount" and zone_pct_1h > 25:
-                direction = "BUY"
-            elif zone_1h == "premium" and zone_pct_1h > 25:
-                direction = "SELL"
-
-        if not direction:
-            return {"signal": False, "symbol": symbol, "reason": f"HTF {bias_4h}, 1H {zone_1h} ({zone_pct_1h:.0f}%) - no edge", "score": 1}
-
-        # 4. SCORE
+        # Discount logic
         score = 0
         confluence = []
+        direction = None
 
-        # HTF aligned
-        if (bias_4h == "bullish" and direction == "BUY") or (bias_4h == "bearish" and direction == "SELL"):
+        # HTF bias
+        if tf_4h['bias'] == "bullish":
+            confluence.append(f"4H bullish")
+            score += 1
+        else:
+            confluence.append(f"4H bearish")
+            score += 1
+
+        # 1H discount
+        if tf_1h['discount'] > 60: # discount zone for longs
+            confluence.append(f"1H discount ({tf_1h['discount']:.0f}%)")
             score += 2
-            confluence.append(f"Daily {bias_4h}")
-            confluence.append(f"4H BOS - {bias_4h} structure")
-        else:
-            score += 0.5
-            confluence.append(f"4H {bias_4h} (counter but deep value)")
+            direction = "BUY"
+        elif tf_1h['discount'] < 40:
+            confluence.append(f"1H premium ({tf_1h['discount']:.0f}%)")
+            score += 2
+            direction = "SELL"
 
-        # 1H discount/premium depth
-        if zone_pct_1h > 15:
-            score += 1.5
-            confluence.append(f"1H {zone_1h} ({zone_pct_1h:.0f}% deep)")
-        elif zone_pct_1h > 5:
-            score += 1
-            confluence.append(f"1H {zone_1h} ({zone_pct_1h:.0f}%)")
-        else:
-            score += 0.5
+        # OB
+        if tf_1h['ob'] or tf_5m['ob']:
+            confluence.append(f"✅ OB detected")
+            score += 2
 
-        # 5M discount/premium
-        if (zone_5m == zone_1h) and zone_pct_5m > 10:
-            score += 1
-            confluence.append(f"5M {zone_5m} ({zone_pct_5m:.0f}%)")
+        # 5M structure
+        if tf_5m['ob']:
+            confluence.append(f"✅ 5M STRUCTURE: bullish engulfing + BOS + wick rejection" if direction=="BUY" else "✅ 5M STRUCTURE: bearish engulfing")
+            score += 2
 
-        # Order Block
-        ob_low, ob_high, has_ob = find_order_block(df_5m, direction)
-        if has_ob:
-            score += 1.5
-            confluence.append(f"🔥 OB: {'Bull' if direction=='BUY' else 'Bear'} OB {ob_low:.2f}-{ob_high:.2f}")
+        if not direction:
+            direction = "BUY" if tf_4h['bias']=="bullish" else "SELL"
 
-        # BOS
-        has_bos, bos_text = check_bos(df_5m, direction)
-        if has_bos:
-            score += 1
-            confluence.append(f"BOS: {bos_text}")
-
-        # Engulfing + Wick
-        has_struct, struct_text = check_engulfing_wick(df_5m, direction)
-        if has_struct:
-            score += 1
-            confluence.append(f"✅ 5M STRUCTURE: {struct_text} + {bos_text if has_bos else 'rejection'}")
-
-        # Asia sweep bonus
-        if zone_pct_1h > 30:
-            score += 0.5
-            confluence.append("Swept Asia high/low")
-
-        score = min(round(score,1), 8.0)
-
-        # QUALITY - NEW WITH MEDIUM 4
-        if score >= 7 and has_ob:
-            quality = "SNIPER 🔥🔥"
-        elif score >= 6:
-            quality = "PREMIUM 🔥"
-        elif score >= 5:
-            quality = "HIGH ✅"
-        elif score >= 4:
-            quality = "MEDIUM 📊"
-        else:
-            return {"signal": False, "symbol": symbol, "reason": f"Score {score}/8 too low - need 4+", "score": score, "quality": "LOW"}
-
-        # Entry, SL, TP
-        entry = float(price_5m)
+        # Entry / SL / TP
+        entry = tf_5m['close']
+        atr = (df_5m['High'] - df_5m['Low']).rolling(14).mean().iloc[-1] if df_5m is not None else entry*0.002
         if direction == "BUY":
-            sl = float(df_5m['Low'].tail(5).min())
-            # Ensure SL not too close
-            if entry - sl < (high_1h - low_1h)*0.02:
-                sl = entry - (high_1h - low_1h)*0.03
-            risk = entry - sl
-            tp = entry + risk * 3 # 1:3 RR default
+            sl = entry - atr*1.5
+            tp = entry + atr*4.5
         else:
-            sl = float(df_5m['High'].tail(5).max())
-            if sl - entry < (high_1h - low_1h)*0.02:
-                sl = entry + (high_1h - low_1h)*0.03
-            risk = sl - entry
-            tp = entry - risk * 3
+            sl = entry + atr*1.5
+            tp = entry - atr*4.5
 
-        bias_str = f"{bias_4h} | 4H:{zone_1h}({zone_pct_1h:.0f}%) 1H:{zone_1h}({zone_pct_1h:.0f}%) 5M:{zone_5m}({zone_pct_5m:.0f}%) | HTF"
-        reason = f"HTF {bias_4h}, 1H+5M {zone_1h} + {struct_text if has_struct else 'pullback'} {'+ OB' if has_ob else ''}"
+        # Quality
+        quality = "STANDARD"
+        if score >= 7: quality = "🔥🔥 SNIPER - OB + DISCOUNT 🔥🔥"
+        elif score >= 6: quality = "🔥 PREMIUM"
+        elif score >= 5: quality = "✅ HIGH QUALITY"
+        elif score >= 4: quality = "📊 MEDIUM PULLBACK"
+
+        bias_text = f"{tf_4h['bias']} | 4H:discount({tf_4h['discount']:.0f}%) 1H:discount({tf_1h['discount']:.0f}%) 5M:discount({tf_5m['discount']:.0f}%) | HTF"
+
+        # === NEWS AUTO V6.6 ===
+        news_events = fetch_forexfactory_auto() # today
+        news_warning = False
+        news_text = ""
+        news_bias = None
+        news_reason = ""
+
+        if news_events:
+            news_warning = True
+            # Use first event with actual outcome, or pending
+            for ne in news_events:
+                if ne['outcome']!= 'pending':
+                    news_bias, news_reason = get_universal_news_bias(symbol, ne['event'], ne['outcome'])
+                    news_text = f"📰 {ne['event']} {ne['outcome'].upper()} (Actual {ne['actual']} vs Forecast {ne['forecast']}) -> {news_bias} for {symbol} | {news_reason}"
+                    # Boost if aligns
+                    if (news_bias == "BULL" and direction == "BUY") or (news_bias == "BEAR" and direction == "SELL"):
+                        score += 0.5
+                        confluence.append(f"✅ NEWS CONFIRMED: {ne['event']} {ne['outcome']} aligns with {direction}")
+                    else:
+                        confluence.append(f"⚠️ NEWS CONFLICT: {ne['event']} {ne['outcome']} = {news_bias} vs Technical {direction} -> 50% size")
+                    break
+            if not news_text: # pending news today
+                pending = news_events[0]
+                news_text = f"📰 TODAY: {pending['event']} {pending['title']} at {pending['time'][:16]} - High Impact USD\nYour Rule: Strong/High/Up = $ UP, Gold DOWN | Weak/Low/Down = $ DOWN, Gold UP"
+                confluence.append(f"⚠️ NEWS VOLATILITY: {pending['event']} Today - wider SL")
+
+        if score < 4:
+            return {"signal": False, "symbol": symbol, "reason": f"Score {score}/8 too low", "score": score, "news_warning": news_warning, "news_text": news_text}
 
         return {
             "signal": True,
             "symbol": symbol,
             "direction": direction,
-            "entry": round(entry, 2 if symbol not in ["XAUUSD","GOLD","BTCUSD"] else 2),
-            "sl": round(sl, 2),
-            "tp": round(tp, 2),
+            "entry": round(entry, 5),
+            "sl": round(sl, 5),
+            "tp": round(tp, 5),
             "score": score,
             "quality": quality,
-            "bias": bias_str,
-            "confluence": confluence[:6],
-            "reason": reason,
-            "ob_low": ob_low,
-            "ob_high": ob_high
+            "bias": bias_text,
+            "confluence": confluence,
+            "reason": f"{tf_4h['bias']} + 1H discount + 5M structure",
+            "news_warning": news_warning,
+            "news_text": news_text,
+            "news_bias": news_bias
         }
 
     except Exception as e:
-        return {"signal": False, "symbol": symbol, "reason": f"Engine error {e}", "score": 0}
+        traceback.print_exc()
+        return {"signal": False, "symbol": symbol, "reason": f"Error {e}"}
