@@ -40,28 +40,23 @@ def pd_zone(price, high, low):
 
 def premium_discount_zones(df):
     if df is None or len(df) < 20:
-        return {"zone":"neutral", "tap":False, "eq_tap":False, "pct":50, "high":0, "low":0}
+        return {"zone":"neutral", "tap":False, "eq_tap":False, "pct":50, "high":0, "low":0, "high_70":0, "low_30":0}
     recent = df.tail(50)
     swing_high = float(recent['High'].max())
     swing_low = float(recent['Low'].min())
     rng = swing_high - swing_low
     if rng == 0:
         return {"zone":"neutral","tap":False,"eq_tap":False,"pct":50,"high":swing_high,"low":swing_low,"high_70":swing_high,"low_30":swing_low}
-    
     close = float(df['Close'].iloc[-1])
     low = float(df['Low'].iloc[-1])
     high = float(df['High'].iloc[-1])
-    
     zone, pct = pd_zone(close, swing_high, swing_low)
-    
     high_70 = swing_low + rng*0.7
     low_30 = swing_low + rng*0.3
     mid_low = swing_low + rng*0.45
     mid_high = swing_low + rng*0.55
-    
     tap = (high >= high_70 and close < high_70) or (low <= low_30 and close > low_30)
     eq_tap = mid_low <= close <= mid_high
-
     return {"zone":zone, "tap": tap or eq_tap, "eq_tap": eq_tap, "pct": round(pct,1), "high":swing_high, "low":swing_low, "high_70":high_70, "low_30":low_30}
 
 def check_sweep(df):
@@ -81,6 +76,60 @@ def check_sweep(df):
         return True, f"Swept Low {pl:.2f}"
     return False, "No sweep"
 
+# --- NEW: ORDER BLOCK + BREAKER DETECTION ---
+def find_order_blocks(df, lookback=50):
+    """Find last bullish and bearish OB on TF"""
+    if df is None or len(df) < lookback:
+        return {"bull_ob": None, "bear_ob": None}
+    df = df.tail(lookback)
+    bull_ob = None
+    bear_ob = None
+    # Loop for bullish OB: bearish candle -> strong bullish BOS
+    for i in range(len(df)-5, 5, -1):
+        curr = df.iloc[i]
+        # Bearish candle
+        if float(curr['Close']) < float(curr['Open']):
+            # Next 3 candles bullish and break above this high
+            nxt = df.iloc[i+1:i+4]
+            if len(nxt) < 3:
+                continue
+            high_break = float(nxt['Close'].max()) > float(curr['High']) * 1.001
+            all_bull = all(float(r['Close']) > float(r['Open']) for _, r in nxt.iterrows())
+            if high_break and all_bull:
+                bull_ob = {"high": float(curr['High']), "low": float(curr['Low']), "type":"bullish"}
+                break
+    for i in range(len(df)-5, 5, -1):
+        curr = df.iloc[i]
+        if float(curr['Close']) > float(curr['Open']):
+            nxt = df.iloc[i+1:i+4]
+            if len(nxt) < 3:
+                continue
+            low_break = float(nxt['Close'].min()) < float(curr['Low']) * 0.999
+            all_bear = all(float(r['Close']) < float(r['Open']) for _, r in nxt.iterrows())
+            if low_break and all_bear:
+                bear_ob = {"high": float(curr['High']), "low": float(curr['Low']), "type":"bearish"}
+                break
+    return {"bull_ob": bull_ob, "bear_ob": bear_ob}
+
+def check_ob_confluence(price, obs, bias):
+    """Check if price is inside OB = bonus"""
+    if price is None or obs is None:
+        return False, None
+    if bias == "BULLISH" and obs.get("bull_ob"):
+        ob = obs["bull_ob"]
+        if ob["low"] * 0.999 <= price <= ob["high"] * 1.001:
+            return True, f"4H Bull OB {ob['low']:.2f}-{ob['high']:.2f}"
+        # Near OB within 0.3% = still good
+        if abs(price - ob["high"]) / price < 0.003:
+            return True, f"Near Bull OB {ob['low']:.2f}"
+    if bias == "BEARISH" and obs.get("bear_ob"):
+        ob = obs["bear_ob"]
+        if ob["low"] * 0.999 <= price <= ob["high"] * 1.001:
+            return True, f"4H Bear OB {ob['high']:.2f}-{ob['low']:.2f}"
+        if abs(price - ob["low"]) / price < 0.003:
+            return True, f"Near Bear OB {ob['high']:.2f}"
+    return False, None
+
 def full_multi_tf_analysis(symbol):
     try:
         df_d = get_df(symbol, "3mo", "1d")
@@ -95,6 +144,7 @@ def full_multi_tf_analysis(symbol):
 
         score = 0
         conf = []
+        tags = []
 
         d = premium_discount_zones(df_d)
         h4 = premium_discount_zones(df_4h)
@@ -103,6 +153,7 @@ def full_multi_tf_analysis(symbol):
         m15 = premium_discount_zones(df_15m)
         m5 = premium_discount_zones(df_5m)
 
+        # HTF bias
         htf_zones = [h4['zone'], h2['zone'], h1['zone']]
         discount_count = htf_zones.count("discount")
         premium_count = htf_zones.count("premium")
@@ -110,91 +161,94 @@ def full_multi_tf_analysis(symbol):
 
         bias = "NEUTRAL"
         if discount_count >= 2:
-            bias = "BULLISH"
-            score += 2
-            conf.append(f"HTF DISCOUNT {discount_count}/3 -> BUY bias")
+            bias = "BULLISH"; score += 2; conf.append(f"HTF DISCOUNT {discount_count}/3 -> BUY")
         elif premium_count >= 2:
-            bias = "BEARISH"
-            score += 2
-            conf.append(f"HTF PREMIUM {premium_count}/3 -> SELL bias")
+            bias = "BEARISH"; score += 2; conf.append(f"HTF PREMIUM {premium_count}/3 -> SELL")
         elif d['zone'] == "discount":
-            bias = "BULLISH"
-            score += 1
-            conf.append(f"Daily {d['zone']}")
+            bias = "BULLISH"; score += 1; conf.append(f"Daily {d['zone']}")
         elif d['zone'] == "premium":
-            bias = "BEARISH"
-            score += 1
-            conf.append(f"Daily {d['zone']}")
+            bias = "BEARISH"; score += 1; conf.append(f"Daily {d['zone']}")
 
+        # BOS
         for name, df in [("4H", df_4h), ("1H", df_1h)]:
             if df is not None and len(df) >= 10:
                 lh = float(df['High'].iloc[-10:-1].max())
                 ll = float(df['Low'].iloc[-10:-1].min())
                 c = float(df['Close'].iloc[-1])
-                if c > lh and bias != "BEARISH":
-                    score += 1
-                    conf.append(f"{name} BOS bullish")
-                if c < ll and bias != "BULLISH":
-                    score += 1
-                    conf.append(f"{name} BOS bearish")
+                if c > lh and bias!= "BEARISH":
+                    score += 1; conf.append(f"{name} BOS bullish")
+                if c < ll and bias!= "BULLISH":
+                    score += 1; conf.append(f"{name} BOS bearish")
 
         swept, sweep_msg = check_sweep(df_1h)
         if swept:
-            score += 1
-            conf.append(sweep_msg)
+            score += 1; conf.append(sweep_msg)
 
-        # --- STRICT LTF FILTER (NO CHASING) ---
+        # ORDER BLOCKS (BONUS)
+        close_price = float(df_1h['Close'].iloc[-1])
+        ob_4h = find_order_blocks(df_4h)
+        ob_1h = find_order_blocks(df_1h)
+
+        in_ob_4h, ob_msg_4h = check_ob_confluence(close_price, ob_4h, bias)
+        in_ob_1h, ob_msg_1h = check_ob_confluence(close_price, ob_1h, bias)
+
+        if in_ob_4h:
+            score += 1.5; conf.append(f"🔥 OB: {ob_msg_4h}"); tags.append("OB")
+        if in_ob_1h:
+            score += 1; conf.append(f"OB: {ob_msg_1h}"); tags.append("OB")
+
+        # If both OBs align = sniper
+        if in_ob_4h and in_ob_1h:
+            tags.append("SNIPER")
+            score += 0.5
+
+        # STRICT LTF FILTER
         entry_ok = False
-        
         if bias == "BULLISH":
-            # BLOCK if LTF is premium - waiting for pullback
             if m5['zone'] == "premium" and m15['zone'] == "premium":
-                return {"signal":False, "symbol":symbol, "score":round(score,1), "reason":f"BLOCKED: HTF DISCOUNT {discount_count}/3 but 5M {m5['pct']}% & 15M {m15['pct']}% PREMIUM - waiting for discount pullback", "zones":conf}
-            # ENTRY only when LTF enters discount
+                return {"signal":False, "symbol":symbol, "score":round(score,1), "reason":f"BLOCKED: HTF DISCOUNT but 5M {m5['pct']}% & 15M {m15['pct']}% PREMIUM", "zones":conf}
             if m5['zone'] == "discount" or m15['zone'] == "discount":
-                entry_ok = True
-                score += 1.5
-                conf.append(f"ENTRY PULLBACK 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%) -> BUY")
+                entry_ok = True; score += 1.5; conf.append(f"PULLBACK 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%) -> BUY")
             elif m5['eq_tap'] or m15['eq_tap']:
-                entry_ok = True
-                score += 1
-                conf.append(f"ENTRY EQ 5M:{m5['pct']}% 15M:{m15['pct']}% -> BUY")
-
+                entry_ok = True; score += 1; conf.append(f"EQ TAP 5M:{m5['pct']}% 15M:{m15['pct']}% -> BUY")
         elif bias == "BEARISH":
             if m5['zone'] == "discount" and m15['zone'] == "discount":
-                return {"signal":False, "symbol":symbol, "score":round(score,1), "reason":f"BLOCKED: HTF PREMIUM {premium_count}/3 but 5M {m5['pct']}% & 15M {m15['pct']}% DISCOUNT - waiting for premium rally", "zones":conf}
+                return {"signal":False, "symbol":symbol, "score":round(score,1), "reason":f"BLOCKED: HTF PREMIUM but 5M {m5['pct']}% & 15M {m15['pct']}% DISCOUNT", "zones":conf}
             if m5['zone'] == "premium" or m15['zone'] == "premium":
-                entry_ok = True
-                score += 1.5
-                conf.append(f"ENTRY PULLBACK 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%) -> SELL")
+                entry_ok = True; score += 1.5; conf.append(f"PULLBACK 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%) -> SELL")
             elif m5['eq_tap'] or m15['eq_tap']:
-                entry_ok = True
-                score += 1
-                conf.append(f"ENTRY EQ 5M:{m5['pct']}% 15M:{m15['pct']}% -> SELL")
+                entry_ok = True; score += 1; conf.append(f"EQ TAP 5M:{m5['pct']}% 15M:{m15['pct']}% -> SELL")
 
         if bias == "NEUTRAL":
-            return {"signal":False, "symbol":symbol, "score":round(score,1), "zones":conf, "reason":f"No HTF bias - 4H {h4['zone']} 2H {h2['zone']} 1H {h1['zone']}"}
-
+            return {"signal":False, "symbol":symbol, "score":round(score,1), "zones":conf, "reason":f"No HTF bias"}
         if not entry_ok:
-            return {"signal":False, "symbol":symbol, "score":round(score,1), "zones":conf, "reason":f"Waiting for LTF pullback - 15M {m15['zone']}({m15['pct']}%) 5M {m5['zone']}({m5['pct']}%) | Need { 'discount' if bias=='BULLISH' else 'premium' } for {bias}"}
-
+            return {"signal":False, "symbol":symbol, "score":round(score,1), "zones":conf, "reason":f"Waiting LTF pullback - 15M {m15['zone']}({m15['pct']}%) 5M {m5['zone']}({m5['pct']}%)"}
         if score < MIN_SCORE:
             return {"signal":False, "symbol":symbol, "score":round(score,1), "confluence":conf, "reason":f"Score {score}<{MIN_SCORE}"}
 
-        close = float(df_1h['Close'].iloc[-1])
         atr = float((df_1h['High'] - df_1h['Low']).rolling(14).mean().iloc[-1])
         if math.isnan(atr):
-            atr = close * 0.002
+            atr = close_price * 0.002
 
         direction = "BUY" if bias == "BULLISH" else "SELL"
         if direction == "BUY":
-            entry = close
-            sl = min(float(df_1h['Low'].tail(5).min()), close - atr*1.5)
+            entry = close_price
+            sl = min(float(df_1h['Low'].tail(5).min()), close_price - atr*1.5)
             tp = entry + (entry - sl) * 3
         else:
-            entry = close
-            sl = max(float(df_1h['High'].tail(5).max()), close + atr*1.5)
+            entry = close_price
+            sl = max(float(df_1h['High'].tail(5).max()), close_price + atr*1.5)
             tp = entry - (sl - entry) * 3
+
+        # QUALITY LABEL
+        if score >= 7 and "OB" in tags:
+            quality = "SNIPER 🔥🔥"
+        elif score >= 6.5:
+            quality = "PREMIUM 🔥"
+        elif score >= 5.5:
+            quality = "HIGH"
+        else:
+            quality = "STANDARD"
 
         return {
             "signal":True,
@@ -204,14 +258,15 @@ def full_multi_tf_analysis(symbol):
             "sl":round(sl,2),
             "tp":round(tp,2),
             "score":round(score,1),
+            "quality": quality,
+            "tags": tags,
             "bias":f"{bias} | 4H:{h4['zone']}({h4['pct']}%) 2H:{h2['zone']}({h2['pct']}%) 1H:{h1['zone']}({h1['pct']}%) | 5M:{m5['zone']}({m5['pct']}%) 15M:{m15['zone']}({m15['pct']}%)",
             "confluence":conf,
             "zones":conf,
-            "reason":f"HTF {'DISCOUNT' if bias=='BULLISH' else 'PREMIUM'} {discount_count if bias=='BULLISH' else premium_count}/3 + LTF PULLBACK into {m5['zone']} + {sweep_msg}",
-            "blocked":None
+            "reason":f"{quality} - HTF {'DISCOUNT' if bias=='BULLISH' else 'PREMIUM'} + LTF pullback + {sweep_msg}" + (f" + {ob_msg_4h}" if in_ob_4h else ""),
         }
     except Exception as e:
-        return {"signal":False, "symbol":symbol, "reason":f"Error {str(e)[:120]}"}
+        return {"signal":False, "symbol":symbol, "reason":f"Error {str(e)[:150]}"}
 
 def analyze_symbol(symbol):
     return full_multi_tf_analysis(symbol)
