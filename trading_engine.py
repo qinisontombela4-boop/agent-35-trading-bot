@@ -4,10 +4,9 @@ import requests
 from datetime import datetime
 import traceback
 
-# --- SYMBOL MAP ---
 MAP = {
-    "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "JPY=X",
-    "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X", "USDZAR": "ZAR=X",
+    "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
+    "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X", "USDZAR": "USDZAR=X",
     "EURZAR": "EURZAR=X", "GBPZAR": "GBPZAR=X", "ZARJPY": "ZARJPY=X",
     "XAUUSD": "GC=F", "GOLD": "GC=F", "XAGUSD": "SI=F",
     "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD", "SOLUSD": "SOL-USD",
@@ -17,12 +16,10 @@ MAP = {
     "AAPL": "AAPL", "TSLA": "TSLA", "NVDA": "NVDA", "MSFT": "MSFT"
 }
 
-# === V6.6 UNIVERSAL NEWS LOGIC (from your screenshot) ===
+# === UNIVERSAL NEWS LOGIC - FROM YOUR SCREENSHOT - ALL PAIRS ===
 def get_universal_news_bias(symbol, news_event, outcome):
-    """Returns (bias BULL/BEAR/None, reason_text) for ANY pair"""
     sym = symbol.upper()
     usd_strong = None
-
     if (news_event == "NFP" and outcome == "strong") or \
        (news_event == "CPI" and outcome == "high") or \
        (news_event == "FOMC" and outcome == "rates_up") or \
@@ -36,35 +33,25 @@ def get_universal_news_bias(symbol, news_event, outcome):
     else:
         return None, None
 
-    # Map to all pairs
     if "XAU" in sym or "GOLD" in sym or "XAG" in sym:
         bias = "BEAR" if usd_strong else "BULL"
         reason = "$ UP = Gold DOWN" if usd_strong else "$ DOWN = Gold UP"
-    elif sym in ["EURUSD","GBPUSD","AUDUSD","NZDUSD","EURZAR","GBPZAR"]:
-        # USD quote or ZAR risk - strong $ = DOWN for EUR/GBP
-        if sym in ["EURUSD","GBPUSD","AUDUSD","NZDUSD"]:
-            bias = "BEAR" if usd_strong else "BULL"
-            reason = "$ Strong = Sell EUR/GBP" if usd_strong else "$ Weak = Buy EUR/GBP"
-        else:
-            bias = "BEAR" if usd_strong else "BULL"
-            reason = "$ Strong = ZAR weak"
+    elif sym in ["EURUSD","GBPUSD","AUDUSD","NZDUSD"]:
+        bias = "BEAR" if usd_strong else "BULL"
+        reason = "$ Strong = Sell EUR/GBP" if usd_strong else "$ Weak = Buy EUR/GBP"
     elif sym in ["USDJPY","USDZAR","USDCAD","USDCHF"]:
         bias = "BULL" if usd_strong else "BEAR"
         reason = "$ Strong = Buy USDJPY/USDZAR" if usd_strong else "$ Weak = Sell USDJPY"
-    elif "JPY" in sym: # EURJPY, GBPJPY, ZARJPY
+    elif "ZAR" in sym or "JPY" in sym:
         bias = "BEAR" if usd_strong else "BULL"
-        reason = "Risk Off on $ Strong"
-    elif sym in ["NAS100","US30","SPX500","GER40","UK100","BTCUSD","ETHUSD","SOLUSD","USOIL"]:
+        reason = "$ Strong = ZAR/JPY weak"
+    else: # NAS100, US30, BTC, etc
         bias = "BEAR" if usd_strong else "BULL"
         reason = "Rates Up = Indices/Crypto Down" if usd_strong else "Rates Down = Indices Up"
-    else:
-        bias = "BEAR" if usd_strong else "BULL"
-        reason = "$ Strong" if usd_strong else "$ Weak"
-
     return bias, reason
 
 def fetch_forexfactory_auto():
-    """Fetches ForexFactory this week, finds TODAY high impact USD news + actual vs forecast"""
+    """Auto fetches ForexFactory High Impact USD news for TODAY"""
     try:
         url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
         r = requests.get(url, timeout=12, headers={'User-Agent':'Mozilla/5.0'})
@@ -76,76 +63,95 @@ def fetch_forexfactory_auto():
             if today not in date_str: continue
             if item.get('country')!= 'USD': continue
             if item.get('impact')!= 'High': continue
-
             title = item.get('title','').upper()
             ev = None
             if 'NON-FARM' in title or 'NFP' in title: ev="NFP"
-            elif 'CPI' in title and 'CORE' not in title: ev="CPI"
-            elif 'FOMC' in title or 'FED' in title and 'RATE' in title: ev="FOMC"
-            elif 'UNEMPLOYMENT' in title or 'JOBLESS CLAIMS' in title: ev="UNEMPLOYMENT"
+            elif 'CPI' in title: ev="CPI"
+            elif 'FOMC' in title or ('FED' in title and 'RATE' in title): ev="FOMC"
+            elif 'UNEMPLOYMENT' in title or 'JOBLESS' in title: ev="UNEMPLOYMENT"
             elif 'INTEREST RATE' in title: ev="FOMC"
-
             if not ev: continue
-
-            # Try parse actual/forecast for auto Strong/Weak
             actual_raw = str(item.get('actual','')).replace('%','').replace('K','').strip()
             forecast_raw = str(item.get('forecast','')).replace('%','').replace('K','').strip()
-            outcome = None
+            outcome = "pending"
             try:
-                if actual_raw and forecast_raw and actual_raw not in ['','-']:
+                if actual_raw and forecast_raw and actual_raw not in ['','-','--']:
                     a = float(actual_raw); f = float(forecast_raw)
                     if ev == "NFP": outcome = "strong" if a > f else "weak"
                     elif ev == "CPI": outcome = "high" if a > f else "low"
                     elif ev == "FOMC": outcome = "rates_up" if a > f else "rates_down"
-                    elif ev == "UNEMPLOYMENT": outcome = "low" if a < f else "high" # low claims = strong $
+                    elif ev == "UNEMPLOYMENT": outcome = "low" if a < f else "high"
             except:
-                outcome = None
-
-            # If no actual yet, we still have event today
-            if not outcome:
-                outcome = "pending" # will warn volatility only
-
+                outcome = "pending"
             results.append({
-                "event": ev,
-                "outcome": outcome,
-                "title": item.get('title'),
-                "time": date_str,
-                "actual": item.get('actual'),
-                "forecast": item.get('forecast')
+                "event": ev, "outcome": outcome,
+                "title": item.get('title'), "time": date_str,
+                "actual": item.get('actual'), "forecast": item.get('forecast')
             })
         return results
     except Exception as e:
         print(f"News fetch err {e}")
         return []
 
+def _normalize_df(df):
+    """FIX: Handles yfinance multi-index (Close, GC=F) -> Close"""
+    if df is None or df.empty: return None
+    try:
+        if isinstance(df.columns, pd.MultiIndex):
+            df.columns = df.columns.get_level_values(0)
+        # Normalize to Title case: close -> Close, CLOSE -> Close
+        new_cols = {}
+        for c in df.columns:
+            cs = str(c).strip()
+            if cs.lower() == 'close': new_cols[c] = 'Close'
+            elif cs.lower() == 'open': new_cols[c] = 'Open'
+            elif cs.lower() == 'high': new_cols[c] = 'High'
+            elif cs.lower() == 'low': new_cols[c] = 'Low'
+            elif cs.lower() == 'volume': new_cols[c] = 'Volume'
+            else: new_cols[c] = cs.title()
+        df = df.rename(columns=new_cols)
+    except Exception as e:
+        print(f"normalize err {e}")
+    return df
+
 def get_data(symbol, period="1d", interval="5m"):
     try:
-        yf_sym = MAP.get(symbol.upper(), symbol)
-        df = yf.download(yf_sym, period=period, interval=interval, progress=False, auto_adjust=True)
-        if df.empty: return None
-        try: df.columns = df.columns.get_level_values(0)
-        except: pass
+        yf_sym = MAP.get(symbol.upper(), symbol.upper())
+        df = yf.download(yf_sym, period=period, interval=interval, progress=False, auto_adjust=True, threads=False)
+        df = _normalize_df(df)
+        if df is None or df.empty: return None
+        if 'Close' not in df.columns: return None
         return df
-    except:
+    except Exception as e:
+        print(f"get_data {symbol} err {e}")
         return None
 
 def analyze_tf(df):
-    if df is None or len(df) < 50: return {"bias":"neutral","discount":50,"ob":False}
-    close = df['Close'].iloc[-1]
-    high = df['High'].rolling(20).max().iloc[-1]
-    low = df['Low'].rolling(20).min().iloc[-1]
-    discount = ((high - close) / (high - low) * 100) if high!= low else 50
-    # simple OB: bullish engulfing + wick
-    ob = False
-    last = df.iloc[-1]; prev = df.iloc[-2]
-    if last['Close'] > last['Open'] and prev['Close'] < prev['Open'] and last['Close'] > prev['Open']:
-        ob = True
-    bias = "bullish" if close > df['Close'].rolling(50).mean().iloc[-1] else "bearish"
-    return {"bias": bias, "discount": discount, "ob": ob, "close": close}
+    if df is None or len(df) < 50: return None
+    try:
+        close = float(df['Close'].iloc[-1])
+        high = float(df['High'].rolling(20).max().iloc[-1])
+        low = float(df['Low'].rolling(20).min().iloc[-1])
+        discount = ((high - close) / (high - low) * 100) if high!= low else 50
+        ob = False
+        try:
+            last = df.iloc[-1]; prev = df.iloc[-2]
+            # Bullish engulfing or bearish engulfing
+            if last['Close'] > last['Open'] and prev['Close'] < prev['Open'] and last['Close'] > prev['Open']:
+                ob = True
+            if last['Close'] < last['Open'] and prev['Close'] > prev['Open'] and last['Close'] < prev['Open']:
+                ob = True
+        except:
+            ob = False
+        ma50 = float(df['Close'].rolling(50).mean().iloc[-1])
+        bias = "bullish" if close > ma50 else "bearish"
+        return {"bias": bias, "discount": discount, "ob": ob, "close": close}
+    except Exception as e:
+        print(f"analyze_tf err {e}")
+        return None
 
 def full_multi_tf_analysis(symbol):
     try:
-        # --- Technicals ---
         df_4h = get_data(symbol, period="10d", interval="4h")
         df_1h = get_data(symbol, period="5d", interval="1h")
         df_5m = get_data(symbol, period="1d", interval="5m")
@@ -155,23 +161,16 @@ def full_multi_tf_analysis(symbol):
         tf_5m = analyze_tf(df_5m)
 
         if not tf_4h or not tf_1h or not tf_5m:
-            return {"signal": False, "symbol": symbol, "reason": "No data"}
+            return {"signal": False, "symbol": symbol, "reason": "No data yet (yfinance loading) - retry 30s"}
 
-        # Discount logic
         score = 0
         confluence = []
         direction = None
 
-        # HTF bias
-        if tf_4h['bias'] == "bullish":
-            confluence.append(f"4H bullish")
-            score += 1
-        else:
-            confluence.append(f"4H bearish")
-            score += 1
+        confluence.append(f"4H {tf_4h['bias']}")
+        score += 1
 
-        # 1H discount
-        if tf_1h['discount'] > 60: # discount zone for longs
+        if tf_1h['discount'] > 60:
             confluence.append(f"1H discount ({tf_1h['discount']:.0f}%)")
             score += 2
             direction = "BUY"
@@ -180,22 +179,25 @@ def full_multi_tf_analysis(symbol):
             score += 2
             direction = "SELL"
 
-        # OB
         if tf_1h['ob'] or tf_5m['ob']:
-            confluence.append(f"✅ OB detected")
+            confluence.append("✅ OB detected")
             score += 2
 
-        # 5M structure
         if tf_5m['ob']:
-            confluence.append(f"✅ 5M STRUCTURE: bullish engulfing + BOS + wick rejection" if direction=="BUY" else "✅ 5M STRUCTURE: bearish engulfing")
+            confluence.append("✅ 5M STRUCTURE: engulfing + BOS")
             score += 2
 
         if not direction:
-            direction = "BUY" if tf_4h['bias']=="bullish" else "SELL"
+            direction = "BUY" if tf_4h['bias'] == "bullish" else "SELL"
 
-        # Entry / SL / TP
         entry = tf_5m['close']
-        atr = (df_5m['High'] - df_5m['Low']).rolling(14).mean().iloc[-1] if df_5m is not None else entry*0.002
+        try:
+            atr = float((df_5m['High'] - df_5m['Low']).rolling(14).mean().iloc[-1])
+        except:
+            atr = entry * 0.002
+        if atr == 0 or atr!= atr: # NaN check
+            atr = entry * 0.002
+
         if direction == "BUY":
             sl = entry - atr*1.5
             tp = entry + atr*4.5
@@ -203,7 +205,6 @@ def full_multi_tf_analysis(symbol):
             sl = entry + atr*1.5
             tp = entry - atr*4.5
 
-        # Quality
         quality = "STANDARD"
         if score >= 7: quality = "🔥🔥 SNIPER - OB + DISCOUNT 🔥🔥"
         elif score >= 6: quality = "🔥 PREMIUM"
@@ -212,34 +213,30 @@ def full_multi_tf_analysis(symbol):
 
         bias_text = f"{tf_4h['bias']} | 4H:discount({tf_4h['discount']:.0f}%) 1H:discount({tf_1h['discount']:.0f}%) 5M:discount({tf_5m['discount']:.0f}%) | HTF"
 
-        # === NEWS AUTO V6.6 ===
-        news_events = fetch_forexfactory_auto() # today
+        # === AUTO NEWS FOR ALL PAIRS ===
+        news_events = fetch_forexfactory_auto()
         news_warning = False
         news_text = ""
         news_bias = None
-        news_reason = ""
 
         if news_events:
             news_warning = True
-            # Use first event with actual outcome, or pending
             for ne in news_events:
                 if ne['outcome']!= 'pending':
                     news_bias, news_reason = get_universal_news_bias(symbol, ne['event'], ne['outcome'])
                     news_text = f"📰 {ne['event']} {ne['outcome'].upper()} (Actual {ne['actual']} vs Forecast {ne['forecast']}) -> {news_bias} for {symbol} | {news_reason}"
-                    # Boost if aligns
                     if (news_bias == "BULL" and direction == "BUY") or (news_bias == "BEAR" and direction == "SELL"):
                         score += 0.5
-                        confluence.append(f"✅ NEWS CONFIRMED: {ne['event']} {ne['outcome']} aligns with {direction}")
+                        confluence.append(f"✅ NEWS CONFIRMED: {ne['event']} {ne['outcome']} aligns")
                     else:
-                        confluence.append(f"⚠️ NEWS CONFLICT: {ne['event']} {ne['outcome']} = {news_bias} vs Technical {direction} -> 50% size")
+                        confluence.append(f"⚠️ NEWS CONFLICT: {ne['event']} {ne['outcome']} = {news_bias} vs {direction} -> 50% size")
                     break
-            if not news_text: # pending news today
-                pending = news_events[0]
-                news_text = f"📰 TODAY: {pending['event']} {pending['title']} at {pending['time'][:16]} - High Impact USD\nYour Rule: Strong/High/Up = $ UP, Gold DOWN | Weak/Low/Down = $ DOWN, Gold UP"
-                confluence.append(f"⚠️ NEWS VOLATILITY: {pending['event']} Today - wider SL")
+            if not news_text:
+                p = news_events[0]
+                news_text = f"📰 TODAY: {p['event']} {p['title']} at {p['time'][:16]} - High Impact USD"
 
         if score < 4:
-            return {"signal": False, "symbol": symbol, "reason": f"Score {score}/8 too low", "score": score, "news_warning": news_warning, "news_text": news_text}
+            return {"signal": False, "symbol": symbol, "reason": f"Score {score}/8 too low - waiting for discount + OB", "score": score, "news_warning": news_warning, "news_text": news_text}
 
         return {
             "signal": True,
@@ -260,4 +257,4 @@ def full_multi_tf_analysis(symbol):
 
     except Exception as e:
         traceback.print_exc()
-        return {"signal": False, "symbol": symbol, "reason": f"Error {e}"}
+        return {"signal": False, "symbol": symbol, "reason": f"Error {str(e)[:120]}"}
