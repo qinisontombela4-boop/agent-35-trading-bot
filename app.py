@@ -311,13 +311,46 @@ def journal():
 @app.route('/test-telegram')
 def test_telegram():
     if 'email' not in session: return redirect('/')
-    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); u=cur.fetchone(); cur.close(); conn.close()
-    if not u: return "No user found <a href='/'>Home</a>"
-    if not u.get('telegram_id'): return f"<h3>No Telegram ID saved</h3><p>You have only username: {u.get('telegram_username','nothing')}. Go link bot via /start {u.get('payment_ref','')}</p><a href='/settings'>Settings</a>"
-    ok=send_telegram(u['telegram_id'], f"Agent 35 Test OK for {u['email']} - Telegram working!")
-    if ok: return f"<h3>Sent to {u['telegram_id']}! Check Telegram.</h3><a href='/dashboard'>Back</a>"
-    else: return f"<h3>Telegram API failed for {u['telegram_id']}. Did you /start @Sniper035_bot?</h3><a href='/settings'>Settings</a>"
-
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); u=cur.fetchone()
+    if not u:
+        cur.close(); conn.close()
+        return layout("<div class='card'><h3>No user</h3></div>", session['email'])
+    if not u.get('telegram_id'):
+        cur.close(); conn.close()
+        return layout(f"<div class='card'><h3>No Telegram ID saved</h3><p>Username: {u.get('telegram_username','none')}<br>Go to Dashboard -> Link TG -> START bot with ref {u.get('payment_ref','')}</p><a class='btn' href='/dashboard'>Dashboard</a></div>", session['email'])
+    
+    # REAL TEST with reason - scans XAUUSD
+    try:
+        res = engine.full_multi_tf_analysis("XAUUSD")
+        if res.get('signal'):
+            msg = build_signal_msg(res, u)
+            ok = send_telegram(u['telegram_id'], f"🧪 TEST SIGNAL WITH REASON 🧪\n\n{msg}", trade_id=99999, stage="signal")
+        else:
+            # Force a demo signal if no real signal now
+            demo_res = {
+                'symbol': 'XAUUSD',
+                'direction': 'BUY',
+                'entry': 2685.50,
+                'sl': 2675.00,
+                'tp': 2705.00,
+                'score': 7.5,
+                'quality': 'SNIPER 🔥🔥',
+                'bias': 'bullish | 4H:discount(22%) 1H:discount(18%) 5M:discount(15%) | HTF',
+                'confluence': ['Daily bullish', '4H BOS', '🔥 OB: Bull OB 2670.00', '✅ 5M STRUCTURE: bullish engulfing + BOS > 2684 + wick rejection (buyers)'],
+                'reason': 'HTF bullish, swept Asia low, 1H+5M discount + 5M bullish engulfing + BOS'
+            }
+            msg = build_signal_msg(demo_res, u)
+            ok = send_telegram(u['telegram_id'], f"🧪 TEST SIGNAL WITH REASON (DEMO - Market closed, showing format) 🧪\n\n{msg}", trade_id=99999, stage="signal")
+    except Exception as e:
+        ok = send_telegram(u['telegram_id'], f"Agent 35 Test OK for {u['email']} - Telegram working! Engine: {e}")
+        msg = f"Basic test - engine error {e}"
+    
+    cur.close(); conn.close()
+    if ok:
+        content = f"<div class='card' style='text-align:center'><h3 style='color:#10b981'>✅ Sent to {u['telegram_id']}!</h3><p>Check Telegram @Sniper035_bot - you should see:</p><div style='background:#070d1a;padding:12px;border-radius:10px;text-align:left;font-size:12px;white-space:pre-wrap'>{msg}</div><br><a class='btn' href='/dashboard'>Back to Dashboard</a></div>"
+    else:
+        content = f"<div class='card' style='text-align:center'><h3 style='color:#ef4444'>Failed</h3><p>Did you /start @Sniper035_bot?</p><a class='btn' href='/dashboard'>Dashboard</a></div>"
+    return layout(content, session['email'], "dashboard")
 @app.route('/export/csv')
 def export_csv():
     if 'email' not in session: return redirect('/')
