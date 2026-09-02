@@ -124,7 +124,7 @@ def layout(content, email="", active="dashboard"):
     master_tab=f'<a href="/master" class="{am}">Master</a>' if is_creator else ""
     guide_tab=f'<a href="/guide" class="{ag}">Guide</a>'
     tabs=f'<div class="nav-tabs"><a href="/dashboard" class="{ad}">Dashboard</a><a href="/journal" class="{aj}">Journal</a><a href="/settings" class="{aset}">Settings</a><a href="/payment">Plans</a>{guide_tab}{master_tab}</div>'
-    return f'<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent35 V6.4 5x</title>{STYLE}</head><body><div class="header"><div class="logo">{LOGO_SVG} AGENT 35 V6.4 5-SYMBOL SCAN</div><div><span style="font-size:11px;color:#94a3b8">{email}</span> <a href="/logout" style="color:#94a3b8;text-decoration:none;margin-left:10px">Logout</a></div></div><div style="padding:14px;max-width:1400px;margin:auto">{tabs}{content}</div></body></html>'
+    return f'<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent35 V6.4</title>{STYLE}</head><body><div class="header"><div class="logo">{LOGO_SVG} AGENT 35 V6.4</div><div><span style="font-size:11px;color:#94a3b8">{email}</span> <a href="/logout" style="color:#94a3b8;text-decoration:none;margin-left:10px">Logout</a></div></div><div style="padding:14px;max-width:1400px;margin:auto">{tabs}{content}</div></body></html>'
 
 def get_live_price(symbol):
     try:
@@ -169,7 +169,7 @@ threading.Thread(target=auto_update_trades_loop, daemon=True).start()
 def home():
     ref_banner=""
     if session.get('ref_code'): ref_banner=f"<div class='card' style='border-color:#10b981;background:#10b98115;text-align:center'><b>Referred by {session.get('ref_code')}</b><br><span style='font-size:12px'>You will count toward their 10 = Lifetime!</span></div>"
-    return f'<html><head><meta name="viewport" content="width=device-width, initial-scale=1">{STYLE}</head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;padding:16px"><div class="card" style="max-width:400px;width:100%;text-align:center;padding:28px"><div style="display:flex;justify-content:center;margin-bottom:16px">{LOGO_SVG.replace("34","72")}</div><h1 style="color:#10b981;margin:0">AGENT 35</h1><p style="color:#64748b;margin-top:8px;font-size:13px">V6.4 5x SCAN @Sniper035_bot</p>{ref_banner}<div class="warn" style="margin:12px 0;font-size:12px">Recommended: R1000 Total<br>R500 Bot + R500 Trading<br><span style="color:#10b981">OR Refer 10 = Lifetime FREE</span></div><form method="POST" action="/auth" style="text-align:left;margin-top:18px"><label>Email</label><input name="email" placeholder="your@email.com" required><label>Password</label><input name="password" type="password" placeholder="********" required><button class="btn" style="margin-top:16px">Login / Create Profile</button></form><a href="/guide" style="color:#10b981;font-size:13px;display:block;margin-top:12px;text-decoration:none">How it Works - 7 Steps</a></div></body></html>'
+    return f'<html><head><meta name="viewport" content="width=device-width, initial-scale=1">{STYLE}</head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;padding:16px"><div class="card" style="max-width:400px;width:100%;text-align:center;padding:28px"><div style="display:flex;justify-content:center;margin-bottom:16px">{LOGO_SVG.replace("34","72")}</div><h1 style="color:#10b981;margin:0">AGENT 35</h1><p style="color:#64748b;margin-top:8px;font-size:13px">V6.4 @Sniper035_bot</p>{ref_banner}<div class="warn" style="margin:12px 0;font-size:12px">Recommended: R1000 Total<br>R500 Bot + R500 Trading<br><span style="color:#10b981">OR Refer 10 = Lifetime FREE</span></div><form method="POST" action="/auth" style="text-align:left;margin-top:18px"><label>Email</label><input name="email" placeholder="your@email.com" required><label>Password</label><input name="password" type="password" placeholder="********" required><button class="btn" style="margin-top:16px">Login / Create Profile</button></form><a href="/guide" style="color:#10b981;font-size:13px;display:block;margin-top:12px;text-decoration:none">How it Works - 7 Steps</a></div></body></html>'
 
 @app.route('/r/<code>')
 def referral_link(code):
@@ -181,14 +181,14 @@ def guide_page():
     content="""
 <h1 style='color:#10b981;text-align:center'>How To Start With Agent 35</h1>
 <div class='warn'>Recommended Minimum: R1000 Total<br>R500 for Bot + R500 to Fund Trading Account<br><span style='color:#10b981'>OR Refer 10 Friends = Lifetime FREE (R5000 Value)</span></div>
-<p style='text-align:center;color:#94a3b8'>From broker to first signal in 10 minutes - 7 steps + 5x Scan + MEDIUM 4/8</p>
+<p style='text-align:center;color:#94a3b8'>From broker to first signal in 10 minutes - 7 steps</p>
 <div class='step'><div style='display:flex;align-items:center'><div class='step-num'>1</div><h3>Sign Up For A Broker</h3></div><p>Headway (small acc) or RCG Markets (ZAR).</p></div>
 <div class='step'><div style='display:flex;align-items:center'><div class='step-num'>2</div><h3>Fund Your Trading Account</h3></div><p>Minimum R500 broker + R500 bot = R1000 total.</p></div>
 <div class='step'><div style='display:flex;align-items:center'><div class='step-num'>3</div><h3>Create Profile</h3></div><p>Email+password -> Ref auto-generated. Timezone auto-detected.</p></div>
 <div class='step'><div style='display:flex;align-items:center'><div class='step-num'>4</div><h3>Pay & Refer</h3></div><p>Pay with ref or refer 10 = Lifetime. TZ override in dashboard.</p></div>
 <div class='step'><div style='display:flex;align-items:center'><div class='step-num'>5</div><h3>Link Telegram</h3></div><p>Dashboard -> Link TG -> START @Sniper035_bot -> Test with Reason shows your local time.</p></div>
-<div class='step'><div style='display:flex;align-items:center'><div class='step-num'>6</div><h3>Set Settings</h3></div><p>Size, Lot, RR, Sessions, Timezone. MEDIUM 4/8 now enabled (0.5% risk).</p></div>
-<div class='step' style='border-left-color:#3b82f6'><div style='display:flex;align-items:center'><div class='step-num' style='background:#3b82f6'>7</div><h3>Signals</h3></div><p>SNIPER 7-8, PREMIUM 6, HIGH 5, MEDIUM 4 - all 5 symbols scan now, 25-35/week.</p></div>
+<div class='step'><div style='display:flex;align-items:center'><div class='step-num'>6</div><h3>Set Settings</h3></div><p>Size, Lot, RR, Sessions, Timezone.</p></div>
+<div class='step' style='border-left-color:#3b82f6'><div style='display:flex;align-items:center'><div class='step-num' style='background:#3b82f6'>7</div><h3>Signals</h3></div><p>SNIPER 7-8, PREMIUM 6, HIGH 5, MEDIUM 4 - all 5 symbols scan.</p></div>
 <div class='card' style='text-align:center'><a class='btn' href='/dashboard'>Go To Dashboard</a></div>
 """
     return layout(content, email, "guide")
@@ -267,7 +267,7 @@ def master():
     users_html="".join([f"<tr><td>{u['email']}<br><span style='font-size:10px;color:#10b981'>{u['payment_ref'] or ''} | {u['referral_code'] or ''} ({u['referral_count'] or 0}/10)</span><br><span style='font-size:10px'>RefBy:{u['referred_by'] or '-'} | {u['sessions']} | TZ:{u.get('timezone','-')} | TG:{u['telegram_id'] or 'No'}</span></td><td><span class='badge {'win' if u['payment_status']=='approved' else 'loss'}'>{u['payment_status']}</span><br><span style='font-size:10px'>{u['plan']}</span></td><td>{u['created_at'].strftime('%m-%d')}</td><td><a class='btn' style='padding:5px 8px;font-size:10px;width:auto' href='/approve-user?email={u['email']}'>Approve</a><a class='btn-outline' style='padding:5px 8px;font-size:10px;width:auto;border-color:#ef4444;color:#ef4444' href='/delete-user?email={u['email']}' onclick=\"return confirm('Delete?')\">Remove</a></td></tr>" for u in users])
     pays_html="".join([f"<div class='card' style='margin:6px 0;display:flex;justify-content:space-between'><div><b>{p['user_email']}</b> - {p['ref_code']} - R{p['amount']}</div><div style='display:flex;gap:4px'><a class='btn' style='width:auto;padding:5px 10px;font-size:11px' href='/approve/{p['id']}'>Approve</a><a class='btn-outline' style='width:auto;padding:5px 10px;font-size:11px;border-color:#ef4444;color:#ef4444' href='/delete-payment/{p['id']}'>Remove</a></div></div>" for p in pays])
     leaders_html="".join([f"<tr><td>{l['email']}</td><td>{l['referral_code']}</td><td><b>{l['referral_count'] or 0}/10</b></td><td>{l['plan']}/{l['payment_status']}<br><small>{l.get('timezone','')}</small></td></tr>" for l in leaders])
-    content=f"<h2 style='color:#10b981'>MASTER V6.4 5x FIX</h2><div class='grid grid4'><div class='card'><div class='stat-label'>Users</div><div class='stat-value'>{stats['total']}</div></div><div class='card'><div class='stat-label'>Revenue</div><div class='stat-value'>R{rev_stats['rev']}</div></div><div class='card'><div style='font-size:11px'>UTC {datetime.utcnow().strftime('%H:%M')} - 5 SYMBOL CRON</div><a class='btn-outline' href='/setup-webhook'>Webhook</a></div><div class='card'><form method='GET' action='/master'><input name='q' value='{q}' placeholder='Search'><button class='btn' style='margin-top:6px'>Search</button></form></div></div><div class='card' style='margin-top:14px'><h3>Top Referrers - 10 = Lifetime</h3><table><tr><th>User</th><th>Code</th><th>Count</th><th>Plan / TZ</th></tr>{leaders_html}</table></div><div class='card' style='margin-top:14px'>{pays_html}</div><div class='card' style='margin-top:14px;overflow:auto'><table><tr><th>User / Session</th><th>Status</th><th>Joined</th><th>Action</th></tr>{users_html}</table></div>"
+    content=f"<h2 style='color:#10b981'>MASTER V6.4</h2><div class='grid grid4'><div class='card'><div class='stat-label'>Users</div><div class='stat-value'>{stats['total']}</div></div><div class='card'><div class='stat-label'>Revenue</div><div class='stat-value'>R{rev_stats['rev']}</div></div><div class='card'><div style='font-size:11px'>UTC {datetime.utcnow().strftime('%H:%M')}</div><a class='btn-outline' href='/setup-webhook'>Webhook</a></div><div class='card'><form method='GET' action='/master'><input name='q' value='{q}' placeholder='Search'><button class='btn' style='margin-top:6px'>Search</button></form></div></div><div class='card' style='margin-top:14px'><h3>Top Referrers - 10 = Lifetime</h3><table><tr><th>User</th><th>Code</th><th>Count</th><th>Plan / TZ</th></tr>{leaders_html}</table></div><div class='card' style='margin-top:14px'>{pays_html}</div><div class='card' style='margin-top:14px;overflow:auto'><table><tr><th>User / Session</th><th>Status</th><th>Joined</th><th>Action</th></tr>{users_html}</table></div>"
     return layout(content, session['email'], "master")
 
 @app.route('/payment')
@@ -359,7 +359,7 @@ def journal():
     curr_sym=CUR.get(user['currency'],'$') if user else '$'
     def badge_cls(s): return "win" if s=="win" else "loss" if s=="loss" else "bull"
     rows="".join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td>{t['symbol']} {t['direction']}</td><td>{t['entry']} / {t['sl']} / {t['tp']}</td><td><span class='badge {badge_cls(t['status'])}'>{t['status']}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)}</td><td>{t['confluence'] or ''}</td></tr>" for t in trades]) or "<tr><td colspan=6>No trades</td></tr>"
-    content=f"<div class='card'><h3>Journal - {len(trades)} trades (5x SCAN enabled)</h3><div style='overflow:auto'><table><tr><th>Date</th><th>Pair</th><th>Entry/SL/TP</th><th>Status</th><th>PNL</th><th>Reason</th></tr>{rows}</table></div><br><a class='btn' href='/export/csv'>Export CSV</a></div>"
+    content=f"<div class='card'><h3>Journal - {len(trades)} trades</h3><div style='overflow:auto'><table><tr><th>Date</th><th>Pair</th><th>Entry/SL/TP</th><th>Status</th><th>PNL</th><th>Reason</th></tr>{rows}</table></div><br><a class='btn' href='/export/csv'>Export CSV</a></div>"
     return layout(content, session['email'], "journal")
 
 @app.route('/test-telegram')
@@ -374,12 +374,12 @@ def test_telegram():
         if not res.get('signal'):
             res = {'symbol': 'XAUUSD','direction': 'BUY','entry': 2685.50,'sl': 2675.00,'tp': 2705.00,'score': 4.5,'quality': 'MEDIUM 📊','bias': 'bullish | 4H:discount(22%) 1H:discount(18%) 5M:discount(15%) | HTF','confluence': ['Daily bullish','4H BOS','1H discount (18%)','✅ 5M STRUCTURE: bullish engulfing + BOS + wick rejection'],'reason': 'HTF bullish, 1H+5M discount + 5M bullish engulfing (MEDIUM example)'}
         msg = build_signal_msg(res, u)
-        ok = send_telegram(u['telegram_id'], f"🧪 TEST 5x SCAN 🧪\n\n{msg}", trade_id=99999, stage="signal")
+        ok = send_telegram(u['telegram_id'], f"🧪 TEST 🧪\n\n{msg}", trade_id=99999, stage="signal")
     except Exception as e:
         ok = send_telegram(u['telegram_id'], f"Test OK {e}")
         msg = f"Error {e}"
     cur.close(); conn.close()
-    content = f"<div class='card' style='text-align:center'><h3 style='color:#10b981'>✅ Sent! TZ={u.get('timezone')} - 5x SCAN</h3><div style='background:#070d1a;padding:12px;border-radius:10px;text-align:left;font-size:12px;white-space:pre-wrap'>{msg}</div><br><a class='btn' href='/dashboard'>Back</a></div>" if ok else "<div class='card'><h3>Failed</h3></div>"
+    content = f"<div class='card' style='text-align:center'><h3 style='color:#10b981'>✅ Sent! TZ={u.get('timezone')}</h3><div style='background:#070d1a;padding:12px;border-radius:10px;text-align:left;font-size:12px;white-space:pre-wrap'>{msg}</div><br><a class='btn' href='/dashboard'>Back</a></div>" if ok else "<div class='card'><h3>Failed</h3></div>"
     return layout(content, session['email'])
 
 @app.route('/export/csv')
@@ -418,7 +418,7 @@ def scan():
                 send_telegram(user['telegram_id'], msg, trade_id=tid, stage="signal")
     conn.commit(); cur.close(); conn.close()
     html="".join([f"<div class='card' style='border-left:4px solid #ef4444'><b>{r['symbol']} BLOCKED</b> {r.get('reason','')}</div>" if r.get('blocked') else f"<div class='card' style='border-left:4px solid #10b981'><b>{r['symbol']} {r.get('direction','')} {r.get('score',0)}/8 {r.get('quality','')}</b><br>{r.get('confluence','')}<br><i>{r.get('reason','') or r.get('bias','')}</i><br>Entry {r.get('entry','')} SL {r.get('sl','')} TP {r.get('tp','')}</div>" if r.get('signal') else f"<div class='card' style='opacity:0.6'><b>{r['symbol']} No Setup</b> {r.get('reason','')}</div>" for r in results])
-    return layout(f"<h2>Scan Results 5x + MEDIUM - TZ {user.get('timezone','')} | UTC {datetime.utcnow().strftime('%H:%M')}</h2>{html}<br><a class='btn' href='/journal'>Journal</a>", session['email'])
+    return layout(f"<h2>Scan Results - TZ {user.get('timezone','')} | UTC {datetime.utcnow().strftime('%H:%M')}</h2>{html}<br><a class='btn' href='/journal'>Journal</a>", session['email'])
 
 @app.route('/settings', methods=['GET','POST'])
 def settings():
@@ -441,7 +441,7 @@ def settings():
     sel_usd="selected" if u['currency']=='USD' else ""; sel_zar="selected" if u['currency']=='ZAR' else ""; sel_eur="selected" if u['currency']=='EUR' else ""; sel_12="selected" if u['risk_reward']=='1:2' else ""; sel_13="selected" if u['risk_reward']=='1:3' else ""; sel_14="selected" if u['risk_reward']=='1:4' else ""
     sess=(u['sessions'] or 'London,New York'); c_london="checked" if "London" in sess else ""; c_ny="checked" if "New York" in sess else ""; c_asia="checked" if "Asia" in sess else ""; c_sydney="checked" if "Sydney" in sess else ""; c_all="checked" if "24/7" in sess else ""
     utz = u.get('timezone') or 'Africa/Johannesburg'
-    content=f"<div style='max-width:700px;margin:auto'><h2 style='color:#10b981'>Settings - 5x SCAN + MEDIUM</h2><form method='POST'><div class='settings-section'><div style='display:grid;grid-template-columns:1fr 1fr;gap:12px'><div><label>Currency</label><select name='currency'><option value='USD' {sel_usd}>USD</option><option value='ZAR' {sel_zar}>ZAR</option><option value='EUR' {sel_eur}>EUR</option></select></div><div><label>Account</label><input name='acc' type='number' value='{u['account_size']}'></div><div><label>Lot</label><input name='lot' type='number' step='0.01' value='{u['lot_size']}'></div><div><label>RR</label><select name='rr'><option {sel_12}>1:2</option><option {sel_13}>1:3</option><option {sel_14}>1:4</option></select></div></div><label>Symbols</label><input name='symbols' value='{u['symbols']}'><label>Telegram @</label><input name='tg' value='{u['telegram_username'] or ''}'><label>🌍 Timezone</label><select name='timezone'><option value='{utz}' selected>{utz} (current)</option><option value='Africa/Johannesburg'>Africa/Johannesburg</option><option value='Africa/Lagos'>Africa/Lagos</option><option value='Africa/Nairobi'>Africa/Nairobi</option><option value='Europe/London'>Europe/London</option><option value='America/New_York'>America/New_York</option><option value='UTC'>UTC</option></select><div style='margin-top:16px'><label>Sessions</label><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'><label class='sess-check'><input type='checkbox' name='sess_london' {c_london}> London</label><label class='sess-check'><input type='checkbox' name='sess_ny' {c_ny}> New York</label><label class='sess-check'><input type='checkbox' name='sess_asia' {c_asia}> Asia</label><label class='sess-check'><input type='checkbox' name='sess_sydney' {c_sydney}> Sydney</label></div><label class='sess-check' style='margin-top:8px'><input type='checkbox' name='sess_all' {c_all}> 24/7</label></div></div><button class='btn'>Save All</button><a href='/dashboard' class='btn-outline'>Back</a></form></div>"
+    content=f"<div style='max-width:700px;margin:auto'><h2 style='color:#10b981'>Settings</h2><form method='POST'><div class='settings-section'><div style='display:grid;grid-template-columns:1fr 1fr;gap:12px'><div><label>Currency</label><select name='currency'><option value='USD' {sel_usd}>USD</option><option value='ZAR' {sel_zar}>ZAR</option><option value='EUR' {sel_eur}>EUR</option></select></div><div><label>Account</label><input name='acc' type='number' value='{u['account_size']}'></div><div><label>Lot</label><input name='lot' type='number' step='0.01' value='{u['lot_size']}'></div><div><label>RR</label><select name='rr'><option {sel_12}>1:2</option><option {sel_13}>1:3</option><option {sel_14}>1:4</option></select></div></div><label>Symbols</label><input name='symbols' value='{u['symbols']}'><label>Telegram @</label><input name='tg' value='{u['telegram_username'] or ''}'><label>🌍 Timezone</label><select name='timezone'><option value='{utz}' selected>{utz} (current)</option><option value='Africa/Johannesburg'>Africa/Johannesburg</option><option value='Africa/Lagos'>Africa/Lagos</option><option value='Africa/Nairobi'>Africa/Nairobi</option><option value='Europe/London'>Europe/London</option><option value='America/New_York'>America/New_York</option><option value='UTC'>UTC</option></select><div style='margin-top:16px'><label>Sessions</label><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'><label class='sess-check'><input type='checkbox' name='sess_london' {c_london}> London</label><label class='sess-check'><input type='checkbox' name='sess_ny' {c_ny}> New York</label><label class='sess-check'><input type='checkbox' name='sess_asia' {c_asia}> Asia</label><label class='sess-check'><input type='checkbox' name='sess_sydney' {c_sydney}> Sydney</label></div><label class='sess-check' style='margin-top:8px'><input type='checkbox' name='sess_all' {c_all}> 24/7</label></div></div><button class='btn'>Save All</button><a href='/dashboard' class='btn-outline'>Back</a></form></div>"
     return layout(content, session['email'], "settings")
 
 @app.route('/telegram/webhook', methods=['POST'])
@@ -527,7 +527,6 @@ def cron_scan_all():
             conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE payment_status='approved' LIMIT 100"); users=cur.fetchall()
             for user in users:
                 if not is_session_active(user['sessions'] or 'London,New York'): continue
-                # FIXED: WAS [:2] NOW [:5] - SCAN ALL 5 SYMBOLS
                 symbols=(user['symbols'] or "EURUSD").split(",")[:5]
                 for sym in symbols:
                     sym=sym.strip().upper()
@@ -547,7 +546,7 @@ def cron_scan_all():
     return jsonify({"ok":True})
 
 @app.route('/healthz')
-def health(): return jsonify({"status":"ok","version":"V6.4-5x-FIXED","utc":datetime.utcnow().isoformat()})
+def health(): return jsonify({"status":"ok","version":"V6.4","utc":datetime.utcnow().isoformat()})
 
 @app.route('/logout')
 def logout(): session.clear(); return redirect('/')
