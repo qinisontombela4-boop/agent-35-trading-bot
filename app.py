@@ -83,21 +83,51 @@ def is_session_active(user_sessions):
                 return True
     return False
 
-def build_signal_msg(res, user):
-    score = res.get('score', 0)
-    conv = res.get('confluence', '')
-    if isinstance(conv, list):
-        conv = "\n".join([f"\u2022 {c}" for c in conv])
-    elif isinstance(conv, str) and "," in conv:
-        conv = "\n".join([f"\u2022 {c.strip()}" for c in conv.split(",")])
-    else:
-        conv = f"\u2022 {conv}"
-    bias = res.get('bias', '')
-    reason = res.get('reason', res.get('timeframe_bias','')) or conv[:250]
-    conviction = "HIGH \ud83d\udd25" if score>=7 else "MEDIUM \u26a1" if score>=5 else "LOW \ud83d\udca4"
-    sess = user.get('sessions') if isinstance(user, dict) else user['sessions']
-    return f"\ud83d\ude80 *{res['symbol']} {res['direction']}* | {conviction} *{score}/8* *Session:* {sess} | UTC {datetime.utcnow().strftime('%H:%M')} *Bias:* {bias} | *RR:* {user['risk_reward']} *Entry:* `{res['entry']}` | *SL:* `{res['sl']}` | *TP:* `{res['tp']}` *Confluence {score}/8:* {conv} *Reason:* _{str(reason)[:220]}_"
+def build_signal_msg(res, score_label):
+    try:
+        sym = res['symbol']
+        direction = res['direction']
+        entry = res['entry']
+        sl = res['sl']
+        tp = res['tp']
+        score = res['score']
+        bias = res.get('bias','')
+        confluence = res.get('confluence', [])
+        reason = res.get('reason','')
 
+        emoji = "🟢" if direction == "BUY" else "🔴"
+        rr_val = 0
+        if entry!= sl:
+            if direction == "BUY":
+                rr_val = (tp - entry) / (entry - sl) if (entry-sl)!=0 else 0
+            else:
+                rr_val = (entry - tp) / (sl - entry) if (sl-entry)!=0 else 0
+
+        # Pretty zones
+        bias_parts = bias.split("|")
+        htf_line = bias_parts[1].strip() if len(bias_parts)>1 else bias
+        ltf_line = bias_parts[2].strip() if len(bias_parts)>2 else ""
+
+        conf_text = "\n".join([f"• {c}" for c in confluence[:6]])
+
+        msg = f"""{emoji} {sym} {direction} | {score_label} {score}/8
+{htf_line}
+{ltf_line}
+
+💰 Entry: {entry}
+🛑 SL: {sl}
+🎯 TP: {tp}
+📊 RR: 1:{rr_val:.1f}
+Bias: {bias_parts[0] if bias_parts else bias}
+
+🔍 Confluence:
+{conf_text}
+
+📝 {reason}
+"""
+        return msg
+    except Exception as e:
+        return f"{res.get('symbol')} {res.get('direction')} Entry {res.get('entry')} SL {res.get('sl')} TP {res.get('tp')} Score {res.get('score')}"
 LOGO_SVG = '<svg width="34" height="34" viewBox="0 0 100 100"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#059669"/></linearGradient></defs><rect width="100" height="100" rx="18" fill="#0b111c" stroke="#10b981" stroke-width="3"/><text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" font-family="Arial Black" font-weight="900" font-size="48" fill="url(#g)">35</text></svg>'
 CUR = {'USD':'$','ZAR':'R','EUR':'\u20ac','GBP':'\u00a3'}
 
