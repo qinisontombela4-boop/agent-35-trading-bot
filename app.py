@@ -449,15 +449,20 @@ def dashboard():
 
 @app.route('/test-telegram')
 def test_telegram():
-    import requests, os
-    token = os.environ.get('TELEGRAM_BOT_TOKEN','')
-    # put your chat id here to test hard-coded
-    chat_id = "YOUR_TELEGRAM_ID_HERE"  # <-- replace with your id like 123456789
+    if 'user_email' not in session:
+        return redirect(url_for('login'))
     try:
-        r = requests.post(f"https://api.telegram.org/bot{token}/sendMessage", json={"chat_id":chat_id,"text":"✅ Agent 35 Test - if you see this, Telegram works!"}, timeout=10)
-        return f"<h3>Sent! Telegram API returned: {r.text[:500]}</h3><a href='/'>Back</a>"
+        u = get_current_user()
+        if not u or not u.get('telegram_id'):
+            return "<h3>❌ You haven't set Telegram ID yet.</h3><p>Go to Settings and add your Telegram ID from @userinfobot</p><a href='/settings'>Go to Settings</a>"
+        
+        ok = send_telegram(u['email'], u['telegram_id'], "✅ Agent 35 Test: Telegram is working! You will now get live trade signals here.")
+        if ok:
+            return "<h3>✅ Sent! Check your Telegram.</h3><a href='/'>Back</a>"
+        else:
+            return f"<h3>❌ Failed to send to {u['telegram_id']}. Did you /start your bot?</h3><a href='/settings'>Check Settings</a>"
     except Exception as e:
-        return f"<h3>Error: {e}</h3><a href='/'>Back</a>"
+        return f"<h3>Error: {str(e)[:500]}</h3><a href='/'>Back</a>"
 @app.route('/export/csv')
 def export_csv():
     if 'email' not in session:
