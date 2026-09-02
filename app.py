@@ -447,22 +447,43 @@ def dashboard():
     content = ref_widget + f"<div class='grid grid4'><div class='card'><div class='stat-label'>PNL {sess_display}</div><div class='stat-value'>{curr_sym}{round(pnl,2)} <span class='badge bull'>{round(wr,1)}% WR</span></div><div style='font-size:10px'>Active now: {is_session_active(sess_display)} | UTC {datetime.utcnow().strftime('%H:%M')}</div></div><div class='card'><div class='stat-label'>Account</div><div class='stat-value' style='font-size:18px'>{curr_sym}{user['account_size']}</div><a href='/settings' class='btn-outline'>Edit Sessions</a><a href='/guide' class='btn-outline' style='border-color:#10b981;color:#10b981'>Start Guide</a></div><div class='card' style='position:relative'><div class='stat-label'>Watchlist {len(syms)}/5</div><div style='margin:12px 0'>{chips}</div><form id='symForm' method='POST' action='/quick-symbols'><input type='hidden' name='symbols' id='symInput' value=\"{user['symbols']}\"></form><input id='symSearch' class='searchbox' placeholder='Search...' oninput='filterSyms()' autocomplete='off'><div id='symDropdown' class='dropdown'></div></div><div class='card'><a class='btn' href='/scan'>SCAN NOW</a><a href='https://t.me/{TELEGRAM_BOT_USERNAME}?start={pay_ref}' target='_blank' class='btn-outline'>Link TG: {pay_ref}</a><a href='/test-telegram' class='btn-test'>Test with Reason</a></div></div><div class='card' style='margin-top:14px'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>PNL</th></tr>{rows}</table></div>"
     return layout(content, session['email'], "dashboard")
 
+@app.route('/journal')
+def journal():
+    if 'email' not in session:
+        return redirect('/')
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],))
+    user = cur.fetchone()
+    cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s ORDER BY created_at DESC LIMIT 100", (session['email'],))
+    trades = cur.fetchall()
+    cur.close()
+    conn.close()
+    curr_sym = CUR.get(user['currency'],'$') if user else '$'
+    rows = "".join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td>{t['symbol']} {t['direction']}</td><td>{t['entry']} / {t['sl']} / {t['tp']}</td><td><span class='badge {\"win\" if t['status']==\"win\" else \"loss\" if t['status']==\"loss\" else \"bull\"}'>{t['status']}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)}</td><td>{t['confluence'] or ''}</td></tr>" for t in trades]) or "<tr><td colspan=6>No trades yet - run SCAN</td></tr>"
+    content = f"<div class='card'><h3>Journal - {len(trades)} trades</h3><div style='overflow:auto'><table><tr><th>Date</th><th>Pair</th><th>Entry/SL/TP</th><th>Status</th><th>PNL</th><th>Reason</th></tr>{rows}</table></div><br><a class='btn' href='/export/csv'>Export CSV</a></div>"
+    return layout(content, session['email'], "journal")
+
 @app.route('/test-telegram')
 def test_telegram():
-    if 'user_email' not in session:
-        return redirect(url_for('login'))
-    try:
-        u = get_current_user()
-        if not u or not u.get('telegram_id'):
-            return "<h3>❌ You haven't set Telegram ID yet.</h3><p>Go to Settings and add your Telegram ID from @userinfobot</p><a href='/settings'>Go to Settings</a>"
-        
-        ok = send_telegram(u['email'], u['telegram_id'], "✅ Agent 35 Test: Telegram is working! You will now get live trade signals here.")
-        if ok:
-            return "<h3>✅ Sent! Check your Telegram.</h3><a href='/'>Back</a>"
-        else:
-            return f"<h3>❌ Failed to send to {u['telegram_id']}. Did you /start your bot?</h3><a href='/settings'>Check Settings</a>"
-    except Exception as e:
-        return f"<h3>Error: {str(e)[:500]}</h3><a href='/'>Back</a>"
+    if 'email' not in session:
+        return redirect('/')
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],))
+    u = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not u:
+        return "No user found <a href='/'>Home</a>"
+    if not u.get('telegram_id'):
+        return f"<h3>❌ No Telegram ID saved</h3><p>Go to Settings -> set telegram_id. You have only: {u.get('telegram_username','nothing')}</p><a href='/settings'>Settings</a>"
+    # correct order: chat_id first, then text
+    ok = send_telegram(u['telegram_id'], f"✅ Agent 35 Test OK for {u['email']} - Telegram working! Score test 7/8")
+    if ok:
+        return f"<h3>✅ Sent to {u['telegram_id']}! Check Telegram.</h3><a href='/dashboard'>Back</a>"
+    else:
+        return f"<h3>❌ Telegram API failed for {u['telegram_id']}. Did you /start @Sniper035_bot?</h3><a href='/settings'>Settings</a>"
 @app.route('/export/csv')
 def export_csv():
     if 'email' not in session:
