@@ -460,10 +460,40 @@ def journal():
     cur.close()
     conn.close()
     curr_sym = CUR.get(user['currency'],'$') if user else '$'
-    rows = "".join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td>{t['symbol']} {t['direction']}</td><td>{t['entry']} / {t['sl']} / {t['tp']}</td><td><span class='badge {\"win\" if t['status']==\"win\" else \"loss\" if t['status']==\"loss\" else \"bull\"}'>{t['status']}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)}</td><td>{t['confluence'] or ''}</td></tr>" for t in trades]) or "<tr><td colspan=6>No trades yet - run SCAN</td></tr>"
+    
+    def badge_cls(s):
+        return "win" if s=="win" else "loss" if s=="loss" else "bull"
+    
+    rows = ""
+    for t in trades:
+        bc = badge_cls(t['status'])
+        pnl_val = round(t['pnl'] or 0, 2)
+        rows += f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td>{t['symbol']} {t['direction']}</td><td>{t['entry']} / {t['sl']} / {t['tp']}</td><td><span class='badge {bc}'>{t['status']}</span></td><td>{curr_sym}{pnl_val}</td><td>{t['confluence'] or ''}</td></tr>"
+    if not rows:
+        rows = "<tr><td colspan=6>No trades yet - run SCAN</td></tr>"
+    
     content = f"<div class='card'><h3>Journal - {len(trades)} trades</h3><div style='overflow:auto'><table><tr><th>Date</th><th>Pair</th><th>Entry/SL/TP</th><th>Status</th><th>PNL</th><th>Reason</th></tr>{rows}</table></div><br><a class='btn' href='/export/csv'>Export CSV</a></div>"
     return layout(content, session['email'], "journal")
 
+@app.route('/test-telegram')
+def test_telegram():
+    if 'email' not in session:
+        return redirect('/')
+    conn = get_conn()
+    cur = conn.cursor()
+    cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],))
+    u = cur.fetchone()
+    cur.close()
+    conn.close()
+    if not u:
+        return "No user found <a href='/'>Home</a>"
+    if not u.get('telegram_id'):
+        return f"<h3>No Telegram ID saved</h3><p>You have only username: {u.get('telegram_username','nothing')}. Go link bot via /start {u.get('payment_ref','')}</p><a href='/settings'>Settings</a>"
+    ok = send_telegram(u['telegram_id'], f"Agent 35 Test OK for {u['email']} - Telegram working!")
+    if ok:
+        return f"<h3>Sent to {u['telegram_id']}! Check Telegram.</h3><a href='/dashboard'>Back</a>"
+    else:
+        return f"<h3>Telegram API failed for {u['telegram_id']}. Did you /start @Sniper035_bot?</h3><a href='/settings'>Settings</a>"
 @app.route('/test-telegram')
 def test_telegram():
     if 'email' not in session:
