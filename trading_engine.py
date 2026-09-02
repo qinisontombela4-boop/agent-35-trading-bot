@@ -3,6 +3,45 @@ import pandas as pd
 from datetime import datetime, timedelta
 import math
 
+def get_pd_zone(price, high, low):
+    """Returns zone and % position in range"""
+    if high == low:
+        return "equilibrium", 50
+    pos = (price - low) / (high - low) * 100
+    if pos >= 75:
+        return "premium", pos
+    elif pos <= 25:
+        return "discount", pos
+    else:
+        return "equilibrium", pos
+
+def get_htf_zones(symbol, tf="4h"):
+    """Get high/low for TF to calc PD zone"""
+    try:
+        interval_map = {"4h": "240m", "2h": "120m", "1h": "60m", "15m": "15m", "5m": "5m", "1d": "1d"}
+        period_map = {"4h": "5d", "2h": "5d", "1h": "5d", "15m": "5d", "5m": "2d", "1d": "3mo"}
+        # Use yfinance
+        import yfinance as yf
+        yfs = symbol+"=X" if len(symbol)==6 else symbol
+        if symbol=="XAUUSD": yfs="GC=F"
+        if "USD" in symbol and len(symbol)<=7 and symbol!="XAUUSD": yfs = symbol+"=X"
+        
+        df = yf.download(yfs, period=period_map.get(tf,"5d"), interval=interval_map.get(tf,"60m"), progress=False, auto_adjust=True)
+        if df.empty:
+            return None
+        try:
+            df.columns = df.columns.get_level_values(0)
+        except:
+            pass
+        # Last 50 candles range for zone
+        recent = df.tail(50)
+        h = float(recent['High'].max())
+        l = float(recent['Low'].min())
+        close = float(df['Close'].iloc[-1])
+        zone, pct = get_pd_zone(close, h, l)
+        return {"zone": zone, "pct": round(pct,1), "high": h, "low": l, "price": close}
+    except:
+        return None
 # CONFIG
 MAP = {"EURUSD":"EURUSD=X","GBPUSD":"GBPUSD=X","USDJPY":"JPY=X","USDZAR":"ZAR=X","EURZAR":"EURZAR=X","XAUUSD":"GC=F","GOLD":"GC=F","BTCUSD":"BTC-USD","ETHUSD":"ETH-USD","NAS100":"^NDX","US30":"^DJI","SPX500":"^GSPC","GER40":"^GDAXI","USOIL":"CL=F"}
 MIN_SCORE = 4  # <--- Dropped to 4 as requested
