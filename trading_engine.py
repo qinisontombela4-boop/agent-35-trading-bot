@@ -3,7 +3,6 @@ import requests
 import traceback
 from datetime import datetime
 
-# ===== FIX RENDER YAHOO BAN =====
 try:
     from curl_cffi import requests as c_requests
     session = c_requests.Session(impersonate="chrome110")
@@ -19,6 +18,15 @@ MAP = {
     "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD", "SOLUSD": "SOL-USD",
     "NAS100": "^IXIC", "US30": "^DJI", "SPX500": "^GSPC"
 }
+
+def round_by_symbol(symbol, price):
+    s = symbol.upper()
+    if "JPY" in s: return round(price, 3)
+    if "ZAR" in s: return round(price, 3) # FIX FOR YOUR SCREENSHOT
+    if "XAU" in s or "GOLD" in s: return round(price, 2)
+    if "BTC" in s or "ETH" in s or "SOL" in s: return round(price, 2)
+    if "NAS100" in s or "US30" in s or "SPX500" in s or "GER" in s or "UK100" in s: return round(price, 1)
+    return round(price, 5)
 
 def fetch_forexfactory_auto():
     try:
@@ -70,13 +78,10 @@ def detect_smc(df):
         hi = float(df['High'].rolling(20).max().iloc[-1])
         lo = float(df['Low'].rolling(20).min().iloc[-1])
         disc = ((hi - last_close) / (hi - lo) * 100) if hi!= lo else 50
-
         prev_high = float(df['High'].iloc[-20:-1].max())
         prev_low = float(df['Low'].iloc[-20:-1].min())
         bos_bull = last_close > prev_high
         bos_bear = last_close < prev_low
-
-        # Bu-OB = last bearish candle, Be-OB = last bullish candle (no BOS filter)
         bu_ob = None
         be_ob = None
         for i in range(len(df)-2, len(df)-30, -1):
@@ -87,18 +92,13 @@ def detect_smc(df):
             if df['Close'].iloc[i] > df['Open'].iloc[i]:
                 be_ob = {"low": float(df['Low'].iloc[i]), "high": float(df['High'].iloc[i])}
                 break
-
-        # CHoCH
         choch_bull = bos_bull and float(df['Close'].iloc[-10]) < float(df['Low'].iloc[-25])
         choch_bear = bos_bear and float(df['Close'].iloc[-10]) > float(df['High'].iloc[-25])
-
-        # MB = Mitigation Block = 50% of OB
         mb = None
         if bu_ob:
             mb = {"low": (bu_ob['low']+bu_ob['high'])/2, "high": bu_ob['high']}
         elif be_ob:
             mb = {"low": be_ob['low'], "high": (be_ob['low']+be_ob['high'])/2}
-
         return {
             "bos_bull": bos_bull, "bos_bear": bos_bear,
             "choch_bull": choch_bull, "choch_bear": choch_bear,
@@ -114,25 +114,19 @@ def full_multi_tf_analysis(symbol):
         df_4h = get_data_direct(symbol, "240m", "1mo")
         df_1h = get_data_direct(symbol, "60m", "5d")
         df_15m = get_data_direct(symbol, "15m", "2d")
-
         if df_1h is None and df_15m is None:
-            return {"signal":False,"symbol":symbol,"reason":"Yahoo warming up - retry in 20s (curl session starting)"}
-
+            return {"signal":False,"symbol":symbol,"reason":"Yahoo warming up - retry in 20s"}
         smc_4h = detect_smc(df_4h) if df_4h is not None else None
         smc_1h = detect_smc(df_1h) if df_1h is not None else None
         smc_15m = detect_smc(df_15m) if df_15m is not None else None
-
         if not smc_1h or not smc_15m:
-            return {"signal":False,"symbol":symbol,"reason":f"Loading SMC 1h:{smc_1h is not None} 15m:{smc_15m is not None} - hit refresh"}
-
+            return {"signal":False,"symbol":symbol,"reason":f"Loading SMC 1h:{smc_1h is not None} 15m:{smc_15m is not None}"}
         score = 0
         conf = []
         direction = None
         ob_type = ""
         disc = smc_15m['discount']
         close = smc_15m['close']
-
-        # 1. DISCOUNT / PREMIUM - ALWAYS POINTS (fixes 0/8)
         if disc > 60:
             score += 2
             conf.append(f"Disc {disc:.0f}%")
@@ -150,8 +144,6 @@ def full_multi_tf_analysis(symbol):
         else:
             score += 1
             conf.append(f"EQ {disc:.0f}%")
-
-        # 2. HTF
         if smc_4h:
             if smc_4h['bos_bull']:
                 score += 1
@@ -159,8 +151,6 @@ def full_multi_tf_analysis(symbol):
             if smc_4h['bos_bear']:
                 score += 1
                 conf.append("4H BEAR")
-
-        # 3. CHoCH
         if smc_1h['choch_bull']:
             score += 2
             conf.append("CHoCH BULL")
@@ -169,29 +159,23 @@ def full_multi_tf_analysis(symbol):
             score += 2
             conf.append("CHoCH BEAR")
             direction = "SELL"
-
-        # 4. BOS
         if smc_1h['bos_bull'] or smc_15m['bos_bull']:
             score += 1
             conf.append("BOS BULL")
         if smc_1h['bos_bear'] or smc_15m['bos_bear']:
             score += 1
             conf.append("BOS BEAR")
-
-        # 5. Bu-OB in Discount, Be-OB in Premium, MB
         if disc > 60:
             if smc_1h['bu_ob']:
                 score += 2
                 conf.append("Bu-OB")
                 ob_type = "Bu-OB"
-                # Retest check
                 if smc_1h['bu_ob']['low']*0.999 <= close <= smc_1h['bu_ob']['high']*1.001:
                     score += 2
                     conf.append("🔥 Bu-OB RETEST")
             if smc_1h['mb']:
                 score += 1
                 conf.append("MB")
-
         if disc < 40:
             if smc_1h['be_ob']:
                 score += 2
@@ -203,11 +187,8 @@ def full_multi_tf_analysis(symbol):
             if smc_1h['mb']:
                 score += 1
                 conf.append("MB")
-
         if not direction:
             direction = "BUY" if disc > 50 else "SELL"
-
-        # SL/TP based on OB / MB
         entry = close
         try:
             atr = float((df_15m['High']-df_15m['Low']).rolling(10).mean().iloc[-1])
@@ -215,14 +196,22 @@ def full_multi_tf_analysis(symbol):
             atr = entry * 0.002
         if atr == 0 or str(atr) == 'nan':
             atr = entry * 0.002
-
         sl = entry - atr*1.5 if direction == "BUY" else entry + atr*1.5
         if ob_type == "Bu-OB" and smc_1h['bu_ob']:
             sl = smc_1h['bu_ob']['low'] - atr*0.5
         if ob_type == "Be-OB" and smc_1h['be_ob']:
             sl = smc_1h['be_ob']['high'] + atr*0.5
-
         tp = entry + (entry - sl)*3 if direction == "BUY" else entry - (sl - entry)*3
+
+        # V8.3 DECIMALS FIX
+        entry = round_by_symbol(symbol, entry)
+        sl = round_by_symbol(symbol, sl)
+        tp = round_by_symbol(symbol, tp)
+        if direction == "BUY" and sl >= entry:
+            sl = round_by_symbol(symbol, entry - atr*1.5)
+        if direction == "SELL" and sl <= entry:
+            sl = round_by_symbol(symbol, entry + atr*1.5)
+        tp = round_by_symbol(symbol, entry + (entry - sl)*3 if direction == "BUY" else entry - (sl - entry)*3)
 
         quality = "LOW"
         if score >= 8:
@@ -255,9 +244,9 @@ def full_multi_tf_analysis(symbol):
             "signal": True,
             "symbol": symbol,
             "direction": direction,
-            "entry": round(entry,5),
-            "sl": round(sl,5),
-            "tp": round(tp,5),
+            "entry": entry,
+            "sl": sl,
+            "tp": tp,
             "score": score,
             "quality": quality,
             "bias": f"disc {disc:.0f}% | Bu-OB:{smc_1h['bu_ob'] is not None} Be-OB:{smc_1h['be_ob'] is not None} MB:{smc_1h['mb'] is not None} CHoCH:{smc_1h['choch_bull'] or smc_1h['choch_bear']}",
