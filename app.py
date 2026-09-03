@@ -70,8 +70,11 @@ def send_telegram(chat_id, text, trade_id=None, stage="signal"):
             else:
                 payload["reply_markup"] = {"inline_keyboard": [[{"text":"✅ WIN","callback_data":f"win:{trade_id}"},{"text":"❌ LOSS","callback_data":f"loss:{trade_id}"},{"text":"➖ BE","callback_data":f"be:{trade_id}"}],[{"text":"💰 CLOSE EARLY","callback_data":f"closeearly:{trade_id}"}]]}
         r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=15)
+        print(f"TG SEND to {chat_id} status {r.status_code} {r.text[:200]}")
         return r.status_code==200
-    except: return False
+    except Exception as e:
+        print(f"TG ERR {e}")
+        return False
 
 SESSIONS_HOURS_UTC = {"Sydney": (22, 6),"Asia": (0, 9),"London": (8, 16),"New York": (13, 21)}
 def is_session_active(user_sessions):
@@ -144,15 +147,11 @@ def referral_link(code):
 def guide_page():
     email=session.get('email','')
     content = """
-    <h1 style='color:#10b981'>📘 How to Use Agent 35</h1>
-    <div class='guide-step'><b>1️⃣ Getting Started</b><br>Choose your 5 favorite pairs in Dashboard, link Telegram, and start receiving signals.</div>
-    <div class='guide-step'><b>2️⃣ Linking Telegram</b><br>- Dashboard -> Link TG -> Opens Telegram bot -> Click START -> Test TG to check</div>
-    <div class='guide-step'><b>3️⃣ Understanding Signals</b><br>Each signal shows Symbol, Direction, Quality, Entry, SL, TP. Click ✅ TOOK when you take trade -> Goes to Journal. Click ❌ SKIP if not.</div>
-    <div class='guide-step'><b>4️⃣ Dashboard</b><br>Watchlist max 5. SCAN manually checks. WR and profit from TOOK trades only.</div>
-    <div class='guide-step'><b>5️⃣ Journal</b><br>Organized by month and day. Shows Took Time, Closed Time, Duration. Clear month if needed - full history stays in All Signals.</div>
-    <div class='guide-step'><b>6️⃣ Settings</b><br>Set account size, sessions, timezone, and News Filter toggle.</div>
-    <div class='guide-step'><b>7️⃣ News Filter V9.7</b><br>When ON: Bot pauses 35min before/after red news (CPI, NFP, FOMC) for your pairs. Recommended ON to avoid buying tops like your EURUSD example.</div>
-    <div class='guide-step'><b>8️⃣ Tips</b><br>Focus on SNIPER and PREMIUM signals. Trade London+NY sessions. Always use Stop Loss.</div>
+    <h1 style='color:#10b981'>📘 How to Use Agent 35 V9.8.2</h1>
+    <div class='guide-step'><b>Auto Signals: Every 30 minutes</b><br>Same pair max 1 per 30 min. Direction flip allowed after 15 min. Different pairs have no limit.</div>
+    <div class='guide-step'><b>Manual Scan: Every 5 minutes</b><br>SCAN NOW button has 5 min dedup only - use for testing.</div>
+    <div class='guide-step'><b>News Filter</b><br>When ON: Blocks 35 min before/after CPI, NFP, FOMC etc.</div>
+    <div class='guide-step'><b>Premium/Discount</b><br>Premium 70%+ = SELL only, Discount 30%- = BUY only. EQH/Weak High sweep = reversal.</div>
     <div class='card' style='text-align:center'><a class='btn' href='/dashboard'>Back to Dashboard</a></div>
     """
     return layout(content, email, "guide")
@@ -183,7 +182,7 @@ def dashboard():
     syms=[s for s in (user['symbols'] or '').split(',') if s.strip()]; chips="".join([f"<span class='chip chip-active'><b>{s}</b><span class='x' onclick=\"removeSym('{s}')\">x</span></span>" for s in syms])
     rows="".join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td><b>{t['symbol']}</b></td><td><span class='badge { 'win' if 'win' in t['status'] else 'loss' if t['status']=='loss' else 'bull'}'>{t['status'].upper()}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)} ({t.get('close_r',0)}R)</td></tr>" for t in trades]) or "<tr><td colspan=4>No trades yet</td></tr>"
     pay_ref=user['payment_ref'] or session['email']; sess_display=user['sessions'] or 'London,New York'; news_stat = "ON 🛡️" if user.get('news_filter') else "OFF ⚠️"
-    content=f"<div class='card' style='padding:12px;display:flex;justify-content:space-between'><span>Sessions: <b>{sess_display}</b> | News: <b style='color:#f59e0b'>{news_stat}</b></span><span>WR: {wr:.1f}% | {total_r:.1f}R | {curr_sym}{pnl:.2f}</span></div><div class='grid grid4'><div class='card'><div class='stat-label'>Total Profit</div><div class='stat-value'>{curr_sym}{round(pnl,2)} <span class='badge bull'>{round(wr,1)}% {total_r:.1f}R</span></div></div><div class='card'><div class='stat-label'>Account Size</div><div class='stat-value' style='font-size:18px'>{curr_sym}{user['account_size']}</div><a href='/settings' class='btn-outline'>Edit</a></div><div class='card' style='position:relative'><div class='stat-label'>Watchlist {len(syms)}/5</div><div style='margin:12px 0'>{chips}</div><form id='symForm' method='POST' action='/quick-symbols'><input type='hidden' name='symbols' id='symInput' value=\"{user['symbols']}\"></form><input id='symSearch' class='searchbox' placeholder='Search pairs...' oninput='filterSyms()' autocomplete='off'><div id='symDropdown' class='dropdown'></div></div><div class='card'><a class='btn' href='/scan'>SCAN NOW</a><a href='https://t.me/{TELEGRAM_BOT_USERNAME}?start={pay_ref}' target='_blank' class='btn-outline'>Link Telegram</a><a href='/test-telegram' class='btn-test'>Test Telegram</a></div></div><div class='card' style='margin-top:14px'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th></tr>{rows}</table></div>"
+    content=f"<div class='card' style='padding:12px;display:flex;justify-content:space-between'><span>Sessions: <b>{sess_display}</b> | News: <b style='color:#f59e0b'>{news_stat}</b> | Auto: <b>30m</b></span><span>WR: {wr:.1f}% | {total_r:.1f}R | {curr_sym}{pnl:.2f}</span></div><div class='grid grid4'><div class='card'><div class='stat-label'>Total Profit</div><div class='stat-value'>{curr_sym}{round(pnl,2)} <span class='badge bull'>{round(wr,1)}% {total_r:.1f}R</span></div></div><div class='card'><div class='stat-label'>Account Size</div><div class='stat-value' style='font-size:18px'>{curr_sym}{user['account_size']}</div><a href='/settings' class='btn-outline'>Edit</a></div><div class='card' style='position:relative'><div class='stat-label'>Watchlist {len(syms)}/5</div><div style='margin:12px 0'>{chips}</div><form id='symForm' method='POST' action='/quick-symbols'><input type='hidden' name='symbols' id='symInput' value=\"{user['symbols']}\"></form><input id='symSearch' class='searchbox' placeholder='Search pairs...' oninput='filterSyms()' autocomplete='off'><div id='symDropdown' class='dropdown'></div></div><div class='card'><a class='btn' href='/scan'>SCAN NOW (5m)</a><a href='https://t.me/{TELEGRAM_BOT_USERNAME}?start={pay_ref}' target='_blank' class='btn-outline'>Link Telegram</a><a href='/test-telegram' class='btn-test'>Test Telegram</a></div></div><div class='card' style='margin-top:14px'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th></tr>{rows}</table></div>"
     return layout(content, session['email'], "dashboard")
 
 @app.route('/journal')
@@ -298,62 +297,16 @@ def manual_close():
 @app.route('/payment')
 def payment_page():
     ref=f"AG35-{datetime.now().strftime('%m%d')}-{os.urandom(2).hex().upper()}"
-    email=session.get('email','')
     content=f"""
     <div style='max-width:900px;margin:auto'>
-        <div style='text-align:center;margin-bottom:24px'>
-            <h1 style='color:#10b981;margin:0'>Choose Your Plan</h1>
-            <p style='color:#94a3b8'>Join traders using Agent 35 daily</p>
-        </div>
+        <div style='text-align:center;margin-bottom:24px'><h1 style='color:#10b981;margin:0'>Choose Your Plan</h1></div>
         <div class='grid grid2'>
-            <div class='plan-card'>
-                <h3 style='margin:0;color:#fff'>Yearly Access</h3>
-                <div style='font-size:32px;font-weight:800;color:#fff;margin:12px 0'>R500 <span style='font-size:14px;color:#94a3b8;font-weight:400'>/ year</span></div>
-                <div style='color:#94a3b8;font-size:13px;line-height:22px'>
-                    ✅ 5 Custom Watchlist Pairs<br>
-                    ✅ Real-time Telegram Signals<br>
-                    ✅ Smart Trade Management<br>
-                    ✅ Monthly Journal + Analytics<br>
-                    ✅ News Filter + Premium/Discount<br>
-                    ✅ Priority Support
-                </div>
-                <a href='/submit-payment?ref={ref}&plan=yearly' class='btn-outline' style='margin-top:18px'>Select Yearly - R500</a>
-            </div>
-            <div class='plan-card plan-popular'>
-                <div class='plan-badge'>MOST POPULAR</div>
-                <h3 style='margin:0;color:#fff'>Lifetime Access</h3>
-                <div style='font-size:32px;font-weight:800;color:#10b981;margin:12px 0'>R5000 <span style='font-size:14px;color:#94a3b8;font-weight:400'>/ once</span></div>
-                <div style='color:#94a3b8;font-size:13px;line-height:22px'>
-                    ✅ Everything in Yearly<br>
-                    ✅ Lifetime Updates<br>
-                    ✅ Never Pay Again<br>
-                    ✅ 1-on-1 Setup Call
-                </div>
-                <a href='/submit-payment?ref={ref}&plan=lifetime' class='btn' style='margin-top:18px'>Select Lifetime - R5000</a>
-            </div>
+            <div class='plan-card'><h3 style='margin:0;color:#fff'>Yearly Access</h3><div style='font-size:32px;font-weight:800;color:#fff;margin:12px 0'>R500 <span style='font-size:14px;color:#94a3b8'>/ year</span></div><a href='/submit-payment?ref={ref}&plan=yearly' class='btn-outline' style='margin-top:18px'>Select Yearly - R500</a></div>
+            <div class='plan-card plan-popular'><div class='plan-badge'>MOST POPULAR</div><h3 style='margin:0;color:#fff'>Lifetime Access</h3><div style='font-size:32px;font-weight:800;color:#10b981;margin:12px 0'>R5000 <span style='font-size:14px;color:#94a3b8'>/ once</span></div><a href='/submit-payment?ref={ref}&plan=lifetime' class='btn' style='margin-top:18px'>Select Lifetime - R5000</a></div>
         </div>
         <div class='card' style='margin-top:20px'>
             <h3 style='color:#10b981;margin-top:0'>💳 How to Pay</h3>
-            <div class='grid grid2'>
-                <div>
-                    <label style='color:#fff'>Bank: Capitec</label>
-                    <div style='background:#070d1a;border:1px solid #1e2d45;padding:14px;border-radius:12px'>
-                        <div>Account Number: <b style='color:#fff;font-size:16px'>{CAPITEC_ACC}</b></div>
-                        <div style='margin-top:8px'>Reference: <b style='color:#10b981;font-size:18px'>{ref}</b></div>
-                    </div>
-                </div>
-                <div>
-                    <label style='color:#fff'>After Payment</label>
-                    <div style='background:#070d1a;border:1px solid #1e2d45;padding:14px;border-radius:12px'>
-                        <div style='font-size:13px;color:#cbd5e1;line-height:20px'>
-                        1. Pay with reference <b style='color:#10b981'>{ref}</b><br>
-                        2. Click "I Have Paid" below<br>
-                        3. Link Telegram for activation<br>
-                        4. Approval within 24 hours
-                        </div>
-                    </div>
-                </div>
-            </div>
+            <div>Account Number: <b style='color:#fff;font-size:16px'>{CAPITEC_ACC}</b> | Reference: <b style='color:#10b981;font-size:18px'>{ref}</b></div>
             <div style='margin-top:16px;display:flex;gap:10px;flex-wrap:wrap'>
                 <a href='/submit-payment?ref={ref}&plan=yearly' class='btn' style='background:#121d30;color:#fff;border:1px solid #1e2d45'>I Paid R500 Yearly - {ref}</a>
                 <a href='/submit-payment?ref={ref}&plan=lifetime' class='btn'>I Paid R5000 Lifetime - {ref}</a>
@@ -372,7 +325,7 @@ def submit_payment():
     except: cur.execute("INSERT INTO agent35_payments (user_email,plan,ref_code,amount,status) VALUES (%s,%s,%s,%s,'pending')", (session['email'],plan,ref,amount))
     cur.execute("UPDATE agent35_users SET payment_ref=%s, plan=%s, payment_status='pending' WHERE email=%s", (ref,plan,session['email'])); conn.commit(); cur.close(); conn.close()
     tg_link=f"https://t.me/{TELEGRAM_BOT_USERNAME}?start={ref}"
-    return layout(f"<div class='card' style='text-align:center;max-width:500px;margin:auto'><h2 style='color:#10b981'>Payment Submitted: {ref}</h2><p>Link Telegram now</p><a href='{tg_link}' target='_blank' class='btn'>Link Telegram Now</a><a class='btn-outline' href='/dashboard'>Back</a></div>", session['email'])
+    return layout(f"<div class='card' style='text-align:center;max-width:500px;margin:auto'><h2 style='color:#10b981'>Payment Submitted: {ref}</h2><a href='{tg_link}' target='_blank' class='btn'>Link Telegram Now</a><a class='btn-outline' href='/dashboard'>Back</a></div>", session['email'])
 
 @app.route('/test-telegram')
 def test_telegram():
@@ -381,10 +334,10 @@ def test_telegram():
     if not u or not u.get('telegram_id'): cur.close(); conn.close(); return layout(f"<div class='card'><h3>Link Telegram first</h3></div>", session['email'])
     use_news = u.get('news_filter', True)
     res = engine.full_multi_tf_analysis("USDCHF", use_news_filter=use_news)
-    msg = build_signal_msg(res if res.get('signal') else {'symbol': 'USDCHF','direction': 'BUY','entry': 0.79635,'sl': 0.79450,'tp': 0.80005,'score': 7,'quality': 'PREMIUM','confluence': ['Strong Trend','Key Level Retest','Momentum'],'reason': 'Test signal - Working!','news_warning': ''}, u)
-    ok = send_telegram(u['telegram_id'], f"🧪 Test Successful 🧪\nNews Filter: {'ON' if use_news else 'OFF'}\n\n{msg}", trade_id=99999, stage="signal")
+    msg = build_signal_msg(res if res.get('signal') else {'symbol': 'USDCHF','direction': 'BUY','entry': 0.79635,'sl': 0.79450,'tp': 0.80005,'score': 7,'quality': 'PREMIUM','confluence': ['Test'],'reason': 'Test signal','news_warning': ''}, u)
+    ok = send_telegram(u['telegram_id'], f"🧪 Test V9.8.2 - Auto 30m\nNews: {'ON' if use_news else 'OFF'}\n\n{msg}", trade_id=99999, stage="signal")
     cur.close(); conn.close()
-    content = f"<div class='card' style='text-align:center'><h3 style='color:#10b981'>✅ Sent!</h3><div style='background:#070d1a;padding:12px;border-radius:10px;text-align:left;font-size:12px;white-space:pre-wrap'>{msg}</div><br><a class='btn' href='/dashboard'>Back</a></div>" if ok else "<div class='card'><h3>Failed</h3></div>"
+    content = f"<div class='card' style='text-align:center'><h3 style='color:#10b981'>✅ Sent! {ok}</h3><div style='background:#070d1a;padding:12px;border-radius:10px;text-align:left;font-size:12px;white-space:pre-wrap'>{msg}</div><br><a class='btn' href='/dashboard'>Back</a></div>" if ok else "<div class='card'><h3>Failed - check bot token</h3></div>"
     return layout(content, session['email'])
 
 @app.route('/quick-symbols', methods=['POST'])
@@ -403,19 +356,24 @@ def scan():
         try:
             res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
         except Exception as e:
-            res={"signal":False,"symbol":sym,"reason":f"No setup {e}"}
+            res={"signal":False,"symbol":sym,"reason":f"Error {e}"}
         res['symbol']=sym; results.append(res)
         if res.get('signal') and res.get('score',0) >= 4 and not res.get('news_block'):
-            cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '4 hours' LIMIT 1", (session['email'], sym))
-            if cur.fetchone(): continue
+            # V9.8.2 MANUAL: 5 min dedup only
+            cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '5 minutes' LIMIT 1", (session['email'], sym))
+            if cur.fetchone():
+                print(f"MANUAL SKIP {sym} - sent within 5 min")
+                continue
             cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id",(session['email'],res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['entry'],res['sl'],res['bias'],str(res.get('confluence',''))))
             new_row=cur.fetchone(); tid=new_row['id'] if new_row else 0
+            conn.commit()
             if user['telegram_id']:
                 msg=build_signal_msg(res, user)
-                send_telegram(user['telegram_id'], msg, trade_id=tid, stage="signal")
+                ok = send_telegram(user['telegram_id'], msg, trade_id=tid, stage="signal")
+                print(f"MANUAL SEND {sym} -> TG {ok}")
     conn.commit(); cur.close(); conn.close()
-    html="".join([f"<div class='card' style='border-left:4px solid #10b981'><b>{r['symbol']} {r.get('direction','')} {r.get('score',0)}/8 {r.get('quality','')}</b><br>Entry {r.get('entry','')} SL {r.get('sl','')} TP {r.get('tp','')}<br><small>{r.get('bias','')}</small></div>" if r.get('signal') else f"<div class='card' style='opacity:0.6'><b>{r['symbol']} - No setup</b><br><small>{r.get('reason','')}</small></div>" for r in results])
-    return layout(f"<h2>Scan V9.7 - News {'ON' if use_news else 'OFF'} - Premium/Discount Fixed</h2>{html}<br><a class='btn' href='/journal'>Journal</a>", session['email'])
+    html="".join([f"<div class='card' style='border-left:4px solid #10b981'><b>{r['symbol']} {r.get('direction','')} {r.get('score',0)}/8 {r.get('quality','')}</b><br>Entry {r.get('entry','')} SL {r.get('sl','')} TP {r.get('tp','')}<br><small>{r.get('bias','')} | {r.get('reason','')}</small></div>" if r.get('signal') else f"<div class='card' style='opacity:0.6'><b>{r['symbol']} - No setup</b><br><small>{r.get('reason','')}</small></div>" for r in results])
+    return layout(f"<h2>Scan V9.8.2 - Auto 30m / Manual 5m - Premium Fixed - News {'ON' if use_news else 'OFF'}</h2>{html}<br><a class='btn' href='/journal'>Journal</a>", session['email'])
 
 @app.route('/settings', methods=['GET','POST'])
 def settings():
@@ -439,7 +397,7 @@ def settings():
     sel_usd="selected" if u['currency']=='USD' else ""; sel_zar="selected" if u['currency']=='ZAR' else ""; sel_eur="selected" if u['currency']=='EUR' else ""; sel_12="selected" if u['risk_reward']=='1:2' else ""; sel_13="selected" if u['risk_reward']=='1:3' else ""; sel_14="selected" if u['risk_reward']=='1:4' else ""
     sess=(u['sessions'] or 'London,New York'); c_london="checked" if "London" in sess else ""; c_ny="checked" if "New York" in sess else ""; c_asia="checked" if "Asia" in sess else ""; c_sydney="checked" if "Sydney" in sess else ""; c_all="checked" if "24/7" in sess else ""
     utz = u.get('timezone') or 'Africa/Johannesburg'; news_checked = "checked" if u.get('news_filter', True) else ""
-    content=f"<div style='max-width:700px;margin:auto'><h2 style='color:#10b981'>Settings V9.7</h2><form method='POST'><div class='settings-section'><div style='display:grid;grid-template-columns:1fr 1fr;gap:12px'><div><label>Currency</label><select name='currency'><option value='USD' {sel_usd}>USD</option><option value='ZAR' {sel_zar}>ZAR</option><option value='EUR' {sel_eur}>EUR</option></select></div><div><label>Account Size</label><input name='acc' type='number' value='{u['account_size']}'></div><div><label>Lot Size</label><input name='lot' type='number' step='0.01' value='{u['lot_size']}'></div><div><label>RR</label><select name='rr'><option {sel_12}>1:2</option><option {sel_13}>1:3</option><option {sel_14}>1:4</option></select></div></div><label>Symbols</label><input name='symbols' value='{u['symbols']}'><label>Telegram @</label><input name='tg' value='{u['telegram_username'] or ''}'><label>TZ</label><select name='timezone'><option value='{utz}' selected>{utz}</option><option value='Africa/Johannesburg'>Africa/Johannesburg</option><option value='Europe/London'>Europe/London</option><option value='America/New_York'>America/New_York</option><option value='UTC'>UTC</option></select><div style='margin-top:16px'><label>Trading Sessions</label><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'><label class='sess-check'><input type='checkbox' name='sess_london' {c_london}> London</label><label class='sess-check'><input type='checkbox' name='sess_ny' {c_ny}> NY</label><label class='sess-check'><input type='checkbox' name='sess_asia' {c_asia}> Asia</label><label class='sess-check'><input type='checkbox' name='sess_sydney' {c_sydney}> Sydney</label></div><label class='sess-check' style='margin-top:8px'><input type='checkbox' name='sess_all' {c_all}> 24/7</label></div><div style='margin-top:18px'><label>📰 News Filter - V9.7 NEW</label><label class='sess-check news-check'><input type='checkbox' name='news_filter' {news_checked}> ✅ Avoid High-Impact News (35min before/after) - Recommended ON</label><p style='font-size:11px;color:#94a3b8;margin-top:6px'>Blocks signals during CPI, NFP, FOMC, Interest Rate, GDP for your pairs.<br>Example: EURUSD will pause during USD news 12:30 UTC & 14:00 UTC.<br>Turn OFF if you want to trade news volatility.</p></div></div><button class='btn'>Save Settings</button><a href='/dashboard' class='btn-outline'>Back to Dashboard</a></form></div>"
+    content=f"<div style='max-width:700px;margin:auto'><h2 style='color:#10b981'>Settings V9.8.2 (30m Auto)</h2><form method='POST'><div class='settings-section'><div style='display:grid;grid-template-columns:1fr 1fr;gap:12px'><div><label>Currency</label><select name='currency'><option value='USD' {sel_usd}>USD</option><option value='ZAR' {sel_zar}>ZAR</option><option value='EUR' {sel_eur}>EUR</option></select></div><div><label>Account Size</label><input name='acc' type='number' value='{u['account_size']}'></div><div><label>Lot Size</label><input name='lot' type='number' step='0.01' value='{u['lot_size']}'></div><div><label>RR</label><select name='rr'><option {sel_12}>1:2</option><option {sel_13}>1:3</option><option {sel_14}>1:4</option></select></div></div><label>Symbols</label><input name='symbols' value='{u['symbols']}'><label>Telegram @</label><input name='tg' value='{u['telegram_username'] or ''}'><label>TZ</label><select name='timezone'><option value='{utz}' selected>{utz}</option><option value='Africa/Johannesburg'>Africa/Johannesburg</option><option value='Europe/London'>Europe/London</option><option value='America/New_York'>America/New_York</option><option value='UTC'>UTC</option></select><div style='margin-top:16px'><label>Trading Sessions</label><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'><label class='sess-check'><input type='checkbox' name='sess_london' {c_london}> London</label><label class='sess-check'><input type='checkbox' name='sess_ny' {c_ny}> NY</label><label class='sess-check'><input type='checkbox' name='sess_asia' {c_asia}> Asia</label><label class='sess-check'><input type='checkbox' name='sess_sydney' {c_sydney}> Sydney</label></div><label class='sess-check' style='margin-top:8px'><input type='checkbox' name='sess_all' {c_all}> 24/7</label></div><div style='margin-top:18px'><label>📰 News Filter</label><label class='sess-check news-check'><input type='checkbox' name='news_filter' {news_checked}> ✅ Avoid High-Impact News (35min) - ON</label></div><div style='margin-top:12px;background:#121d30;padding:10px;border-radius:10px;border:1px solid #1e2d45'><b style='color:#10b981'>Auto Timing V9.8.2:</b><br><span style='font-size:11px;color:#94a3b8'>• Auto scanner: 30 min same pair block, 15 min if direction flips<br>• Manual SCAN NOW: 5 min block<br>• Set cron-job.org to 30 min for /cron/scan-all</span></div></div><button class='btn'>Save Settings</button><a href='/dashboard' class='btn-outline'>Back</a></form></div>"
     return layout(content, session['email'], "settings")
 
 @app.route('/telegram/webhook', methods=['POST'])
@@ -525,7 +483,7 @@ def cron_update():
         except Exception as e:
             print(f"cron update err {e} {traceback.format_exc()}")
     threading.Thread(target=do_update, daemon=True).start()
-    return jsonify({"ok":True, "version":"V9.7 NEWS FILTER"})
+    return jsonify({"ok":True, "version":"V9.8.2 30m AUTO"})
 
 @app.route('/cron/scan-all')
 def cron_scan_all():
@@ -534,7 +492,7 @@ def cron_scan_all():
             conn=get_conn(); cur=conn.cursor()
             cur.execute("SELECT * FROM agent35_users WHERE (payment_status='approved' OR is_creator=TRUE) AND symbols IS NOT NULL AND telegram_id IS NOT NULL")
             users=cur.fetchall()
-            print(f"CRON scan-all V9.7 checking {len(users)} users")
+            print(f"CRON V9.8.2 checking {len(users)} users - 30m dedup")
             scanned=0
             for user in users:
                 if not is_session_active(user['sessions'] or 'London,New York'):
@@ -544,34 +502,49 @@ def cron_scan_all():
                 for sym in symbols:
                     sym=sym.strip().upper()
                     if not sym: continue
-                    cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '4 hours' LIMIT 1", (user['email'], sym))
-                    if cur.fetchone():
+                    if not user.get('telegram_id'):
                         continue
+                    # V9.8.2: 30 min dedup same direction, 15 min if flip
+                    cur.execute("SELECT direction, timeframe_bias, created_at FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '30 minutes' ORDER BY created_at DESC LIMIT 1", (user['email'], sym))
+                    last = cur.fetchone()
                     try:
                         res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
                     except Exception as e:
                         print(f"Scan err {sym} {e}")
                         continue
                     if res.get('news_block'):
-                        print(f"NEWS SKIP {user['email']} {sym}: {res.get('news_text')}")
+                        print(f"NEWS SKIP {user['email']} {sym}")
                         continue
-                    if res.get('signal') and res.get('score',0) >= 4:
-                        cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id",(user['email'],res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['entry'],res['sl'],res['bias'],str(res.get('confluence',''))))
-                        row=cur.fetchone()
-                        conn.commit()
-                        if row and user['telegram_id']:
-                            msg=build_signal_msg(res, user)
-                            send_telegram(user['telegram_id'], msg, trade_id=row['id'], stage="signal")
-                            scanned+=1
+                    if last:
+                        last_dir = last['direction']
+                        if last_dir == res.get('direction'):
+                            print(f"DEDUP 30m {user['email']} {sym} same {last_dir}")
+                            continue
+                        else:
+                            # Direction flip - check 15 min
+                            cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND created_at > NOW() - INTERVAL '15 minutes' LIMIT 1", (user['email'], sym))
+                            if cur.fetchone():
+                                print(f"DEDUP 15m flip too soon {sym}")
+                                continue
+                    if not res.get('signal') or res.get('score',0) < 4:
+                        continue
+                    cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id",(user['email'],res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['entry'],res['sl'],res['bias'],str(res.get('confluence',''))))
+                    row=cur.fetchone()
+                    conn.commit()
+                    if row and user['telegram_id']:
+                        msg=build_signal_msg(res, user)
+                        ok = send_telegram(user['telegram_id'], msg, trade_id=row['id'], stage="signal")
+                        print(f"AUTO SEND {sym} -> {ok}")
+                        if ok: scanned+=1
             conn.commit(); cur.close(); conn.close()
-            print(f"CRON scan-all V9.7 done scanned={scanned}")
+            print(f"CRON V9.8.2 done scanned={scanned}")
         except Exception as e:
             print(f"scan-all err {e} {traceback.format_exc()}")
     threading.Thread(target=do_scan, daemon=True).start()
-    return jsonify({"ok":True, "msg":"Auto scanner V9.7 NEWS FILTER started"})
+    return jsonify({"ok":True, "msg":"V9.8.2 30m dedup scanner started"})
 
 @app.route('/healthz')
-def health(): return jsonify({"status":"ok","version":"V9.7-NEWS-FILTER","utc":datetime.utcnow().isoformat()})
+def health(): return jsonify({"status":"ok","version":"V9.8.2-30m","utc":datetime.utcnow().isoformat()})
 
 @app.route('/master')
 def master():
@@ -585,13 +558,13 @@ def master():
     cur.execute("SELECT email, plan, payment_status, telegram_id, symbols, news_filter FROM agent35_users ORDER BY created_at DESC LIMIT 30"); users=cur.fetchall()
     cur.close(); conn.close()
     pay_rows="".join([f"<tr><td>{p['ref_code']}</td><td>{p['user_email']}</td><td>{p['plan']}</td><td><a href='/master/approve?ref={p['ref_code']}' class='btn' style='padding:6px'>Approve</a></td></tr>" for p in payments]) or "<tr><td colspan=4>No pending</td></tr>"
-    user_rows="".join([f"<tr><td>{u['email']}</td><td>{u['plan']}/{u['payment_status']}</td><td>{'✅' if u['telegram_id'] else '❌'}</td><td>{u['symbols']}</td><td>{'🛡️' if u.get('news_filter') else '⚠️OFF'}</td></tr>" for u in users])
+    user_rows="".join([f"<tr><td>{u['email']}</td><td>{u['plan']}/{u['payment_status']}</td><td>{'✅' if u['telegram_id'] else '❌'}</td><td>{u['symbols']}</td><td>{'🛡️' if u.get('news_filter') else 'OFF'}</td></tr>" for u in users])
     content=f"""
-    <h1 style='color:#10b981'>👑 Master V9.7 NEWS FILTER</h1>
-    <div class='grid grid4'><div class='card'>Total {total_users}</div><div class='card'>Approved {approved}</div><div class='card'>Pending {pending}</div><div class='card'><a href='/cron/scan-all' target='_blank' class='btn'>TEST SCANNER V9.7</a></div></div>
+    <h1 style='color:#10b981'>👑 Master V9.8.2 - 30m Auto / 5m Manual</h1>
+    <div class='grid grid4'><div class='card'>Total {total_users}</div><div class='card'>Approved {approved}</div><div class='card'>Pending {pending}</div><div class='card'><a href='/cron/scan-all' target='_blank' class='btn'>TEST SCANNER 30m</a></div></div>
     <div class='card'><h3>Pending Payments</h3><table><tr><th>Ref</th><th>Email</th><th>Plan</th><th>Action</th></tr>{pay_rows}</table></div>
-    <div class='card'><h3>Users (News Filter)</h3><table><tr><th>Email</th><th>Plan</th><th>TG</th><th>Symbols</th><th>News</th></tr>{user_rows}</table></div>
-    <div class='card'><a href='/setup-webhook' class='btn-outline'>Setup Webhook</a> <a href='/cron/update-trades' class='btn-outline'>Update Trades</a> <a href='/master/clear' class='btn-danger'>Clear OLD SENT</a></div>
+    <div class='card'><h3>Users</h3><table><tr><th>Email</th><th>Plan</th><th>TG</th><th>Symbols</th><th>News</th></tr>{user_rows}</table></div>
+    <div class='card'><a href='/setup-webhook' class='btn-outline'>Setup Webhook</a> <a href='/cron/update-trades' class='btn-outline'>Update Trades</a> <a href='/master/clear' class='btn-danger'>Clear OLD SENT (Reset 30m)</a></div>
     """
     return layout(content, session['email'], "master")
 
