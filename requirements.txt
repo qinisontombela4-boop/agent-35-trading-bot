@@ -1,6 +1,8 @@
-curl_cffi
+flask
+gunicorn
 yfinance
 pandas
 requests
-flask
-gunicorn
+psycopg[binary]
+curl_cffi
+python-dotenv
