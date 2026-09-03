@@ -15,7 +15,6 @@ TELEGRAM_TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN','').strip()
 TELEGRAM_BOT_USERNAME = "Sniper035_bot"
 CAPITEC_ACC = "2586572676"
 RISK_PCT = float(os.environ.get('RISK_PCT','1.5'))
-
 LOGO_SVG = '<svg width="34" height="34" viewBox="0 0 100 100"><defs><linearGradient id="g" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#10b981"/><stop offset="100%" stop-color="#059669"/></linearGradient></defs><rect width="100" height="100" rx="18" fill="#0b111c" stroke="#10b981" stroke-width="3"/><text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" font-family="Arial Black" font-weight="900" font-size="48" fill="url(#g)">35</text></svg>'
 CUR = {'USD':'$','ZAR':'R','EUR':'€','GBP':'£'}
 MAP = engine.MAP
@@ -23,10 +22,11 @@ MAP = engine.MAP
 STYLE = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
-*{box-sizing:border-box} body{background:#060a14;color:#e5e7eb;font-family:'Inter',sans-serif;margin:0}.header{background:#0b111c;border-bottom:1px solid #1a2535;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.logo{display:flex;align-items:center;gap:10px;color:#10b981;font-weight:800}.card{background:#0e1625;border:1px solid #1c2a41;border-radius:16px;padding:16px}.btn{background:linear-gradient(135deg,#10b981,#059669);color:#000;font-weight:800;padding:12px 18px;border:none;border-radius:12px;cursor:pointer;text-decoration:none;display:block;text-align:center;width:100%}.btn-outline{background:transparent;border:1px solid #24344e;color:#cbd5e1;padding:12px 18px;border-radius:12px;text-decoration:none;display:block;text-align:center;width:100%;margin-top:8px}.btn-danger{background:#ef4444;color:#fff;padding:8px 14px;border:none;border-radius:10px;cursor:pointer;font-weight:700;font-size:12px;text-decoration:none;display:inline-block}.btn-test{background:#3b82f6;color:#fff;font-weight:700;padding:10px;border:none;border-radius:10px;width:100%;margin-top:8px;display:block;text-align:center;text-decoration:none}.grid{display:grid;gap:14px}.grid4{grid-template-columns:repeat(4,1fr)}.badge{padding:5px 10px;border-radius:20px;font-size:11px;font-weight:800}.bull{background:rgba(16,185,129,0.15);color:#10b981}.bear{background:rgba(239,68,68,0.15);color:#ef4444}.win{background:rgba(16,185,129,0.25);color:#10b981}.loss{background:rgba(239,68,68,0.25);color:#ef4444}.chip{display:inline-flex;align-items:center;gap:6px;background:#121d30;border:1px solid #1e2d45;padding:7px 12px;border-radius:24px;margin:4px;font-size:13px;cursor:pointer}.chip-active{background:#10b98122;border-color:#10b981}.x{background:#ef4444;color:#fff;border-radius:50%;width:20px;height:20px;display:inline-flex;justify-content:center;align-items:center;font-size:12px;margin-left:6px}.searchbox{background:#070d1a;border:1px solid #1e2d45;color:#fff;padding:12px;border-radius:12px;width:100%;margin:8px 0}.dropdown{background:#121d30;border:1px solid #1e2d45;border-radius:12px;max-height:200px;overflow:auto;display:none;position:absolute;z-index:50;width:calc(100% - 32px)}.dropdown div{padding:10px 14px;cursor:pointer;border-bottom:1px solid #1a2535} table{width:100%;border-collapse:collapse} th{color:#64748b;text-align:left;padding:10px 6px;font-size:10px;text-transform:uppercase} td{padding:10px 6px;border-top:1px solid #1a2535;font-size:12px}.nav-tabs{display:flex;gap:8px;overflow:auto;margin:12px 0}.nav-tabs a{white-space:nowrap;padding:10px 16px;border-radius:24px;background:#121d30;border:1px solid #1e2d45;color:#94a3b8;text-decoration:none;font-size:13px;font-weight:600}.nav-tabs a.active{background:#10b981;color:#000;border-color:#10b981}.stat-label{font-size:11px;color:#64748b;text-transform:uppercase}.stat-value{font-size:22px;font-weight:800;margin-top:6px} @media(max-width:900px){.grid4{grid-template-columns:1fr 1fr}} @media(max-width:600px){.grid4{grid-template-columns:1fr}table{display:block;overflow-x:auto}} input,select{background:#070d1a;border:1px solid #1e2d45;color:#fff;padding:12px;border-radius:10px;width:100%;margin:6px 0} label{font-size:12px;color:#94a3b8;margin-top:12px;display:block;font-weight:600}.settings-section{background:#0e1625;border:1px solid #1c2a41;border-radius:16px;padding:20px;margin-bottom:16px}.sess-check{display:flex;align-items:center;gap:8px;background:#121d30;padding:12px;border-radius:12px;border:1px solid #1e2d45;cursor:pointer}.sess-check input{width:18px;height:18px}.warn{background:#f59e0b22;border:1px solid #f59e0b;color:#f59e0b;padding:12px;border-radius:10px;text-align:center;font-weight:700}
+*{box-sizing:border-box} body{background:#060a14;color:#e5e7eb;font-family:'Inter',sans-serif;margin:0}.header{background:#0b111c;border-bottom:1px solid #1a2535;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.logo{display:flex;align-items:center;gap:10px;color:#10b981;font-weight:800}.card{background:#0e1625;border:1px solid #1c2a41;border-radius:16px;padding:16px;margin-bottom:14px}.btn{background:linear-gradient(135deg,#10b981,#059669);color:#000;font-weight:800;padding:12px 18px;border:none;border-radius:12px;cursor:pointer;text-decoration:none;display:block;text-align:center;width:100%}.btn-outline{background:transparent;border:1px solid #24344e;color:#cbd5e1;padding:12px 18px;border-radius:12px;text-decoration:none;display:block;text-align:center;width:100%;margin-top:8px}.btn-danger{background:#ef4444;color:#fff;padding:8px 14px;border:none;border-radius:10px;cursor:pointer;font-weight:700;font-size:12px;text-decoration:none;display:inline-block}.btn-test{background:#3b82f6;color:#fff;font-weight:700;padding:10px;border:none;border-radius:10px;width:100%;margin-top:8px;display:block;text-align:center;text-decoration:none}.grid{display:grid;gap:14px}.grid4{grid-template-columns:repeat(4,1fr)}.badge{padding:5px 10px;border-radius:20px;font-size:11px;font-weight:800}.bull{background:rgba(16,185,129,0.15);color:#10b981}.bear{background:rgba(239,68,68,0.15);color:#ef4444}.win{background:rgba(16,185,129,0.25);color:#10b981}.loss{background:rgba(239,68,68,0.25);color:#ef4444}.chip{display:inline-flex;align-items:center;gap:6px;background:#121d30;border:1px solid #1e2d45;padding:7px 12px;border-radius:24px;margin:4px;font-size:13px;cursor:pointer}.chip-active{background:#10b98122;border-color:#10b981}.x{background:#ef4444;color:#fff;border-radius:50%;width:20px;height:20px;display:inline-flex;justify-content:center;align-items:center;font-size:12px;margin-left:6px}.searchbox{background:#070d1a;border:1px solid #1e2d45;color:#fff;padding:12px;border-radius:12px;width:100%;margin:8px 0}.dropdown{background:#121d30;border:1px solid #1e2d45;border-radius:12px;max-height:200px;overflow:auto;display:none;position:absolute;z-index:50;width:calc(100% - 32px)}.dropdown div{padding:10px 14px;cursor:pointer;border-bottom:1px solid #1a2535} table{width:100%;border-collapse:collapse} th{color:#64748b;text-align:left;padding:10px 6px;font-size:10px;text-transform:uppercase} td{padding:10px 6px;border-top:1px solid #1a2535;font-size:12px}.nav-tabs{display:flex;gap:8px;overflow:auto;margin:12px 0}.nav-tabs a{white-space:nowrap;padding:10px 16px;border-radius:24px;background:#121d30;border:1px solid #1e2d45;color:#94a3b8;text-decoration:none;font-size:13px;font-weight:600}.nav-tabs a.active{background:#10b981;color:#000;border-color:#10b981}.stat-label{font-size:11px;color:#64748b;text-transform:uppercase}.stat-value{font-size:22px;font-weight:800;margin-top:6px} @media(max-width:900px){.grid4{grid-template-columns:1fr 1fr}} @media(max-width:600px){.grid4{grid-template-columns:1fr}table{display:block;overflow-x:auto}} input,select,textarea{background:#070d1a;border:1px solid #1e2d45;color:#fff;padding:12px;border-radius:10px;width:100%;margin:6px 0} label{font-size:12px;color:#94a3b8;margin-top:12px;display:block;font-weight:600}.settings-section{background:#0e1625;border:1px solid #1c2a41;border-radius:16px;padding:20px;margin-bottom:16px}.sess-check{display:flex;align-items:center;gap:8px;background:#121d30;padding:12px;border-radius:12px;border:1px solid #1e2d45;cursor:pointer}.sess-check input{width:18px;height:18px}.warn{background:#f59e0b22;border:1px solid #f59e0b;color:#f59e0b;padding:12px;border-radius:10px;text-align:center;font-weight:700}
 .clock-bar{display:flex;gap:10px;align-items:center;background:#121d30;border:1px solid #1e2d45;padding:6px 12px;border-radius:20px;font-size:11px;margin-left:12px}
 .live-dot{width:8px;height:8px;background:#10b981;border-radius:50%;display:inline-block;animation:blink 1s infinite}
 @keyframes blink{0%,100%{opacity:1}50%{opacity:0.3}}
+.guide-step{background:#121d30;border-left:4px solid #10b981;padding:14px;margin:10px 0;border-radius:10px}
 </style>
 <script>
 const ALL_SYMBOLS=["EURUSD","GBPUSD","USDJPY","EURJPY","GBPJPY","USDZAR","EURZAR","GBPZAR","ZARJPY","USDCHF","XAUUSD","GOLD","XAGUSD","BTCUSD","ETHUSD","SOLUSD","NAS100","US30","SPX500","GER40","UK100","JP225","USOIL","UKOIL","AAPL","TSLA","NVDA","MSFT"];
@@ -67,13 +67,9 @@ def send_telegram(chat_id, text, trade_id=None, stage="signal", extra_buttons=No
                 kb = [[{"text":"✅ WIN","callback_data":f"win:{trade_id}"},{"text":"❌ LOSS","callback_data":f"loss:{trade_id}"},{"text":"➖ BE","callback_data":f"be:{trade_id}"}],[{"text":"💰 CLOSE EARLY","callback_data":f"closeearly:{trade_id}"}]]
                 if extra_buttons: kb = extra_buttons + kb
                 payload["reply_markup"] = {"inline_keyboard": kb}
-            elif stage=="profitlock":
-                payload["reply_markup"] = {"inline_keyboard": extra_buttons}
         r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=10)
         return r.status_code==200
-    except Exception as e:
-        print(f"tg send err {e}")
-        return False
+    except: return False
 
 SESSIONS_HOURS_UTC = {"Sydney": (22, 6),"Asia": (0, 9),"London": (8, 16),"New York": (13, 21)}
 def is_session_active(user_sessions):
@@ -99,10 +95,7 @@ def build_signal_msg(res, user=None):
             now_sast = datetime.now(ZoneInfo("Africa/Johannesburg")).strftime("%H:%M SAST")
         except:
             now_local=datetime.utcnow().strftime("%H:%M UTC"); now_sast=now_local
-        rr_val=0
-        if entry!=sl:
-            if direction=="BUY": rr_val=(tp-entry)/(entry-sl) if (entry-sl)!=0 else 0
-            else: rr_val=(entry-tp)/(sl-entry) if (sl-entry)!=0 else 0
+        rr_val=(tp-entry)/(entry-sl) if direction=="BUY" and (entry-sl)!=0 else (entry-tp)/(sl-entry) if (sl-entry)!=0 else 0
         acc = user.get('account_size',1000) if user else 1000
         risk_money = acc * (RISK_PCT/100)
         profit_money = risk_money * rr_val
@@ -110,20 +103,7 @@ def build_signal_msg(res, user=None):
         news_alert=f"\n\n{res.get('news_text','⚠️ HIGH IMPACT NEWS')}" if res.get('news_warning') else ""
         header="🔥🔥 SNIPER 🔥🔥" if "SNIPER" in quality else "🔥 PREMIUM" if "PREMIUM" in quality else "📊"
         emoji="🟢" if direction=="BUY" else "🔴"
-        return f"""{emoji} {sym} {direction} | {quality} {score}/8
-{header}
-💰 Entry: {entry}
-🛑 SL: {sl}
-🎯 TP: {tp}
-📊 RR: 1:{rr_val:.1f} | Risk: ${risk_money:.2f} -> +${profit_money:.2f}
-
-🔍 Confluence:
-{conf_text}
-{news_alert}
-
-📝 {reason}
-⏰ {now_local} | {now_sast}
-"""
+        return f"{emoji} {sym} {direction} | {quality} {score}/8\n{header}\n💰 Entry: {entry}\n🛑 SL: {sl}\n🎯 TP: {tp}\n📊 RR: 1:{rr_val:.1f} | Risk: ${risk_money:.2f} -> +${profit_money:.2f}\n\n🔍 Confluence:\n{conf_text}{news_alert}\n\n📝 {reason}\n⏰ {now_local} | {now_sast}\n"
     except Exception as e:
         return f"{res.get('symbol')} {res.get('direction')} {res.get('entry')} {e}"
 
@@ -151,16 +131,92 @@ def calc_r_now(trade, close_price):
 
 @app.route('/')
 def home():
-    return f'<html><head><meta name="viewport" content="width=device-width, initial-scale=1">{STYLE}</head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;padding:16px"><div class="card" style="max-width:400px;width:100%;text-align:center;padding:28px"><h1 style="color:#10b981;margin:0">AGENT 35</h1><p>Monthly Journal + USDCHF</p><form method="POST" action="/auth" style="text-align:left;margin-top:18px"><label>Email</label><input name="email" required><label>Password</label><input name="password" type="password" required><button class="btn" style="margin-top:16px">Login</button></form></div></body></html>'
+    return f'<html><head><meta name="viewport" content="width=device-width, initial-scale=1">{STYLE}</head><body style="display:flex;justify-content:center;align-items:center;min-height:100vh;padding:16px"><div class="card" style="max-width:400px;width:100%;text-align:center;padding:28px"><h1 style="color:#10b981;margin:0">AGENT 35</h1><p>Monthly Journal + USDCHF + Full Guide + Master</p><form method="POST" action="/auth" style="text-align:left;margin-top:18px"><label>Email</label><input name="email" required><label>Password</label><input name="password" type="password" required><button class="btn" style="margin-top:16px">Login</button></form></div></body></html>'
 
 @app.route('/r/<code>')
 def referral_link(code):
     session['ref_code']=code.upper().strip(); return redirect('/')
 
+# ===== FULL USER GUIDE RESTORED =====
 @app.route('/guide')
 def guide_page():
     email=session.get('email','')
-    content="<h1 style='color:#10b981'>V9.1 USDCHF Added</h1><div class='card'><b>USDCHF</b> now in map - scans 0.79635 style<br><b>No Spam Fix</b> = ATOMIC be_done lock - stops 3x BE at 3:15 PM<br><b>Monthly Journal</b> = Month tabs + Day + Took + Closed + Duration<br><b>Confluence</b> = 8 checks accurate score</div><div class='card' style='text-align:center'><a class='btn' href='/dashboard'>Dashboard</a></div>"
+    content = """
+    <h1 style='color:#10b981'>📘 AGENT 35 USER GUIDE V9.2</h1>
+
+    <div class='card' style='background:#10b98122;border-color:#10b981'>
+        <h3>🔥 V9.2 NEW: Monthly Journal + USDCHF + No Spam</h3>
+        <p>USDCHF added (0.79635 style), Monthly tabs, Duration tracking, Atomic BE lock stops 3x spam</p>
+    </div>
+
+    <div class='guide-step'><b>1️⃣ HOW IT WORKS</b><br>
+    Agent 35 scans your 5 watchlist pairs every hour (cron/scan-all). It looks for 8 confluence factors. Score >=4 sends Telegram signal. You click TOOK in Telegram -> Trade moves to Journal with Took Time, Closed Time, Duration.
+    </div>
+
+    <div class='guide-step'><b>2️⃣ TELEGRAM SETUP</b><br>
+    • Dashboard -> Link TG button -> Opens @Sniper035_bot with your ref code<br>
+    • Click START in bot<br>
+    • Test: Dashboard -> Test TG -> Should receive test signal with TOOK/SKIP buttons<br>
+    • If no message: Check you clicked START, your Telegram ID is saved in Settings
+    </div>
+
+    <div class='guide-step'><b>3️⃣ SIGNALS EXPLAINED</b><br>
+    🟢 BUY / 🔴 SELL | QUALITY: SNIPER (7-8/8 + OB+MB), PREMIUM (6/8), STANDARD (4-5/8)<br>
+    Entry / SL / TP - Rounded correctly: USDZAR 16.038 not 16.02281, USDCHF 0.79635, GOLD 2685.50<br>
+    Confluence (8 checks): EMA Stack, EMA200, RSI, Order Block (Bu-OB/Be-OB), BOS, MB Momentum, ATR Expansion, Pullback EMA20<br>
+    • Click ✅ TOOK ENTRY = Moves to Journal, starts duration timer, bot tracks live price for +1R BE move<br>
+    • Click ❌ SKIP = Ignored but kept in All Signals<br>
+    After TOOK: Bot sends 🔒 BE when +1R hit, then ✅ WIN / ❌ LOSS / ➖ BE when TP/SL hit
+    </div>
+
+    <div class='guide-step'><b>4️⃣ DASHBOARD</b><br>
+    • Watchlist: Max 5 symbols, search and add. Now includes USDCHF, USDZAR, EURZAR, GBPZAR, ZARJPY<br>
+    • SCAN: Manual scan your 5 pairs instantly<br>
+    • WR / R / PNL: Only counts TOOK trades in Journal, not All Signals<br>
+    • Sessions bar top shows active sessions (London + NY etc) and live clocks
+    </div>
+
+    <div class='guide-step'><b>5️⃣ JOURNAL - MONTHLY</b><br>
+    • Month tabs: Sep 2026 | Aug 2026 - Click to switch months<br>
+    • Grouped by Day: 📅 2026-09-03 - Wednesday - 5 trades<br>
+    • Columns: Day, Took Time (when you clicked TOOK), Closed Time (when TP/SL/BE hit), Duration (32m, 1h 15m, 2d 3h)<br>
+    • Entry/SL/TP shows ✅ Moved to BE or 🔒 Locked +1R<br>
+    • Clear button: Clear Sep 2026 = Only clears that month, All Signals keeps everything forever<br>
+    • Export CSV: Exports selected month with Took/Closed/Duration hours
+    </div>
+
+    <div class='guide-step'><b>6️⃣ ALL SIGNALS</b><br>
+    Every signal ever sent, even skipped and cleared ones. Shows Bot WR. This is your permanent record for reviewing.
+    </div>
+
+    <div class='guide-step'><b>7️⃣ SETTINGS</b><br>
+    • Account Size: Your REAL account size - Used for PNL calc (1% risk per trade)<br>
+    • Currency, Lot, RR (1:2,1:3,1:4), Telegram @<br>
+    • Sessions: Choose when bot should scan you - London, NY, Asia, Sydney or 24/7<br>
+    • Timezone: Affects signal timestamps
+    </div>
+
+    <div class='guide-step'><b>8️⃣ NO SPAM FIX V9.2</b><br>
+    Problem: GBPUSD BE 3:15 PM x3 spam. Fixed: Atomic DB lock WHERE be_done=FALSE. Only TOOK trades alert. 24h dedup per symbol. If you see spam, run SQL: UPDATE agent35_trades SET be_done=TRUE WHERE status IN ('took','active');
+    </div>
+
+    <div class='guide-step'><b>9️⃣ CRON JOBS (Render)</b><br>
+    Set in Render Cron Jobs:<br>
+    • /cron/scan-all every 60 mins - Scans all approved users watchlists<br>
+    • /cron/update-trades every 5 mins - Checks live price, moves to BE at +1R, closes WIN/BE/LOSS<br>
+    Never set faster than 5 mins or you get spam!
+    </div>
+
+    <div class='guide-step'><b>🔟 TIPS</b><br>
+    • Only take SNIPER/PREMIUM 6+/8<br>
+    • Best pairs: EURUSD, XAUUSD, USDCHF (new), GBPUSD, USDZAR<br>
+    • Best sessions: London + New York<br>
+    • Always wait for OB RETEST + MB for high WR<br>
+    • Check duration - if trades close <30m often, widen TP or use HTF
+    </div>
+
+    <div class='card' style='text-align:center'><a class='btn' href='/dashboard'>Back to Dashboard</a><a class='btn-outline' href='/master'>Master (Creator Only)</a></div>
+    """
     return layout(content, email, "guide")
 
 @app.route('/auth', methods=['POST'])
@@ -188,7 +244,7 @@ def dashboard():
     pnl=stats['pnl']; wr=(stats['wins']/stats['closed']*100) if stats['closed']>0 else 0; curr_sym=CUR.get(user['currency'],'$')
     total_r = stats['total_r'] or 0
     syms=[s for s in (user['symbols'] or '').split(',') if s.strip()]; chips="".join([f"<span class='chip chip-active'><b>{s}</b><span class='x' onclick=\"removeSym('{s}')\">x</span></span>" for s in syms])
-    rows="".join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td><b>{t['symbol']}</b></td><td><span class='badge { 'win' if 'win' in t['status'] else 'loss' if t['status']=='loss' else 'bull'}'>{t['status'].upper()}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)} ({t.get('close_r',0)}R)</td></tr>" for t in trades]) or "<tr><td colspan=4>No taken trades yet</td></tr>"
+    rows="".join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td><b>{t['symbol']}</b></td><td><span class='badge { 'win' if 'win' in t['status'] else 'loss' if t['status']=='loss' else 'bull'}'>{t['status'].upper()}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)} ({t.get('close_r',0)}R)</td></tr>" for t in trades]) or "<tr><td colspan=4>No taken trades yet - click TOOK in Telegram</td></tr>"
     pay_ref=user['payment_ref'] or session['email']; sess_display=user['sessions'] or 'London,New York'
     content=f"<div class='card' style='padding:12px;display:flex;justify-content:space-between'><span>Sessions: <b>{sess_display}</b></span><span>WR: {wr:.1f}% | {total_r:.1f}R | {curr_sym}{pnl:.2f}</span></div><div class='grid grid4'><div class='card'><div class='stat-label'>PNL Taken Only</div><div class='stat-value'>{curr_sym}{round(pnl,2)} <span class='badge bull'>{round(wr,1)}% {total_r:.1f}R</span></div></div><div class='card'><div class='stat-label'>Account</div><div class='stat-value' style='font-size:18px'>{curr_sym}{user['account_size']}</div><a href='/settings' class='btn-outline'>Edit</a></div><div class='card' style='position:relative'><div class='stat-label'>Watchlist {len(syms)}/5 (USDCHF Added)</div><div style='margin:12px 0'>{chips}</div><form id='symForm' method='POST' action='/quick-symbols'><input type='hidden' name='symbols' id='symInput' value=\"{user['symbols']}\"></form><input id='symSearch' class='searchbox' placeholder='Search USDCHF...' oninput='filterSyms()' autocomplete='off'><div id='symDropdown' class='dropdown'></div></div><div class='card'><a class='btn' href='/scan'>SCAN</a><a href='https://t.me/{TELEGRAM_BOT_USERNAME}?start={pay_ref}' target='_blank' class='btn-outline'>Link TG</a><a href='/test-telegram' class='btn-test'>Test TG</a></div></div><div class='card' style='margin-top:14px'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>PNL</th></tr>{rows}</table></div>"
     return layout(content, session['email'], "dashboard")
@@ -198,34 +254,15 @@ def dashboard():
 def journal(month_str=None):
     if 'email' not in session: return redirect('/')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); user=cur.fetchone()
-    cur.execute("""
-        SELECT DISTINCT TO_CHAR(created_at, 'YYYY-MM') as month, TO_CHAR(created_at, 'Mon YYYY') as month_label
-        FROM agent35_trades WHERE user_email=%s AND archived=FALSE
-        AND status IN ('took','active','win','loss','be','win_early') ORDER BY month DESC
-    """, (session['email'],))
+    cur.execute("SELECT DISTINCT TO_CHAR(created_at, 'YYYY-MM') as month, TO_CHAR(created_at, 'Mon YYYY') as month_label FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY month DESC", (session['email'],))
     months = cur.fetchall()
     if not month_str:
         month_str = months[0]['month'] if months else datetime.now().strftime('%Y-%m')
-    cur.execute("""
-        SELECT *, EXTRACT(EPOCH FROM (closed_at - COALESCE(hit_entry_at, created_at)))/3600 as duration_hours
-        FROM agent35_trades WHERE user_email=%s AND archived=FALSE
-        AND status IN ('took','active','win','loss','be','win_early')
-        AND TO_CHAR(created_at, 'YYYY-MM') = %s ORDER BY created_at DESC
-    """, (session['email'], month_str))
+    cur.execute("SELECT *, EXTRACT(EPOCH FROM (closed_at - COALESCE(hit_entry_at, created_at)))/3600 as duration_hours FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') AND TO_CHAR(created_at, 'YYYY-MM') = %s ORDER BY created_at DESC", (session['email'], month_str))
     trades = cur.fetchall()
-    cur.execute("""
-        SELECT COALESCE(SUM(pnl),0) as pnl, COUNT(*) FILTER (WHERE status='win' OR status='win_early') as wins,
-               COUNT(*) FILTER (WHERE status='loss') as losses,
-               COUNT(*) FILTER (WHERE status IN ('win','loss','be','win_early')) as closed,
-               COALESCE(SUM(close_r),0) as total_r
-        FROM agent35_trades WHERE user_email=%s AND archived=FALSE
-        AND TO_CHAR(created_at, 'YYYY-MM')=%s AND status IN ('took','active','win','loss','be','win_early')
-    """, (session['email'], month_str))
-    stats = cur.fetchone()
-    cur.close(); conn.close()
-    curr_sym=CUR.get(user['currency'],'$') if user else '$'
-    total_r = stats['total_r'] or 0
-    wr = (stats['wins']/stats['closed']*100) if stats['closed'] and stats['closed']>0 else 0
+    cur.execute("SELECT COALESCE(SUM(pnl),0) as pnl, COUNT(*) FILTER (WHERE status='win' OR status='win_early') as wins, COUNT(*) FILTER (WHERE status='loss') as losses, COUNT(*) FILTER (WHERE status IN ('win','loss','be','win_early')) as closed, COALESCE(SUM(close_r),0) as total_r FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND TO_CHAR(created_at, 'YYYY-MM')=%s AND status IN ('took','active','win','loss','be','win_early')", (session['email'], month_str))
+    stats = cur.fetchone(); cur.close(); conn.close()
+    curr_sym=CUR.get(user['currency'],'$') if user else '$'; total_r = stats['total_r'] or 0; wr = (stats['wins']/stats['closed']*100) if stats['closed'] and stats['closed']>0 else 0
     def fmt(v):
         if v is None: return "-"
         try: return f"{float(v):.3f}" if float(v) > 100 else f"{float(v):.5f}".rstrip('0').rstrip('.')
@@ -244,13 +281,12 @@ def journal(month_str=None):
             else: return f"{int(h//24)}d {int(h%24)}h"
         except: return "-"
     def sl_status(t):
-        entry = t.get('original_entry') or t.get('entry')
-        curr_sl = t.get('sl')
+        entry = t.get('original_entry') or t.get('entry'); curr_sl = t.get('sl')
         if not entry or not curr_sl: return f"SL {fmt(curr_sl)}"
         try:
-            if t.get('be_done') and abs(float(curr_sl)-float(entry))<0.001: return f"✅ Moved to BE {fmt(curr_sl)}"
-            elif t.get('lock_done'): return f"🔒 Locked +1R {fmt(curr_sl)}"
-            else: return f"Now SL {fmt(curr_sl)}"
+            if t.get('be_done') and abs(float(curr_sl)-float(entry))<0.001: return f"✅ BE {fmt(curr_sl)}"
+            elif t.get('lock_done'): return f"🔒 +1R {fmt(curr_sl)}"
+            else: return f"SL {fmt(curr_sl)}"
         except: return f"SL {fmt(curr_sl)}"
     month_tabs = "".join([f"<a href='/journal/{m['month']}' style='padding:8px 14px;border-radius:20px;text-decoration:none;font-size:12px;font-weight:700;margin:4px;display:inline-block;{'background:#10b981;color:#000' if m['month']==month_str else 'background:#121d30;color:#94a3b8;border:1px solid #1e2d45'}'>{m['month_label']}</a>" for m in months]) or "<span style='color:#64748b'>No months</span>"
     by_day = defaultdict(list)
@@ -261,15 +297,12 @@ def journal(month_str=None):
     for day, day_trades in by_day.items():
         rows_html+=f"<tr style='background:#121d30'><td colspan=9 style='font-weight:800;color:#10b981;padding:10px'>📅 {day} - {len(day_trades)} trades</td></tr>"
         for t in day_trades:
-            took_time = t.get('hit_entry_at') or t['created_at']
-            closed_time = t.get('closed_at')
-            entry_d = fmt(t.get('original_entry') or t.get('entry'))
-            orig_sl_d = fmt(t.get('original_sl') or t.get('sl'))
-            tp_d = fmt(t.get('tp'))
+            took_time = t.get('hit_entry_at') or t['created_at']; closed_time = t.get('closed_at')
+            entry_d = fmt(t.get('original_entry') or t.get('entry')); orig_sl_d = fmt(t.get('original_sl') or t.get('sl')); tp_d = fmt(t.get('tp'))
             if entry_d=="-" and orig_sl_d=="-": continue
             rows_html+=f"<tr><td>{t['created_at'].strftime('%d')}</td><td style='font-size:11px'>{fmt_time(took_time)}<br><span style='color:#64748b'>took</span></td><td style='font-size:11px'>{fmt_time(closed_time) if closed_time else '<span style=color:#f59e0b>Open</span>'}<br><span style='color:#64748b'>closed</span></td><td style='font-weight:700'>{fmt_duration(t.get('duration_hours'))}</td><td><b>{t['symbol']}</b> {t['direction']}</td><td style='font-size:11px'>{entry_d} / {orig_sl_d} / {tp_d}<br><span style='color:#94a3b8'>{sl_status(t)}</span></td><td><span class='badge win'>{t['status'].upper()}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)} ({t.get('close_r',0)}R)</td><td><a href='/manual-close?id={t['id']}' style='color:#10b981'>Close</a></td></tr>"
     if not rows_html: rows_html="<tr><td colspan=9>No trades this month - click TOOK in Telegram</td></tr>"
-    content=f"<div class='card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap'><h3>Journal {month_str} - {wr:.1f}% | {total_r:.1f}R | {curr_sym}{stats['pnl']:.2f}</h3><a href='/clear-journal?month={month_str}' onclick=\"return confirm('Clear {month_str}? All Signals kept.')\" class='btn-danger'>Clear {month_str}</a></div><div style='margin:12px 0'>{month_tabs}</div><div style='overflow:auto'><table><tr><th>Day</th><th>Took</th><th>Closed</th><th>Duration</th><th>Pair</th><th>Entry/SL/TP</th><th>Status</th><th>PNL</th><th>Action</th></tr>{rows_html}</table></div><br><div style='display:flex;gap:8px'><a class='btn' href='/signals'>All Signals (All Months)</a><a class='btn-outline' href='/export-journal?month={month_str}'>Export CSV</a></div></div>"
+    content=f"<div class='card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap'><h3>Journal {month_str} - {wr:.1f}% | {total_r:.1f}R | {curr_sym}{stats['pnl']:.2f}</h3><a href='/clear-journal?month={month_str}' onclick=\"return confirm('Clear {month_str}? All Signals kept.')\" class='btn-danger'>Clear {month_str}</a></div><div style='margin:12px 0'>{month_tabs}</div><div style='overflow:auto'><table><tr><th>Day</th><th>Took</th><th>Closed</th><th>Duration</th><th>Pair</th><th>Entry/SL/TP</th><th>Status</th><th>PNL</th><th>Action</th></tr>{rows_html}</table></div><br><div style='display:flex;gap:8px'><a class='btn' href='/signals'>All Signals</a><a class='btn-outline' href='/export-journal?month={month_str}'>Export CSV</a></div></div>"
     return layout(content, session['email'], "journal")
 
 @app.route('/export-journal')
@@ -277,10 +310,8 @@ def export_journal():
     if 'email' not in session: return redirect('/')
     month_str = request.args.get('month')
     conn=get_conn(); cur=conn.cursor()
-    if month_str:
-        cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s AND TO_CHAR(created_at,'YYYY-MM')=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY created_at", (session['email'], month_str))
-    else:
-        cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY created_at", (session['email'],))
+    if month_str: cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s AND TO_CHAR(created_at,'YYYY-MM')=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY created_at", (session['email'], month_str))
+    else: cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY created_at", (session['email'],))
     trades=cur.fetchall(); cur.close(); conn.close()
     output = io.StringIO(); writer = csv.writer(output)
     writer.writerow(['Date','Day','Took Time','Closed Time','Duration Hours','Symbol','Direction','Entry','Original SL','Current SL','TP','Status','PNL','R'])
@@ -297,10 +328,8 @@ def clear_journal():
     if 'email' not in session: return redirect('/')
     month_str = request.args.get('month')
     conn=get_conn(); cur=conn.cursor()
-    if month_str:
-        cur.execute("UPDATE agent35_trades SET archived=TRUE WHERE user_email=%s AND TO_CHAR(created_at,'YYYY-MM')=%s AND status IN ('took','active','win','loss','be','win_early')", (session['email'], month_str))
-    else:
-        cur.execute("UPDATE agent35_trades SET archived=TRUE WHERE user_email=%s AND status IN ('took','active','win','loss','be','win_early')", (session['email'],))
+    if month_str: cur.execute("UPDATE agent35_trades SET archived=TRUE WHERE user_email=%s AND TO_CHAR(created_at,'YYYY-MM')=%s AND status IN ('took','active','win','loss','be','win_early')", (session['email'], month_str))
+    else: cur.execute("UPDATE agent35_trades SET archived=TRUE WHERE user_email=%s AND status IN ('took','active','win','loss','be','win_early')", (session['email'],))
     conn.commit(); cur.close(); conn.close()
     return redirect(f'/journal/{month_str}' if month_str else '/journal')
 
@@ -308,8 +337,7 @@ def clear_journal():
 def signals():
     if 'email' not in session: return redirect('/')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s ORDER BY created_at DESC LIMIT 300", (session['email'],)); trades=cur.fetchall()
-    cur.execute("SELECT COUNT(*) FILTER (WHERE status='win' OR status='win_early') as wins, COUNT(*) FILTER (WHERE status='loss') as losses FROM agent35_trades WHERE user_email=%s", (session['email'],)); stats=cur.fetchone()
-    cur.close(); conn.close()
+    cur.execute("SELECT COUNT(*) FILTER (WHERE status='win' OR status='win_early') as wins, COUNT(*) FILTER (WHERE status='loss') as losses FROM agent35_trades WHERE user_email=%s", (session['email'],)); stats=cur.fetchone(); cur.close(); conn.close()
     def fmt(v):
         if v is None: return "-"
         try: return f"{float(v):.3f}" if float(v) > 100 else f"{float(v):.5f}"
@@ -325,9 +353,7 @@ def manual_close():
     tid = request.args.get('id')
     conn=get_conn(); cur=conn.cursor()
     cur.execute("SELECT t.*, u.account_size FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.id=%s AND t.user_email=%s", (tid, session['email'])); tr=cur.fetchone()
-    if not tr or tr['status'] not in ('took','active'):
-        cur.close(); conn.close()
-        return layout("<div class='card'>Not open</div>", session['email'])
+    if not tr or tr['status'] not in ('took','active'): cur.close(); conn.close(); return layout("<div class='card'>Not open</div>", session['email'])
     live = get_live_price(tr['symbol']); close = live[0] if live else tr['entry']
     r_now = calc_r_now(tr, close); pnl = tr['account_size'] * 0.01 * r_now
     cur.execute("UPDATE agent35_trades SET status='win_early', pnl=%s, closed_at=NOW(), result_price=%s, close_r=%s, be_done=TRUE, lock_done=TRUE WHERE id=%s", (pnl, close, r_now, tid)); conn.commit(); cur.close(); conn.close()
@@ -356,14 +382,12 @@ def submit_payment():
 def test_telegram():
     if 'email' not in session: return redirect('/')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); u=cur.fetchone()
-    if not u or not u.get('telegram_id'):
-        cur.close(); conn.close()
-        return layout(f"<div class='card'><h3>No Telegram ID - Link first</h3><a class='btn' href='/dashboard'>Dashboard</a></div>", session['email'])
+    if not u or not u.get('telegram_id'): cur.close(); conn.close(); return layout(f"<div class='card'><h3>No Telegram ID - Link first via Dashboard -> Link TG</h3></div>", session['email'])
     res = engine.full_multi_tf_analysis("USDCHF")
-    msg = build_signal_msg(res if res.get('signal') else {'symbol': 'USDCHF','direction': 'BUY','entry': 0.79635,'sl': 0.79450,'tp': 0.80005,'score': 7,'quality': 'PREMIUM Be-OB','bias': 'Bullish HTF','confluence': ['Bu-OB RETEST','MB Momentum','EMA Bullish Stack'],'reason': 'Test V9.1 USDCHF Added - No Spam Fix'}, u)
-    ok = send_telegram(u['telegram_id'], f"🧪 TEST V9.1 USDCHF + NO SPAM 🧪\n\n{msg}", trade_id=99999, stage="signal")
+    msg = build_signal_msg(res if res.get('signal') else {'symbol': 'USDCHF','direction': 'BUY','entry': 0.79635,'sl': 0.79450,'tp': 0.80005,'score': 7,'quality': 'PREMIUM Be-OB','bias': 'Bullish HTF','confluence': ['Bu-OB RETEST','MB Momentum','EMA Bullish Stack'],'reason': 'Test V9.2 Full Guide + Master Restored'}, u)
+    ok = send_telegram(u['telegram_id'], f"🧪 TEST V9.2 Full Guide + Master 🧪\n\n{msg}", trade_id=99999, stage="signal")
     cur.close(); conn.close()
-    content = f"<div class='card' style='text-align:center'><h3 style='color:#10b981'>✅ Sent to Telegram!</h3><div style='background:#070d1a;padding:12px;border-radius:10px;text-align:left;font-size:12px;white-space:pre-wrap'>{msg}</div><br><a class='btn' href='/dashboard'>Back</a></div>" if ok else "<div class='card'><h3>Failed</h3></div>"
+    content = f"<div class='card' style='text-align:center'><h3 style='color:#10b981'>✅ Sent!</h3><div style='background:#070d1a;padding:12px;border-radius:10px;text-align:left;font-size:12px;white-space:pre-wrap'>{msg}</div><br><a class='btn' href='/dashboard'>Back</a></div>" if ok else "<div class='card'><h3>Failed</h3></div>"
     return layout(content, session['email'])
 
 @app.route('/quick-symbols', methods=['POST'])
@@ -392,13 +416,13 @@ def scan():
                 send_telegram(user['telegram_id'], msg, trade_id=tid, stage="signal")
     conn.commit(); cur.close(); conn.close()
     html="".join([f"<div class='card' style='border-left:4px solid #10b981'><b>{r['symbol']} {r.get('direction','')} {r.get('score',0)}/8 {r.get('quality','')}</b><br>{r.get('confluence','')}<br>Entry {r.get('entry','')} SL {r.get('sl','')} TP {r.get('tp','')}</div>" if r.get('signal') else f"<div class='card' style='opacity:0.6'><b>{r['symbol']} No Setup</b> {r.get('reason','')}</div>" for r in results])
-    return layout(f"<h2>Scan V9.1 USDCHF + No Spam</h2>{html}<br><a class='btn' href='/journal'>Journal</a> <a class='btn-outline' href='/signals'>All Signals</a>", session['email'])
+    return layout(f"<h2>Scan V9.2</h2>{html}<br><a class='btn' href='/journal'>Journal</a> <a class='btn-outline' href='/signals'>All Signals</a>", session['email'])
 
 @app.route('/settings', methods=['GET','POST'])
 def settings():
     if 'email' not in session: return redirect('/')
     if request.method=='POST':
-        sess_list=[]
+        sess_list=[];
         if request.form.get('sess_london'): sess_list.append("London")
         if request.form.get('sess_ny'): sess_list.append("New York")
         if request.form.get('sess_asia'): sess_list.append("Asia")
@@ -415,7 +439,7 @@ def settings():
     sel_usd="selected" if u['currency']=='USD' else ""; sel_zar="selected" if u['currency']=='ZAR' else ""; sel_eur="selected" if u['currency']=='EUR' else ""; sel_12="selected" if u['risk_reward']=='1:2' else ""; sel_13="selected" if u['risk_reward']=='1:3' else ""; sel_14="selected" if u['risk_reward']=='1:4' else ""
     sess=(u['sessions'] or 'London,New York'); c_london="checked" if "London" in sess else ""; c_ny="checked" if "New York" in sess else ""; c_asia="checked" if "Asia" in sess else ""; c_sydney="checked" if "Sydney" in sess else ""; c_all="checked" if "24/7" in sess else ""
     utz = u.get('timezone') or 'Africa/Johannesburg'
-    content=f"<div style='max-width:700px;margin:auto'><h2 style='color:#10b981'>Settings V9.1 USDCHF</h2><form method='POST'><div class='settings-section'><div style='display:grid;grid-template-columns:1fr 1fr;gap:12px'><div><label>Currency</label><select name='currency'><option value='USD' {sel_usd}>USD</option><option value='ZAR' {sel_zar}>ZAR</option><option value='EUR' {sel_eur}>EUR</option></select></div><div><label>Account REAL SIZE</label><input name='acc' type='number' value='{u['account_size']}'></div><div><label>Lot</label><input name='lot' type='number' step='0.01' value='{u['lot_size']}'></div><div><label>RR</label><select name='rr'><option {sel_12}>1:2</option><option {sel_13}>1:3</option><option {sel_14}>1:4</option></select></div></div><label>Symbols (USDCHF now works)</label><input name='symbols' value='{u['symbols']}'><label>Telegram @</label><input name='tg' value='{u['telegram_username'] or ''}'><label>TZ</label><select name='timezone'><option value='{utz}' selected>{utz}</option><option value='Africa/Johannesburg'>Africa/Johannesburg</option><option value='Europe/London'>Europe/London</option><option value='America/New_York'>America/New_York</option><option value='UTC'>UTC</option></select><div style='margin-top:16px'><label>Sessions</label><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'><label class='sess-check'><input type='checkbox' name='sess_london' {c_london}> London</label><label class='sess-check'><input type='checkbox' name='sess_ny' {c_ny}> NY</label><label class='sess-check'><input type='checkbox' name='sess_asia' {c_asia}> Asia</label><label class='sess-check'><input type='checkbox' name='sess_sydney' {c_sydney}> Sydney</label></div><label class='sess-check' style='margin-top:8px'><input type='checkbox' name='sess_all' {c_all}> 24/7</label></div></div><button class='btn'>Save</button><a href='/dashboard' class='btn-outline'>Back</a></form></div>"
+    content=f"<div style='max-width:700px;margin:auto'><h2 style='color:#10b981'>Settings</h2><form method='POST'><div class='settings-section'><div style='display:grid;grid-template-columns:1fr 1fr;gap:12px'><div><label>Currency</label><select name='currency'><option value='USD' {sel_usd}>USD</option><option value='ZAR' {sel_zar}>ZAR</option><option value='EUR' {sel_eur}>EUR</option></select></div><div><label>Account REAL SIZE</label><input name='acc' type='number' value='{u['account_size']}'></div><div><label>Lot</label><input name='lot' type='number' step='0.01' value='{u['lot_size']}'></div><div><label>RR</label><select name='rr'><option {sel_12}>1:2</option><option {sel_13}>1:3</option><option {sel_14}>1:4</option></select></div></div><label>Symbols (USDCHF works)</label><input name='symbols' value='{u['symbols']}'><label>Telegram @</label><input name='tg' value='{u['telegram_username'] or ''}'><label>TZ</label><select name='timezone'><option value='{utz}' selected>{utz}</option><option value='Africa/Johannesburg'>Africa/Johannesburg</option><option value='Europe/London'>Europe/London</option><option value='America/New_York'>America/New_York</option><option value='UTC'>UTC</option></select><div style='margin-top:16px'><label>Sessions</label><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'><label class='sess-check'><input type='checkbox' name='sess_london' {c_london}> London</label><label class='sess-check'><input type='checkbox' name='sess_ny' {c_ny}> NY</label><label class='sess-check'><input type='checkbox' name='sess_asia' {c_asia}> Asia</label><label class='sess-check'><input type='checkbox' name='sess_sydney' {c_sydney}> Sydney</label></div><label class='sess-check' style='margin-top:8px'><input type='checkbox' name='sess_all' {c_all}> 24/7</label></div></div><button class='btn'>Save</button><a href='/dashboard' class='btn-outline'>Back</a></form></div>"
     return layout(content, session['email'], "settings")
 
 @app.route('/telegram/webhook', methods=['POST'])
@@ -430,17 +454,12 @@ def tg_webhook():
             if tr:
                 if action=='took':
                     cur.execute("UPDATE agent35_trades SET status='took', hit_entry_at=NOW(), archived=FALSE WHERE id=%s", (tid,)); conn.commit()
-                    send_telegram(chat_id, f"📝 {tr['symbol']} TOOK at {datetime.now().strftime('%H:%M:%S')} - Duration tracking started", trade_id=tid, stage="active")
+                    send_telegram(chat_id, f"📝 {tr['symbol']} TOOK at {datetime.now().strftime('%H:%M:%S')} - Duration tracking", trade_id=tid, stage="active")
                 elif action=='skip':
                     cur.execute("UPDATE agent35_trades SET status='skipped', be_done=TRUE, lock_done=TRUE WHERE id=%s", (tid,)); conn.commit()
-                    send_telegram(chat_id, f"Skipped {tr['symbol']} - Kept in All Signals")
-                elif action=='lock':
-                    risk = abs(tr['entry']-tr['sl']); lock_sl = tr['entry'] + risk*1.0 if tr['direction']=='BUY' else tr['entry'] - risk*1.0
-                    cur.execute("UPDATE agent35_trades SET sl=%s, lock_done=TRUE WHERE id=%s", (lock_sl, tid)); conn.commit()
-                    send_telegram(chat_id, f"🔒 {tr['symbol']} LOCKED +1R SL {lock_sl}")
+                    send_telegram(chat_id, f"Skipped {tr['symbol']}")
                 elif action=='closeearly':
-                    live = get_live_price(tr['symbol']); close = live[0] if live else tr['entry']
-                    r_now = calc_r_now(tr, close); risk_money = tr['account_size'] * 0.01; pnl = risk_money * r_now
+                    live = get_live_price(tr['symbol']); close = live[0] if live else tr['entry']; r_now = calc_r_now(tr, close); risk_money = tr['account_size'] * 0.01; pnl = risk_money * r_now
                     cur.execute("UPDATE agent35_trades SET status='win_early', pnl=%s, closed_at=NOW(), result_price=%s, close_r=%s, be_done=TRUE, lock_done=TRUE WHERE id=%s", (pnl, close, r_now, tid)); conn.commit()
                     send_telegram(chat_id, f"💰 {tr['symbol']} CLOSED EARLY +{r_now:.1f}R")
                 elif action in ('win','loss','be'):
@@ -461,7 +480,7 @@ def tg_webhook():
             cur.execute("SELECT email FROM agent35_users WHERE payment_ref=%s OR email=%s OR payment_ref ILIKE %s", (ref, ref.lower(), f"%{ref}%")); row=cur.fetchone()
             if row:
                 cur.execute("UPDATE agent35_users SET telegram_id=%s, telegram_username=%s WHERE email=%s", (str(chat_id), username, row['email'])); conn.commit()
-                send_telegram(chat_id, f"Linked! {row['email']} V9.1 USDCHF + Monthly")
+                send_telegram(chat_id, f"✅ Linked! {row['email']} V9.2 Guide+Master Restored")
             cur.close(); conn.close()
     except Exception as e: print(f"tg error {e} {traceback.format_exc()}")
     return jsonify({"ok":True})
@@ -472,25 +491,18 @@ def setup_webhook():
     if not TELEGRAM_TOKEN: return "No TOKEN"
     base=request.host_url.rstrip('/'); wh_url=f"{base}/telegram/webhook"
     r=requests.get(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/setWebhook?url={wh_url}")
-    return layout(f"<div class='card'><h3>Webhook V9.1 USDCHF</h3><p>{wh_url}</p><p>{r.text}</p><a class='btn' href='/master'>Back</a></div>", session['email'])
+    return layout(f"<div class='card'><h3>Webhook V9.2</h3><p>{wh_url}</p><p>{r.text}</p><a class='btn' href='/master'>Back to Master</a></div>", session['email'])
 
 @app.route('/cron/update-trades')
 def cron_update():
     def do_update():
         try:
             conn=get_conn(); cur=conn.cursor()
-            cur.execute("""
-                SELECT t.*, u.account_size, u.risk_reward, u.telegram_id, u.currency_symbol
-                FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email
-                WHERE t.status='took' AND t.archived=FALSE
-                AND t.created_at > NOW() - INTERVAL '12 hours' LIMIT 15
-            """)
+            cur.execute("SELECT t.*, u.account_size, u.risk_reward, u.telegram_id, u.currency_symbol FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.status='took' AND t.archived=FALSE AND t.created_at > NOW() - INTERVAL '12 hours' LIMIT 15")
             for tr in cur.fetchall():
                 live=get_live_price(tr['symbol'])
                 if not live: continue
-                close,high,low=live
-                r_now = calc_r_now(tr, close)
-                # ATOMIC NO-SPAM BE LOCK
+                close,high,low=live; r_now = calc_r_now(tr, close)
                 if r_now >= 1.0 and not tr.get('be_done'):
                     cur.execute("UPDATE agent35_trades SET be_done=TRUE, sl=%s WHERE id=%s AND be_done=FALSE", (tr['entry'], tr['id']))
                     if cur.rowcount>0:
@@ -519,9 +531,9 @@ def cron_update():
                     else: conn.rollback()
             conn.commit(); cur.close(); conn.close()
         except Exception as e:
-            print(f"cron V9.1 err {e} {traceback.format_exc()}")
+            print(f"cron V9.2 err {e} {traceback.format_exc()}")
     threading.Thread(target=do_update, daemon=True).start()
-    return jsonify({"ok":True, "version":"V9.1 USDCHF NO-SPAM"})
+    return jsonify({"ok":True, "version":"V9.2 GUIDE+MASTER"})
 
 @app.route('/cron/scan-all')
 def cron_scan_all():
@@ -534,7 +546,6 @@ def cron_scan_all():
                 for sym in symbols:
                     sym=sym.strip().upper()
                     if not sym: continue
-                    # 24h dedup + only watchlist + USDCHF works
                     cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '24 hours' LIMIT 1", (user['email'], sym))
                     if cur.fetchone(): continue
                     try: res=engine.full_multi_tf_analysis(sym)
@@ -552,15 +563,120 @@ def cron_scan_all():
     return jsonify({"ok":True})
 
 @app.route('/healthz')
-def health(): return jsonify({"status":"ok","version":"V9.1-USDCHF-MONTHLY-NO-SPAM","utc":datetime.utcnow().isoformat()})
+def health(): return jsonify({"status":"ok","version":"V9.2-FULL-GUIDE-MASTER-USDCHF","utc":datetime.utcnow().isoformat()})
 
+# ===== FULL MASTER SECTION RESTORED =====
 @app.route('/master')
 def master():
     if 'email' not in session: return redirect('/')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); r=cur.fetchone()
     if not r or not r['is_creator']: cur.close(); conn.close(); return redirect('/dashboard')
-    cur.execute("SELECT COUNT(*) as total FROM agent35_users"); stats=cur.fetchone(); cur.close(); conn.close()
-    return layout(f"<div class='card'><h2>MASTER V9.1 USDCHF - Users {stats['total']}</h2><p>USDCHF Added + Monthly Journal + No Spam Atomic + Accurate Confluence 8/8</p><a class='btn-outline' href='/setup-webhook'>Setup Webhook</a></div>", session['email'], "master")
+    cur.execute("SELECT COUNT(*) as total FROM agent35_users"); total_users=cur.fetchone()['total']
+    cur.execute("SELECT COUNT(*) as c FROM agent35_users WHERE payment_status='approved'"); approved=cur.fetchone()['c']
+    cur.execute("SELECT COUNT(*) as c FROM agent35_users WHERE payment_status='pending'"); pending=cur.fetchone()['c']
+    cur.execute("SELECT * FROM agent35_payments WHERE status='pending' ORDER BY created_at DESC LIMIT 20"); payments=cur.fetchall()
+    cur.execute("SELECT email, plan, payment_status, telegram_id, symbols, referral_code, referral_count, account_size FROM agent35_users ORDER BY created_at DESC LIMIT 50"); users=cur.fetchall()
+    cur.execute("SELECT COUNT(*) as total, COUNT(*) FILTER (WHERE status='win' OR status='win_early') as wins, COUNT(*) FILTER (WHERE status='loss') as losses FROM agent35_trades"); trade_stats=cur.fetchone()
+    cur.close(); conn.close()
+
+    pay_rows="".join([f"<tr><td>{p['ref_code']}</td><td>{p['user_email']}</td><td>{p['plan']} R{p['amount']}</td><td>{p['created_at'].strftime('%m-%d %H:%M')}</td><td><a href='/master/approve?ref={p['ref_code']}' class='btn' style='padding:6px'>Approve</a> <a href='/master/reject?ref={p['ref_code']}' class='btn-danger'>Reject</a></td></tr>" for p in payments]) or "<tr><td colspan=5>No pending payments</td></tr>"
+    user_rows="".join([f"<tr><td>{u['email']}</td><td>{u['plan']}</td><td>{u['payment_status']}</td><td>{'✅' if u['telegram_id'] else '❌'}</td><td>{u['symbols']}</td><td>{u['referral_code']} ({u['referral_count']})</td><td>{u['account_size']}</td></tr>" for u in users])
+
+    content=f"""
+    <h1 style='color:#10b981'>👑 CREATOR MASTER V9.2</h1>
+    <div class='grid grid4'>
+        <div class='card'><div class='stat-label'>Total Users</div><div class='stat-value'>{total_users}</div></div>
+        <div class='card'><div class='stat-label'>Approved</div><div class='stat-value' style='color:#10b981'>{approved}</div></div>
+        <div class='card'><div class='stat-label'>Pending Payments</div><div class='stat-value' style='color:#f59e0b'>{pending}</div></div>
+        <div class='card'><div class='stat-label'>Total Signals</div><div class='stat-value'>{trade_stats['total']} | {trade_stats['wins']}W {trade_stats['losses']}L</div></div>
+    </div>
+
+    <div class='card'>
+        <h3>💳 Pending Payments - Approve Here</h3>
+        <div style='overflow:auto'><table><tr><th>Ref Code</th><th>Email</th><th>Plan</th><th>Date</th><th>Action</th></tr>{pay_rows}</table></div>
+    </div>
+
+    <div class='card'>
+        <h3>📢 Broadcast to All Approved Users</h3>
+        <form method='POST' action='/master/broadcast'>
+            <textarea name='message' placeholder='Message to all Telegram users...' rows=3></textarea>
+            <button class='btn' style='margin-top:8px'>Broadcast</button>
+        </form>
+    </div>
+
+    <div class='card'>
+        <h3>🔧 Admin Tools</h3>
+        <div style='display:flex;gap:8px;flex-wrap:wrap'>
+            <a href='/setup-webhook' class='btn-outline'>Setup Webhook</a>
+            <a href='/cron/scan-all' class='btn-outline' target='_blank'>Run Scan All</a>
+            <a href='/cron/update-trades' class='btn-outline' target='_blank'>Run Update Trades</a>
+            <a href='/master/clear-spam' class='btn-danger' onclick="return confirm('Clear all active/took spam?')">Clear Spam Trades</a>
+        </div>
+    </div>
+
+    <div class='card'>
+        <h3>👥 Users (50 latest)</h3>
+        <div style='overflow:auto'><table><tr><th>Email</th><th>Plan</th><th>Status</th><th>TG</th><th>Symbols</th><th>Referral</th><th>Acc Size</th></tr>{user_rows}</table></div>
+    </div>
+
+    <div class='card' style='background:#121d30'>
+        <h3>📊 Current Config</h3>
+        <p>USDCHF in MAP: { 'USDCHF' in MAP } | MAP size: {len(MAP)} symbols | No Spam: ATOMIC be_done lock<br>
+        Capitec: {CAPITEC_ACC} | Bot: @{TELEGRAM_BOT_USERNAME} | Risk: {RISK_PCT}%<br>
+        Cron: /cron/scan-all 60min, /cron/update-trades 5min</p>
+    </div>
+    """
+    return layout(content, session['email'], "master")
+
+@app.route('/master/approve')
+def master_approve():
+    if 'email' not in session: return redirect('/')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); r=cur.fetchone()
+    if not r or not r['is_creator']: cur.close(); conn.close(); return redirect('/dashboard')
+    ref=request.args.get('ref')
+    cur.execute("UPDATE agent35_payments SET status='approved' WHERE ref_code=%s", (ref,))
+    cur.execute("UPDATE agent35_users SET payment_status='approved', paid_at=NOW() WHERE payment_ref=%s", (ref,))
+    cur.execute("SELECT user_email FROM agent35_payments WHERE ref_code=%s", (ref,)); row=cur.fetchone()
+    conn.commit()
+    if row:
+        cur.execute("SELECT telegram_id FROM agent35_users WHERE email=%s", (row['user_email'],)); u=cur.fetchone()
+        if u and u['telegram_id']:
+            send_telegram(u['telegram_id'], f"✅ Payment {ref} Approved! Your bot is now active. Use /dashboard")
+    cur.close(); conn.close()
+    return redirect('/master')
+
+@app.route('/master/reject')
+def master_reject():
+    if 'email' not in session: return redirect('/')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); r=cur.fetchone()
+    if not r or not r['is_creator']: cur.close(); conn.close(); return redirect('/dashboard')
+    ref=request.args.get('ref')
+    cur.execute("UPDATE agent35_payments SET status='rejected' WHERE ref_code=%s", (ref,))
+    cur.execute("UPDATE agent35_users SET payment_status='rejected' WHERE payment_ref=%s", (ref,))
+    conn.commit(); cur.close(); conn.close()
+    return redirect('/master')
+
+@app.route('/master/broadcast', methods=['POST'])
+def master_broadcast():
+    if 'email' not in session: return redirect('/')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); r=cur.fetchone()
+    if not r or not r['is_creator']: cur.close(); conn.close(); return redirect('/dashboard')
+    msg=request.form.get('message','')
+    if msg:
+        cur.execute("SELECT telegram_id FROM agent35_users WHERE telegram_id IS NOT NULL AND payment_status='approved'")
+        for u in cur.fetchall():
+            send_telegram(u['telegram_id'], f"📢 Creator: {msg}")
+    cur.close(); conn.close()
+    return redirect('/master')
+
+@app.route('/master/clear-spam')
+def master_clear_spam():
+    if 'email' not in session: return redirect('/')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); r=cur.fetchone()
+    if not r or not r['is_creator']: cur.close(); conn.close(); return redirect('/dashboard')
+    cur.execute("UPDATE agent35_trades SET be_done=TRUE, lock_done=TRUE, archived=TRUE WHERE status IN ('took','active')")
+    conn.commit(); cur.close(); conn.close()
+    return redirect('/master')
 
 @app.route('/logout')
 def logout(): session.clear(); return redirect('/')
