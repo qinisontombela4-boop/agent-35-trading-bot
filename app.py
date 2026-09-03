@@ -69,11 +69,8 @@ def send_telegram(chat_id, text, trade_id=None, stage="signal"):
             else:
                 payload["reply_markup"] = {"inline_keyboard": [[{"text":"✅ WIN","callback_data":f"win:{trade_id}"},{"text":"❌ LOSS","callback_data":f"loss:{trade_id}"},{"text":"➖ BE","callback_data":f"be:{trade_id}"}],[{"text":"💰 CLOSE EARLY","callback_data":f"closeearly:{trade_id}"}]]}
         r = requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", json=payload, timeout=15)
-        print(f"TG send {chat_id} {r.status_code}")
         return r.status_code==200
-    except Exception as e:
-        print(f"tg send err {e}")
-        return False
+    except: return False
 
 SESSIONS_HOURS_UTC = {"Sydney": (22, 6),"Asia": (0, 9),"London": (8, 16),"New York": (13, 21)}
 def is_session_active(user_sessions):
@@ -293,7 +290,6 @@ def manual_close():
     cur.execute("UPDATE agent35_trades SET status='win_early', pnl=%s, closed_at=NOW(), result_price=%s, close_r=%s, be_done=TRUE, lock_done=TRUE WHERE id=%s", (pnl, close, r_now, tid)); conn.commit(); cur.close(); conn.close()
     return redirect('/journal')
 
-# PROFESSIONAL PAYMENT PAGE V9.4 - VIP REMOVED + 24H
 @app.route('/payment')
 def payment_page():
     ref=f"AG35-{datetime.now().strftime('%m%d')}-{os.urandom(2).hex().upper()}"
@@ -380,7 +376,7 @@ def test_telegram():
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); u=cur.fetchone()
     if not u or not u.get('telegram_id'): cur.close(); conn.close(); return layout(f"<div class='card'><h3>Link Telegram first</h3></div>", session['email'])
     res = engine.full_multi_tf_analysis("USDCHF")
-    msg = build_signal_msg(res if res.get('signal') else {'symbol': 'USDCHF','direction': 'BUY','entry': 0.79635,'sl': 0.79450,'tp': 0.80005,'score': 7,'quality': 'PREMIUM','bias': 'Bullish','confluence': ['Strong Trend','Key Level Retest','Momentum'],'reason': 'Test signal - Working!'}, u)
+    msg = build_signal_msg(res if res.get('signal') else {'symbol': 'USDCHF','direction': 'BUY','entry': 0.79635,'sl': 0.79450,'tp': 0.80005,'score': 7,'quality': 'PREMIUM','confluence': ['Strong Trend','Key Level Retest','Momentum'],'reason': 'Test signal - Working!'}, u)
     ok = send_telegram(u['telegram_id'], f"🧪 Test Successful 🧪\n\n{msg}", trade_id=99999, stage="signal")
     cur.close(); conn.close()
     content = f"<div class='card' style='text-align:center'><h3 style='color:#10b981'>✅ Sent!</h3><div style='background:#070d1a;padding:12px;border-radius:10px;text-align:left;font-size:12px;white-space:pre-wrap'>{msg}</div><br><a class='btn' href='/dashboard'>Back</a></div>" if ok else "<div class='card'><h3>Failed</h3></div>"
@@ -403,7 +399,8 @@ def scan():
         except Exception as e: res={"signal":False,"symbol":sym,"reason":f"No setup"}
         res['symbol']=sym; results.append(res)
         if res.get('signal') and res.get('score',0) >= 4:
-            cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '24 hours' LIMIT 1", (session['email'], sym))
+            # FIXED: 4 hours dedup not 12/24
+            cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '4 hours' LIMIT 1", (session['email'], sym))
             if cur.fetchone(): continue
             cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id",(session['email'],res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['entry'],res['sl'],res['bias'],str(res.get('confluence',''))))
             new_row=cur.fetchone(); tid=new_row['id'] if new_row else 0
@@ -412,7 +409,7 @@ def scan():
                 send_telegram(user['telegram_id'], msg, trade_id=tid, stage="signal")
     conn.commit(); cur.close(); conn.close()
     html="".join([f"<div class='card' style='border-left:4px solid #10b981'><b>{r['symbol']} {r.get('direction','')} {r.get('score',0)}/8 {r.get('quality','')}</b><br>Entry {r.get('entry','')} SL {r.get('sl','')} TP {r.get('tp','')}</div>" if r.get('signal') else f"<div class='card' style='opacity:0.6'><b>{r['symbol']} - No setup</b></div>" for r in results])
-    return layout(f"<h2>Scan Results</h2>{html}<br><a class='btn' href='/journal'>Journal</a>", session['email'])
+    return layout(f"<h2>Scan Results V9.5 - Rate limit fixed</h2>{html}<br><a class='btn' href='/journal'>Journal</a>", session['email'])
 
 @app.route('/settings', methods=['GET','POST'])
 def settings():
@@ -493,7 +490,6 @@ def cron_update():
             conn=get_conn(); cur=conn.cursor()
             cur.execute("SELECT t.*, u.account_size, u.risk_reward, u.telegram_id FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.status='took' AND t.archived=FALSE AND t.created_at > NOW() - INTERVAL '12 hours' LIMIT 20")
             rows=cur.fetchall()
-            print(f"CRON update-trades checking {len(rows)} active")
             for tr in rows:
                 live=get_live_price(tr['symbol'])
                 if not live: continue
@@ -516,44 +512,36 @@ def cron_update():
                     elif low <= tr['tp']: new='win'; pnl=risk_money*rr; close_r=rr
                 if new:
                     cur.execute("UPDATE agent35_trades SET status=%s, pnl=%s, closed_at=NOW(), result_price=%s, auto_updated=TRUE, close_r=%s, be_done=TRUE, lock_done=TRUE WHERE id=%s AND status='took'",(new,pnl,close,close_r,tr['id']))
-                    if cur.rowcount>0:
-                        conn.commit()
-                        if tr['telegram_id']:
-                            if new=='win': send_telegram(tr['telegram_id'], f"✅ {tr['symbol']} WIN +{rr}R")
-                            elif new=='be': send_telegram(tr['telegram_id'], f"➖ {tr['symbol']} BE")
-                            else: send_telegram(tr['telegram_id'], f"❌ {tr['symbol']} LOSS")
+                    if cur.rowcount>0: conn.commit()
                     else: conn.rollback()
             conn.commit(); cur.close(); conn.close()
         except Exception as e:
             print(f"cron update err {e} {traceback.format_exc()}")
     threading.Thread(target=do_update, daemon=True).start()
-    return jsonify({"ok":True, "version":"V9.4 AUTO-SCANNER FIXED"})
+    return jsonify({"ok":True, "version":"V9.5 RATE LIMIT FIXED"})
 
 @app.route('/cron/scan-all')
 def cron_scan_all():
     def do_scan():
         try:
             conn=get_conn(); cur=conn.cursor()
-            # AUTO SCANNER FIX: scan approved + creator, not pending
             cur.execute("SELECT * FROM agent35_users WHERE (payment_status='approved' OR is_creator=TRUE) AND symbols IS NOT NULL AND telegram_id IS NOT NULL")
             users=cur.fetchall()
             print(f"CRON scan-all checking {len(users)} users")
             scanned=0
             for user in users:
                 if not is_session_active(user['sessions'] or 'London,New York'):
-                    print(f"Skip {user['email']} sessions inactive {user['sessions']}")
                     continue
                 symbols=(user['symbols'] or "EURUSD").split(",")[:5]
                 for sym in symbols:
                     sym=sym.strip().upper()
                     if not sym: continue
-                    cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '12 hours' LIMIT 1", (user['email'], sym))
+                    # FIXED: 4 hours dedup (was 12h causing block)
+                    cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '4 hours' LIMIT 1", (user['email'], sym))
                     if cur.fetchone():
-                        print(f"Dedup {user['email']} {sym}")
                         continue
                     try:
                         res=engine.full_multi_tf_analysis(sym)
-                        print(f"Scan {sym} for {user['email']} -> {res.get('signal')} {res.get('score')}")
                     except Exception as e:
                         print(f"Scan err {sym} {e}")
                         continue
@@ -570,10 +558,10 @@ def cron_scan_all():
         except Exception as e:
             print(f"scan-all err {e} {traceback.format_exc()}")
     threading.Thread(target=do_scan, daemon=True).start()
-    return jsonify({"ok":True, "msg":"Auto scanner started"})
+    return jsonify({"ok":True, "msg":"Auto scanner V9.5 started - rate limit fixed"})
 
 @app.route('/healthz')
-def health(): return jsonify({"status":"ok","version":"V9.4-FIXED-AUTO-SCANNER","utc":datetime.utcnow().isoformat()})
+def health(): return jsonify({"status":"ok","version":"V9.5-FIXED","utc":datetime.utcnow().isoformat()})
 
 @app.route('/master')
 def master():
@@ -584,16 +572,16 @@ def master():
     cur.execute("SELECT COUNT(*) as c FROM agent35_users WHERE payment_status='approved'"); approved=cur.fetchone()['c']
     cur.execute("SELECT COUNT(*) as c FROM agent35_users WHERE payment_status='pending'"); pending=cur.fetchone()['c']
     cur.execute("SELECT * FROM agent35_payments WHERE status='pending' ORDER BY created_at DESC LIMIT 20"); payments=cur.fetchall()
-    cur.execute("SELECT email, plan, payment_status, telegram_id, symbols, sessions FROM agent35_users ORDER BY created_at DESC LIMIT 30"); users=cur.fetchall()
+    cur.execute("SELECT email, plan, payment_status, telegram_id, symbols FROM agent35_users ORDER BY created_at DESC LIMIT 30"); users=cur.fetchall()
     cur.close(); conn.close()
-    pay_rows="".join([f"<tr><td>{p['ref_code']}</td><td>{p['user_email']}</td><td>{p['plan']} R{p['amount']}</td><td><a href='/master/approve?ref={p['ref_code']}' class='btn' style='padding:6px'>Approve</a></td></tr>" for p in payments]) or "<tr><td colspan=4>No pending</td></tr>"
-    user_rows="".join([f"<tr><td>{u['email']}</td><td>{u['plan']}/{u['payment_status']}</td><td>{'✅' if u['telegram_id'] else '❌'}</td><td>{u['symbols']}</td><td>{u['sessions']}</td></tr>" for u in users])
+    pay_rows="".join([f"<tr><td>{p['ref_code']}</td><td>{p['user_email']}</td><td>{p['plan']}</td><td><a href='/master/approve?ref={p['ref_code']}' class='btn' style='padding:6px'>Approve</a></td></tr>" for p in payments]) or "<tr><td colspan=4>No pending</td></tr>"
+    user_rows="".join([f"<tr><td>{u['email']}</td><td>{u['plan']}/{u['payment_status']}</td><td>{'✅' if u['telegram_id'] else '❌'}</td><td>{u['symbols']}</td></tr>" for u in users])
     content=f"""
-    <h1 style='color:#10b981'>👑 Master V9.4 Auto Scanner Fixed</h1>
-    <div class='grid grid4'><div class='card'>Total {total_users}</div><div class='card'>Approved {approved}</div><div class='card'>Pending {pending}</div><div class='card'><a href='/cron/scan-all' target='_blank' class='btn'>TEST AUTO SCANNER NOW</a><p style='font-size:11px'>Check Render logs after clicking</p></div></div>
+    <h1 style='color:#10b981'>👑 Master V9.5 Rate Limit Fixed</h1>
+    <div class='grid grid4'><div class='card'>Total {total_users}</div><div class='card'>Approved {approved}</div><div class='card'>Pending {pending}</div><div class='card'><a href='/cron/scan-all' target='_blank' class='btn'>TEST SCANNER V9.5</a></div></div>
     <div class='card'><h3>Pending Payments</h3><table><tr><th>Ref</th><th>Email</th><th>Plan</th><th>Action</th></tr>{pay_rows}</table></div>
-    <div class='card'><h3>Users</h3><table><tr><th>Email</th><th>Plan</th><th>TG</th><th>Symbols</th><th>Sessions</th></tr>{user_rows}</table></div>
-    <div class='card'><a href='/setup-webhook' class='btn-outline'>Setup Webhook</a> <a href='/cron/update-trades' class='btn-outline'>Test Update Trades</a> <a href='/healthz' class='btn-outline'>Health</a></div>
+    <div class='card'><h3>Users</h3><table><tr><th>Email</th><th>Plan</th><th>TG</th><th>Symbols</th></tr>{user_rows}</table></div>
+    <div class='card'><a href='/setup-webhook' class='btn-outline'>Setup Webhook</a> <a href='/cron/update-trades' class='btn-outline'>Update Trades</a> <a href='/master/clear' class='btn-danger'>Clear OLD SENT (Fix Dedup)</a></div>
     """
     return layout(content, session['email'], "master")
 
@@ -608,29 +596,17 @@ def master_approve():
     cur.execute("SELECT user_email FROM agent35_payments WHERE ref_code=%s", (ref,)); row=cur.fetchone(); conn.commit()
     if row:
         cur.execute("SELECT telegram_id FROM agent35_users WHERE email=%s", (row['user_email'],)); u=cur.fetchone()
-        if u and u['telegram_id']: send_telegram(u['telegram_id'], f"✅ Payment {ref} Approved! Bot active within 24h - Start trading!")
+        if u and u['telegram_id']: send_telegram(u['telegram_id'], f"✅ Payment {ref} Approved! Active within 24 hours")
     cur.close(); conn.close()
     return redirect('/master')
 
-@app.route('/master/reject')
-def master_reject():
+@app.route('/master/clear')
+def master_clear():
     if 'email' not in session: return redirect('/')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); r=cur.fetchone()
     if not r or not r['is_creator']: cur.close(); conn.close(); return redirect('/dashboard')
-    ref=request.args.get('ref')
-    cur.execute("UPDATE agent35_payments SET status='rejected' WHERE ref_code=%s", (ref,)); conn.commit(); cur.close(); conn.close()
-    return redirect('/master')
-
-@app.route('/master/broadcast', methods=['POST'])
-def master_broadcast():
-    if 'email' not in session: return redirect('/')
-    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); r=cur.fetchone()
-    if not r or not r['is_creator']: cur.close(); conn.close(); return redirect('/dashboard')
-    msg=request.form.get('message','')
-    if msg:
-        cur.execute("SELECT telegram_id FROM agent35_users WHERE telegram_id IS NOT NULL")
-        for u in cur.fetchall(): send_telegram(u['telegram_id'], f"📢 {msg}")
-    cur.close(); conn.close()
+    cur.execute("UPDATE agent35_trades SET archived=TRUE WHERE status='sent'")
+    conn.commit(); cur.close(); conn.close()
     return redirect('/master')
 
 @app.route('/logout')
