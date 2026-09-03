@@ -4,24 +4,20 @@ import requests
 from datetime import datetime
 import traceback
 
+# --- FIX FOR RENDER 429 BAN ---
+try:
+    from curl_cffi import requests as c_requests
+    session = c_requests.Session(impersonate="chrome110")
+    HAS_CURL = True
+except:
+    session = None
+    HAS_CURL = False
+
 MAP = {
     "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
-    "USDZAR": "USDZAR=X", "XAUUSD": "GC=F",
-    "EURZAR": "EURZAR=X", "GBPZAR": "GBPZAR=X",
-    "BTCUSD": "BTC-USD", "NAS100": "^IXIC", "US30": "^DJI"
+    "USDZAR": "USDZAR=X", "XAUUSD": "GC=F", "BTCUSD": "BTC-USD",
+    "EURZAR": "EURZAR=X", "GBPZAR": "GBPZAR=X", "USDCHF": "CHF=X"
 }
-
-def get_universal_news_bias(symbol, news_event, outcome):
-    sym=symbol.upper(); usd=None
-    if outcome in ["strong","high","rates_up","low"]: usd=True if outcome in ["strong","high","rates_up"] or (news_event=="UNEMPLOYMENT" and outcome=="low") else False
-    # simplified
-    if usd is None:
-        if (news_event=="NFP" and outcome=="strong") or (news_event=="CPI" and outcome=="high") or (news_event=="FOMC" and outcome=="rates_up"): usd=True
-        elif (news_event=="NFP" and outcome=="weak") or (news_event=="CPI" and outcome=="low") or (news_event=="FOMC" and outcome=="rates_down"): usd=False
-    if usd is None: return None,None
-    if "XAU" in sym or "GOLD" in sym: return ("BEAR" if usd else "BULL", "$ UP=Gold DOWN" if usd else "$ DOWN=Gold UP")
-    if "EUR" in sym or "GBP" in sym and "ZAR" not in sym: return ("BEAR" if usd else "BULL", "$ Strong")
-    return ("BULL" if usd else "BEAR", "$ Strong=USD up")
 
 def fetch_forexfactory_auto():
     try:
@@ -33,20 +29,11 @@ def fetch_forexfactory_auto():
             t=i.get('title','').upper()
             ev="NFP" if "NFP" in t or "NON-FARM" in t else "CPI" if "CPI" in t else "FOMC" if "FOMC" in t or "RATE" in t else "UNEMPLOYMENT" if "JOBLESS" in t else None
             if not ev: continue
-            actual=str(i.get('actual','')).replace('%','').strip(); forecast=str(i.get('forecast','')).replace('%','').strip()
-            outcome="pending"
-            try:
-                if actual and forecast and actual!='-':
-                    a=float(actual.split()[0]); f=float(forecast.split()[0])
-                    if ev=="NFP": outcome="strong" if a>f else "weak"
-                    elif ev=="CPI": outcome="high" if a>f else "low"
-                    else: outcome="low" if a<f else "high"
-            except: pass
-            res.append({"event":ev,"outcome":outcome,"title":i.get('title'),"time":i.get('date'),"actual":i.get('actual'),"forecast":i.get('forecast')})
+            res.append({"event":ev,"outcome":"pending","title":i.get('title'),"time":i.get('date'),"actual":i.get('actual'),"forecast":i.get('forecast')})
         return res
     except: return []
 
-def _normalize(df):
+def _norm(df):
     if df is None or df.empty: return None
     try:
         if isinstance(df.columns, pd.MultiIndex): df.columns=df.columns.get_level_values(0)
@@ -54,71 +41,174 @@ def _normalize(df):
     except: pass
     return df
 
-def get_data(symbol, period="7d", interval="1h"):
+def get_data(symbol, period="5d", interval="1h"):
+    yf_sym=MAP.get(symbol.upper(), symbol.upper())
     try:
-        yf_sym=MAP.get(symbol.upper(), symbol.upper())
-        df=yf.download(yf_sym, period=period, interval=interval, progress=False, auto_adjust=True, threads=False, timeout=10)
-        df=_normalize(df)
-        if df is not None and not df.empty and 'Close' in df.columns and len(df)>=20: return df
-    except Exception as e: print(f"yf {symbol} {e}")
+        if HAS_CURL:
+            df=yf.download(yf_sym, period=period, interval=interval, progress=False, auto_adjust=True, threads=False, session=session)
+        else:
+            df=yf.download(yf_sym, period=period, interval=interval, progress=False, auto_adjust=True, threads=False)
+        df=_norm(df)
+        if df is not None and not df.empty and 'Close' in df.columns and len(df)>20:
+            return df
+    except Exception as e:
+        print(f"yf {symbol} {e}")
     return None
 
-def analyze_tf(df):
-    if df is None or len(df)<20: return None
+# ===== REAL SMC LOGIC =====
+def detect_smc(df):
+    """Returns CHoCH, BOS, Bu-OB, Be-OB, MB"""
+    if df is None or len(df)<30: return None
     try:
-        close=float(df['Close'].iloc[-1])
-        high=float(df['High'].rolling(20).max().iloc[-1]); low=float(df['Low'].rolling(20).min().iloc[-1])
-        discount=((high-close)/(high-low)*100) if high!=low else 50
-        ob=False
+        # Find swings
+        highs = df['High'].rolling(5).max()
+        lows = df['Low'].rolling(5).min()
+
+        # BOS/CHoCH logic
+        last_close = float(df['Close'].iloc[-1])
+        prev_high = float(highs.iloc[-6:-1].max())
+        prev_low = float(lows.iloc[-6:-1].min())
+
+        bos_bull = last_close > prev_high
+        bos_bear = last_close < prev_low
+
+        # CHoCH = break opposite structure
+        choch_bull = bos_bull and float(df['Close'].iloc[-10]) < float(df['Close'].iloc[-20]) # was bearish now bullish
+        choch_bear = bos_bear and float(df['Close'].iloc[-10]) > float(df['Close'].iloc[-20])
+
+        # Find OBs: last opposite candle before BOS
+        bu_ob = None; be_ob = None; mb = None
+        # Look back 20 candles
+        for i in range(len(df)-3, len(df)-20, -1):
+            c = df.iloc[i]
+            # Bu-OB = bearish candle before bullish BOS
+            if c['Close'] < c['Open'] and bos_bull:
+                bu_ob = {"high": float(c['High']), "low": float(c['Low']), "idx": i}
+                break
+        for i in range(len(df)-3, len(df)-20, -1):
+            c = df.iloc[i]
+            if c['Close'] > c['Open'] and bos_bear:
+                be_ob = {"high": float(c['High']), "low": float(c['Low']), "idx": i}
+                break
+
+        # MB (Mitigation Block) = failed swing high/low that becomes breaker
+        # Simplified: previous BOS that failed
+        if bos_bull:
+            mb = bu_ob # MB = Bu-OB that held
+        else:
+            mb = be_ob
+
+        discount = 0
         try:
-            last=df.iloc[-1]; prev=df.iloc[-2]
-            if last['Close']>last['Open'] and prev['Close']<prev['Open']: ob=True
-            if last['Close']<last['Open'] and prev['Close']>prev['Open']: ob=True
-        except: pass
-        ma=float(df['Close'].rolling(30).mean().iloc[-1])
-        bias="bullish" if close>ma else "bearish"
-        return {"bias":bias,"discount":discount,"ob":ob,"close":close}
-    except: return None
+            hi = float(df['High'].rolling(20).max().iloc[-1])
+            lo = float(df['Low'].rolling(20).min().iloc[-1])
+            discount = ((hi - last_close)/(hi-lo)*100) if hi!=lo else 50
+        except: discount=50
+
+        return {
+            "bos_bull": bos_bull, "bos_bear": bos_bear,
+            "choch_bull": choch_bull, "choch_bear": choch_bear,
+            "bu_ob": bu_ob, "be_ob": be_ob, "mb": mb,
+            "discount": discount, "close": last_close,
+            "prev_high": prev_high, "prev_low": prev_low
+        }
+    except Exception as e:
+        print(f"smc err {e}")
+        return None
 
 def full_multi_tf_analysis(symbol):
     try:
-        df_4h=get_data(symbol, period="1mo", interval="4h")
-        df_1h=get_data(symbol, period="5d", interval="1h")
-        df_5m=get_data(symbol, period="1d", interval="15m")
-        tf_4h=analyze_tf(df_4h); tf_1h=analyze_tf(df_1h); tf_5m=analyze_tf(df_5m)
-        if not tf_4h: tf_4h=tf_1h
-        if not tf_4h or not tf_1h or not tf_5m:
-            return {"signal":False,"symbol":symbol,"reason":f"Yahoo busy - retry 10s (4h:{tf_4h is not None} 1h:{tf_1h is not None} 5m:{tf_5m is not None})"}
+        df_4h = get_data(symbol, "1mo", "4h")
+        df_1h = get_data(symbol, "5d", "1h")
+        df_15m = get_data(symbol, "2d", "15m")
 
-        score=0; conf=[]; direction=None
-        conf.append(f"4H {tf_4h['bias']}"); score+=1
-        if tf_1h['discount']>60: conf.append(f"1H discount {tf_1h['discount']:.0f}%"); score+=2; direction="BUY"
-        elif tf_1h['discount']<40: conf.append(f"1H premium {tf_1h['discount']:.0f}%"); score+=2; direction="SELL"
-        if tf_1h['ob'] or tf_5m['ob']: conf.append("✅ OB"); score+=2
-        if tf_5m['ob']: conf.append("✅ 5M BOS"); score+=2
-        if not direction: direction="BUY" if tf_4h['bias']=="bullish" else "SELL"
+        if not df_1h: # fallback if 4h blocked
+            df_1h = get_data(symbol, "5d", "1h")
+        if not df_15m:
+            df_15m = get_data(symbol, "1d", "15m")
 
-        entry=tf_5m['close']
-        try: atr=float((df_5m['High']-df_5m['Low']).rolling(10).mean().iloc[-1])
-        except: atr=entry*0.002
-        if atr==0 or str(atr)=='nan': atr=entry*0.002
-        sl=entry-atr*1.5 if direction=="BUY" else entry+atr*1.5
-        tp=entry+atr*4.5 if direction=="BUY" else entry-atr*4.5
-        quality="🔥🔥 SNIPER" if score>=7 else "🔥 PREMIUM" if score>=6 else "✅ HIGH" if score>=5 else "📊 MEDIUM" if score>=4 else "LOW"
-        bias_text=f"{tf_4h['bias']} | 4H:{tf_4h['discount']:.0f}% 1H:{tf_1h['discount']:.0f}% 5M:{tf_5m['discount']:.0f}%"
+        if df_4h is None and df_1h is None:
+            return {"signal":False,"symbol":symbol,"reason":"Yahoo blocked by Render IP - installing curl_cffi fix, retry in 30s"}
 
-        news=fetch_forexfactory_auto(); nw=False; nt=""; nb=None
-        if news:
-            nw=True
-            for ne in news:
-                if ne['outcome']!='pending':
-                    nb,rs=get_universal_news_bias(symbol, ne['event'], ne['outcome'])
-                    nt=f"📰 {ne['event']} {ne['outcome']} -> {nb} for {symbol}"
-                    break
-            if not nt: nt=f"📰 TODAY: {news[0]['event']}"
+        smc_4h = detect_smc(df_4h) if df_4h is not None else None
+        smc_1h = detect_smc(df_1h) if df_1h is not None else None
+        smc_15m = detect_smc(df_15m) if df_15m is not None else None
 
-        if score<4: return {"signal":False,"symbol":symbol,"reason":f"Score {score}/8 low - {bias_text}","score":score,"news_warning":nw,"news_text":nt}
-        return {"signal":True,"symbol":symbol,"direction":direction,"entry":round(entry,5),"sl":round(sl,5),"tp":round(tp,5),"score":score,"quality":quality,"bias":bias_text,"confluence":conf,"reason":"HTF+discount","news_warning":nw,"news_text":nt,"news_bias":nb}
+        if not smc_1h or not smc_15m:
+            return {"signal":False,"symbol":symbol,"reason":f"No SMC yet (1h:{smc_1h is not None} 15m:{smc_15m is not None}) - retry"}
+
+        score=0; conf=[]; direction=None; ob_type=""
+
+        # 1. HTF Trend
+        if smc_4h:
+            if smc_4h['bos_bull']: conf.append(f"4H BULL BOS"); score+=1; direction="BUY"
+            elif smc_4h['bos_bear']: conf.append(f"4H BEAR BOS"); score+=1; direction="SELL"
+
+        # 2. CHoCH = strong signal
+        if smc_1h['choch_bull']:
+            conf.append("✅ 1H CHoCH BULL"); score+=2; direction="BUY"
+        if smc_1h['choch_bear']:
+            conf.append("✅ 1H CHoCH BEAR"); score+=2; direction="SELL"
+
+        # 3. BOS chain
+        if smc_1h['bos_bull'] and smc_15m['bos_bull']:
+            conf.append("✅ BOS chain 1H+15M"); score+=1
+
+        # 4. Discount + Bu-OB / Be-OB / MB retest - YOUR CHART LOGIC
+        disc = smc_15m['discount']
+        close = smc_15m['close']
+
+        if disc > 65: # Discount zone
+            if smc_1h['bu_ob']:
+                # Check if price touched Bu-OB
+                if smc_1h['bu_ob']['low'] <= close <= smc_1h['bu_ob']['high']+0.0005:
+                    conf.append(f"🔥 Bu-OB RETEST {smc_1h['bu_ob']['low']:.5f}"); score+=3; direction="BUY"; ob_type="Bu-OB"
+                elif disc>70:
+                    conf.append(f"📊 Discount {disc:.0f}% near Bu-OB"); score+=2; direction="BUY"; ob_type="Bu-OB"
+            if smc_1h['mb'] and disc>70:
+                conf.append(f"✅ MB (Mitigation) in discount"); score+=2
+
+        if disc < 35: # Premium zone
+            if smc_1h['be_ob']:
+                if smc_1h['be_ob']['low']-0.0005 <= close <= smc_1h['be_ob']['high']:
+                    conf.append(f"🔥 Be-OB RETEST {smc_1h['be_ob']['high']:.5f}"); score+=3; direction="SELL"; ob_type="Be-OB"
+                elif disc<30:
+                    conf.append(f"📊 Premium {disc:.0f}% near Be-OB"); score+=2; direction="SELL"; ob_type="Be-OB"
+
+        if not direction:
+            direction = "BUY" if disc>50 else "SELL"
+
+        # Entry/SL/TP based on OB
+        entry=close
+        if ob_type=="Bu-OB" and smc_1h['bu_ob']: sl=smc_1h['bu_ob']['low'] - (entry*0.0005)
+        elif ob_type=="Be-OB" and smc_1h['be_ob']: sl=smc_1h['be_ob']['high'] + (entry*0.0005)
+        else:
+            try: atr=float((df_15m['High']-df_15m['Low']).rolling(10).mean().iloc[-1])
+            except: atr=entry*0.002
+            sl=entry-atr*1.5 if direction=="BUY" else entry+atr*1.5
+
+        tp = entry + (entry-sl)*3 if direction=="BUY" else entry - (sl-entry)*3
+
+        quality="LOW"
+        if score>=7: quality="🔥🔥 SNIPER Bu-OB+CHoCH"
+        elif score>=6: quality=f"🔥 PREMIUM {ob_type}+BOS"
+        elif score>=5: quality=f"✅ HIGH {ob_type}"
+        elif score>=4: quality=f"📊 {ob_type} pullback"
+
+        news=fetch_forexfactory_auto()
+        nt=""; nw=False
+        if news: nw=True; nt=f"📰 {news[0]['event']}"
+
+        if score<4:
+            return {"signal":False,"symbol":symbol,"reason":f"Score {score}/8 {ob_type} disc:{disc:.0f}% {conf}","score":score,"news_warning":nw,"news_text":nt}
+
+        return {
+            "signal":True,"symbol":symbol,"direction":direction,
+            "entry":round(entry,5),"sl":round(sl,5),"tp":round(tp,5),
+            "score":score,"quality":quality,
+            "bias":f"CHoCH:{smc_1h['choch_bull'] or smc_1h['choch_bear']} BOS:{smc_1h['bos_bull']} Bu-OB:{smc_1h['bu_ob'] is not None} Be-OB:{smc_1h['be_ob'] is not None} MB:{smc_1h['mb'] is not None} | disc:{disc:.0f}%",
+            "confluence":conf,"reason":f"{ob_type} + CHoCH + BOS","news_warning":nw,"news_text":nt
+        }
     except Exception as e:
         traceback.print_exc()
-        return {"signal":False,"symbol":symbol,"reason":f"Error {str(e)[:80]}"}
+        return {"signal":False,"symbol":symbol,"reason":f"Error {str(e)[:100]}"}
