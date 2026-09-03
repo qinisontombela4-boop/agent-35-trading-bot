@@ -1,6 +1,7 @@
 import yfinance as yf
 import pandas as pd
 import numpy as np
+import time
 
 MAP = {
     "EURUSD": "EURUSD=X",
@@ -33,48 +34,74 @@ MAP = {
     "MSFT": "MSFT"
 }
 
+# Cache to stop YFRateLimitError
+PRICE_CACHE = {}
+CACHE_TTL = 300 # 5 minutes cache
+
 def round_by_symbol(symbol, price):
     try:
         s = symbol.upper()
-        if "JPY" in s:
-            return round(float(price), 3)
-        if "ZAR" in s:
-            return round(float(price), 3)
-        if "CHF" in s:
-            return round(float(price), 5)
-        if "XAU" in s or "GOLD" in s:
-            return round(float(price), 2)
-        if "XAG" in s:
-            return round(float(price), 3)
-        if "BTC" in s:
-            return round(float(price), 2)
-        if "ETH" in s or "SOL" in s:
-            return round(float(price), 2)
-        if "NAS100" in s or "US30" in s or "SPX500" in s or "GER40" in s or "UK100" in s or "JP225" in s:
+        if "JPY" in s: return round(float(price), 3)
+        if "ZAR" in s: return round(float(price), 3)
+        if "CHF" in s: return round(float(price), 5)
+        if "XAU" in s or "GOLD" in s: return round(float(price), 2)
+        if "XAG" in s: return round(float(price), 3)
+        if "BTC" in s: return round(float(price), 2)
+        if "ETH" in s or "SOL" in s: return round(float(price), 2)
+        if any(x in s for x in ["NAS100","US30","SPX500","GER40","UK100","JP225"]):
             return round(float(price), 1)
-        if "OIL" in s:
-            return round(float(price), 2)
+        if "OIL" in s: return round(float(price), 2)
         return round(float(price), 5)
     except:
         return round(float(price), 5)
 
 def get_data(symbol, period="60d", interval="15m"):
+    cache_key = f"{symbol}_{interval}"
+    now = time.time()
+
+    # Use cache if exists and fresh
+    if cache_key in PRICE_CACHE and now - PRICE_CACHE[cache_key]['time'] < CACHE_TTL:
+        return PRICE_CACHE[cache_key]['data'].copy()
+
     try:
         yfs = MAP.get(symbol.upper(), symbol.upper()+"=X")
-        df = yf.download(yfs, period=period, interval=interval, progress=False, auto_adjust=True)
+        # CRITICAL FIX: Delay stops Yahoo rate limit
+        time.sleep(1.2)
+
+        df = yf.download(yfs, period=period, interval=interval, progress=False, auto_adjust=True, threads=False)
+
         if df.empty:
+            print(f"Empty {symbol} {interval}")
+            # Return stale cache if rate limited
+            if cache_key in PRICE_CACHE:
+                print(f"Using stale cache for {symbol}")
+                return PRICE_CACHE[cache_key]['data'].copy()
             return None
+
         try:
             if isinstance(df.columns, pd.MultiIndex):
                 df.columns = df.columns.get_level_values(0)
-        except:
-            pass
+        except: pass
+
         df = df.dropna()
         if len(df) < 50:
+            print(f"Too short {symbol} {len(df)}")
+            if cache_key in PRICE_CACHE:
+                return PRICE_CACHE[cache_key]['data'].copy()
             return None
+
+        # Save to cache
+        PRICE_CACHE[cache_key] = {'time': now, 'data': df.copy()}
+        print(f"Downloaded {symbol} {interval} - {len(df)} candles")
         return df
+
     except Exception as e:
-        print(f"get_data err {symbol} {e}")
+        print(f"get_data err {symbol} {interval} {e}")
+        # If rate limited, use stale cache
+        if "Rate" in str(e) or "Too Many" in str(e):
+            if cache_key in PRICE_CACHE:
+                print(f"RATE LIMITED - using stale cache for {symbol}")
+                return PRICE_CACHE[cache_key]['data'].copy()
         return None
 
 def add_indicators(df):
@@ -98,17 +125,17 @@ def add_indicators(df):
 
 def detect_order_block(df, direction="BUY"):
     try:
-        last_5 = df.tail(10)
+        last_10 = df.tail(10)
         if direction == "BUY":
-            for i in range(len(last_5)-3, 0, -1):
-                if last_5['Close'].iloc[i] < last_5['Open'].iloc[i]:
-                    if last_5['Close'].iloc[i+1] > last_5['Open'].iloc[i+1] and last_5['Close'].iloc[i+1] > last_5['Open'].iloc[i]:
-                        return True, f"Bu-OB at {last_5['Low'].iloc[i]:.5f}"
+            for i in range(len(last_10)-3, 0, -1):
+                if last_10['Close'].iloc[i] < last_10['Open'].iloc[i]:
+                    if last_10['Close'].iloc[i+1] > last_10['Open'].iloc[i+1]:
+                        return True, f"Bu-OB at {last_10['Low'].iloc[i]:.5f}"
         else:
-            for i in range(len(last_5)-3, 0, -1):
-                if last_5['Close'].iloc[i] > last_5['Open'].iloc[i]:
-                    if last_5['Close'].iloc[i+1] < last_5['Open'].iloc[i+1] and last_5['Close'].iloc[i+1] < last_5['Open'].iloc[i]:
-                        return True, f"Be-OB at {last_5['High'].iloc[i]:.5f}"
+            for i in range(len(last_10)-3, 0, -1):
+                if last_10['Close'].iloc[i] > last_10['Open'].iloc[i]:
+                    if last_10['Close'].iloc[i+1] < last_10['Open'].iloc[i+1]:
+                        return True, f"Be-OB at {last_10['High'].iloc[i]:.5f}"
         return False, ""
     except:
         return False, ""
@@ -119,12 +146,9 @@ def detect_market_structure(df):
         lows = df['Low'].tail(20)
         hh = highs.iloc[-1] > highs.iloc[-5] and lows.iloc[-1] > lows.iloc[-5]
         ll = highs.iloc[-1] < highs.iloc[-5] and lows.iloc[-1] < lows.iloc[-5]
-        if hh:
-            return "Bullish BOS", "Bullish"
-        elif ll:
-            return "Bearish BOS", "Bearish"
-        else:
-            return "Ranging", "Neutral"
+        if hh: return "Bullish BOS", "Bullish"
+        elif ll: return "Bearish BOS", "Bearish"
+        else: return "Ranging", "Neutral"
     except:
         return "Unknown", "Neutral"
 
@@ -134,46 +158,43 @@ def check_confluence(df, direction):
     try:
         last = df.iloc[-1]
         prev = df.iloc[-2]
+
+        # 1. EMA Stack
         if direction == "BUY" and last['Close'] > last['EMA20'] and last['EMA20'] > last['EMA50']:
-            score += 1
-            confluence.append("EMA Bullish Stack")
+            score += 1; confluence.append("EMA Bullish Stack")
         elif direction == "SELL" and last['Close'] < last['EMA20'] and last['EMA20'] < last['EMA50']:
-            score += 1
-            confluence.append("EMA Bearish Stack")
+            score += 1; confluence.append("EMA Bearish Stack")
+
+        # 2. EMA200 Trend
         if direction == "BUY" and last['Close'] > last['EMA200']:
-            score += 1
-            confluence.append("Above EMA200")
+            score += 1; confluence.append("Above EMA200")
         elif direction == "SELL" and last['Close'] < last['EMA200']:
-            score += 1
-            confluence.append("Below EMA200")
+            score += 1; confluence.append("Below EMA200")
+
+        # 3. RSI
         if direction == "BUY" and 40 < last['RSI'] < 70:
-            score += 1
-            confluence.append(f"RSI {last['RSI']:.1f} Bullish")
+            score += 1; confluence.append(f"RSI {last['RSI']:.1f} Bullish")
         elif direction == "SELL" and 30 < last['RSI'] < 60:
-            score += 1
-            confluence.append(f"RSI {last['RSI']:.1f} Bearish")
+            score += 1; confluence.append(f"RSI {last['RSI']:.1f} Bearish")
+
+        # 4 & 5. Order Block + Retest
         ob_hit, ob_text = detect_order_block(df, direction)
         if ob_hit:
-            score += 2
-            confluence.append(ob_text)
-            if "Bu-OB" in ob_text or "Be-OB" in ob_text:
-                confluence.append("OB RETEST")
+            score += 2; confluence.append(ob_text); confluence.append("OB RETEST")
+
+        # 6. Market Structure
         ms_text, ms_bias = detect_market_structure(df)
         if (direction == "BUY" and "Bullish" in ms_bias) or (direction == "SELL" and "Bearish" in ms_bias):
-            score += 1
-            confluence.append(ms_text)
+            score += 1; confluence.append(ms_text)
+
+        # 7. Momentum
         if abs(last['Close'] - prev['Close']) > last['ATR'] * 0.5:
-            score += 1
-            confluence.append("MB Momentum")
+            score += 1; confluence.append("MB Momentum")
+
+        # 8. ATR Expansion
         if last['ATR'] > df['ATR'].tail(20).mean():
-            score += 1
-            confluence.append("ATR Expansion")
-        if direction == "BUY" and abs(last['Low'] - last['EMA20']) < last['ATR']*0.3:
-            score += 1
-            confluence.append("Pullback to EMA20")
-        elif direction == "SELL" and abs(last['High'] - last['EMA20']) < last['ATR']*0.3:
-            score += 1
-            confluence.append("Pullback to EMA20")
+            score += 1; confluence.append("ATR Expansion")
+
     except Exception as e:
         print(f"confluence err {e}")
     return score, confluence
@@ -181,31 +202,43 @@ def check_confluence(df, direction):
 def full_multi_tf_analysis(symbol):
     try:
         symbol = symbol.upper().strip()
+
+        # ONLY 1 download per symbol now - no second 1h download
         df_15m = get_data(symbol, period="60d", interval="15m")
         if df_15m is None:
-            return {"signal": False, "symbol": symbol, "reason": "No data 15m", "score": 0}
+            return {"signal": False, "symbol": symbol, "reason": "No data - rate limited, will use cache next run", "score": 0}
+
         df_15m = add_indicators(df_15m)
         last = df_15m.iloc[-1]
-        df_1h = get_data(symbol, period="60d", interval="1h")
-        bias = "Neutral"
-        if df_1h is not None:
-            df_1h = add_indicators(df_1h)
-            if df_1h.iloc[-1]['Close'] > df_1h.iloc[-1]['EMA50']:
-                bias = "Bullish HTF"
-            else:
-                bias = "Bearish HTF"
+
+        # FIX: HTF bias from resampled 15m data - NO extra Yahoo call
+        bias = "Neutral HTF"
+        try:
+            df_1h = df_15m.resample('1h').agg({'Open':'first','High':'max','Low':'min','Close':'last'}).dropna()
+            if len(df_1h) > 50:
+                df_1h['EMA50'] = df_1h['Close'].ewm(span=50).mean()
+                if df_1h.iloc[-1]['Close'] > df_1h.iloc[-1]['EMA50']:
+                    bias = "Bullish HTF"
+                else:
+                    bias = "Bearish HTF"
+        except:
+            pass
+
         buy_score, buy_conf = check_confluence(df_15m, "BUY")
         sell_score, sell_conf = check_confluence(df_15m, "SELL")
+
         direction = "BUY" if buy_score >= sell_score else "SELL"
         score = max(buy_score, sell_score)
         confluence = buy_conf if direction == "BUY" else sell_conf
+
         if score < 4:
             return {"signal": False, "symbol": symbol, "reason": f"Low score {score}/8", "score": score, "bias": bias, "confluence": confluence}
+
         atr = last['ATR']
         if pd.isna(atr) or atr == 0:
             atr = (last['High'] - last['Low']) * 0.5
-            if atr == 0:
-                atr = last['Close'] * 0.001
+            if atr == 0: atr = last['Close'] * 0.001
+
         entry = float(last['Close'])
         if direction == "BUY":
             sl = entry - (atr * 1.5)
@@ -213,8 +246,10 @@ def full_multi_tf_analysis(symbol):
         else:
             sl = entry + (atr * 1.5)
             tp = entry - (atr * 3.0)
+
         has_ob = any("OB" in c for c in confluence)
         has_mb = any("MB" in c for c in confluence)
+
         if score >= 7 and has_ob and has_mb:
             quality = "SNIPER Bu-OB/Be-OB+MB"
         elif score >= 6 and has_ob:
@@ -223,14 +258,15 @@ def full_multi_tf_analysis(symbol):
             quality = "PREMIUM"
         else:
             quality = "STANDARD"
+
         entry = round_by_symbol(symbol, entry)
         sl = round_by_symbol(symbol, sl)
         tp = round_by_symbol(symbol, tp)
+
         if entry == sl:
-            if direction == "BUY":
-                sl = round_by_symbol(symbol, sl - atr)
-            else:
-                sl = round_by_symbol(symbol, sl + atr)
+            if direction == "BUY": sl = round_by_symbol(symbol, sl - atr)
+            else: sl = round_by_symbol(symbol, sl + atr)
+
         return {
             "signal": True,
             "symbol": symbol,
@@ -240,9 +276,9 @@ def full_multi_tf_analysis(symbol):
             "tp": tp,
             "score": score,
             "quality": quality,
-            "bias": f"{bias} | Bu-OB:{has_ob} Be-OB:{has_ob} MB:{has_mb}",
+            "bias": f"{bias} | OB:{has_ob} MB:{has_mb}",
             "confluence": confluence,
-            "reason": f"{quality} {score}/8 - {bias} - {', '.join(confluence[:3])}",
+            "reason": f"{quality} {score}/8 - {bias}",
             "news_warning": False
         }
     except Exception as e:
