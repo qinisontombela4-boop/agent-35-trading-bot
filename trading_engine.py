@@ -1,285 +1,420 @@
+"""
+Agent 35 - V12 SHIFT HUNTER ENGINE
+- HTF Premium/Discount Bias (Daily/4H)
+- MTF Structure BOS/CHoCH (4H/1H/15M/5M)
+- LTF Entry: FVG + OB + MB/Breaker in 5m
+- Early Shift Detection: 5m CHoCH before HTF shows it
+"""
+
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import time
-import requests
 from datetime import datetime
 
+# ========== SYMBOL MAP ==========
 MAP = {
-    "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X",
-    "EURJPY": "EURJPY=X", "GBPJPY": "GBPJPY=X", "USDZAR": "USDZAR=X",
-    "EURZAR": "EURZAR=X", "GBPZAR": "GBPZAR=X", "ZARJPY": "ZARJPY=X",
-    "USDCHF": "USDCHF=X", "XAUUSD": "GC=F", "GOLD": "GC=F", "XAGUSD": "SI=F",
-    "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD", "SOLUSD": "SOL-USD",
-    "NAS100": "^NDX", "US30": "^DJI", "SPX500": "^GSPC", "GER40": "^GDAXI",
-    "UK100": "^FTSE", "JP225": "^N225", "USOIL": "CL=F", "UKOIL": "BZ=F",
-    "AAPL": "AAPL", "TSLA": "TSLA", "NVDA": "NVDA", "MSFT": "MSFT"
+    "EURUSD": "EURUSD=X", "GBPUSD": "GBPUSD=X", "USDJPY": "USDJPY=X", "EURJPY": "EURJPY=X",
+    "GBPJPY": "GBPJPY=X", "USDZAR": "USDZAR=X", "EURZAR": "EURZAR=X", "GBPZAR": "GBPZAR=X",
+    "ZARJPY": "ZARJPY=X", "USDCHF": "CHF=X", "XAUUSD": "GC=F", "GOLD": "GC=F", "XAGUSD": "SI=F",
+    "BTCUSD": "BTC-USD", "ETHUSD": "ETH-USD", "SOLUSD": "SOL-USD", "NAS100": "^NDX",
+    "US30": "^DJI", "SPX500": "^GSPC", "GER40": "^GDAXI", "UK100": "^FTSE", "JP225": "^N225",
+    "USOIL": "CL=F", "UKOIL": "BZ=F", "AAPL": "AAPL", "TSLA": "TSLA", "NVDA": "NVDA", "MSFT": "MSFT"
 }
 
-PRICE_CACHE = {}
-CACHE_TTL = 300
-NEWS_CACHE = {"time": 0, "events": []}
-NEWS_CACHE_TTL = 3600
-
-HIGH_IMPACT_KEYWORDS = ["NFP","NON FARM","CPI","FOMC","FED FUNDS","INTEREST RATE","GDP","RETAIL SALES","PPI","PMI","ISM","UNEMPLOYMENT","JOLTS","ADP"]
-
-def fetch_forex_factory_news():
-    now = time.time()
-    if now - NEWS_CACHE["time"] < NEWS_CACHE_TTL and NEWS_CACHE["events"]:
-        return NEWS_CACHE["events"]
-    events = []
+def get_data(symbol, period, interval):
+    yfs = MAP.get(symbol.upper(), symbol.upper() + "=X")
     try:
-        url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-        r = requests.get(url, timeout=10)
-        if r.status_code == 200:
-            data = r.json()
-            for e in data:
-                if e.get('impact') == 'High' or e.get('impactTitle') == 'High':
-                    events.append({"currency": (e.get('country','') or e.get('currency','')).upper(),"title": e.get('title',''),"impact": "High","hour": None})
-            print(f"NEWS: Fetched {len(events)} high impact")
-    except Exception as ex:
-        print(f"News fetch fail {ex}")
-    if not events:
-        events = [
-            {"currency": "USD", "title": "CPI / NFP Window 12:30 UTC", "impact": "High", "hour": 12, "minute": 30},
-            {"currency": "USD", "title": "ISM / PMI Window 14:00 UTC", "impact": "High", "hour": 14, "minute": 0},
-            {"currency": "EUR", "title": "EUR High Impact", "impact": "High", "hour": 9, "minute": 0},
-            {"currency": "GBP", "title": "GBP High Impact", "impact": "High", "hour": 9, "minute": 30},
-            {"currency": "USD", "title": "FOMC / Fed", "impact": "High", "hour": 18, "minute": 0},
-        ]
-    NEWS_CACHE["time"] = now
-    NEWS_CACHE["events"] = events
-    return events
-
-def is_news_time(symbol, buffer_minutes=35):
-    try:
-        sym = symbol.upper()
-        currs = []
-        if "USD" in sym: currs.append("USD")
-        if "EUR" in sym: currs.append("EUR")
-        if "GBP" in sym: currs.append("GBP")
-        if "JPY" in sym: currs.append("JPY")
-        if "ZAR" in sym: currs.append("ZAR")
-        if "XAU" in sym or "GOLD" in sym or "XAG" in sym: currs.append("USD")
-        if not currs: currs = ["USD"]
-        now_utc = datetime.utcnow()
-        events = fetch_forex_factory_news()
-        for ev in events:
-            ev_curr = ev.get('currency','').upper()
-            if ev_curr not in currs and ev_curr!="ALL": continue
-            title = ev.get('title','').upper()
-            is_high = any(k in title for k in HIGH_IMPACT_KEYWORDS) or ev.get('impact') == 'High'
-            if not is_high: continue
-            if 'hour' in ev and ev['hour'] is not None:
-                ev_time = now_utc.replace(hour=ev['hour'], minute=ev.get('minute',0), second=0, microsecond=0)
-                diff = abs((now_utc - ev_time).total_seconds() / 60)
-                if diff <= buffer_minutes:
-                    return True, f"🚨 {ev_curr} HIGH IMPACT NOW: {ev.get('title')} - NO TRADE"
-                future_diff = (ev_time - now_utc).total_seconds() / 60
-                if 0 < future_diff <= buffer_minutes:
-                    return True, f"🚨 {ev_curr} HIGH IMPACT in {int(future_diff)}min: {ev.get('title')} - PAUSE"
-        return False, ""
-    except Exception as e:
-        print(f"is_news_time err {e}")
-        return False, ""
-
-def round_by_symbol(symbol, price):
-    try:
-        s = symbol.upper()
-        if "JPY" in s: return round(float(price), 3)
-        if "ZAR" in s: return round(float(price), 3)
-        if "CHF" in s: return round(float(price), 5)
-        if "XAU" in s or "GOLD" in s: return round(float(price), 2)
-        if "XAG" in s: return round(float(price), 3)
-        if "BTC" in s: return round(float(price), 2)
-        if "ETH" in s or "SOL" in s: return round(float(price), 2)
-        if any(x in s for x in ["NAS100","US30","SPX500","GER40","UK100","JP225"]): return round(float(price), 1)
-        if "OIL" in s: return round(float(price), 2)
-        return round(float(price), 5)
-    except: return round(float(price), 5)
-
-def get_data(symbol, period="60d", interval="15m"):
-    cache_key = f"{symbol}_{interval}"
-    now = time.time()
-    if cache_key in PRICE_CACHE and now - PRICE_CACHE[cache_key]['time'] < CACHE_TTL:
-        return PRICE_CACHE[cache_key]['data'].copy()
-    try:
-        yfs = MAP.get(symbol.upper(), symbol.upper()+"=X")
-        time.sleep(1.2)
-        df = yf.download(yfs, period=period, interval=interval, progress=False, auto_adjust=True, threads=False)
+        df = yf.download(yfs, period=period, interval=interval, progress=False, auto_adjust=True)
         if df.empty:
-            if cache_key in PRICE_CACHE: return PRICE_CACHE[cache_key]['data'].copy()
             return None
         try:
-            if isinstance(df.columns, pd.MultiIndex): df.columns = df.columns.get_level_values(0)
-        except: pass
-        df = df.dropna()
-        if len(df) < 50:
-            if cache_key in PRICE_CACHE: return PRICE_CACHE[cache_key]['data'].copy()
-            return None
-        PRICE_CACHE[cache_key] = {'time': now, 'data': df.copy()}
-        return df
-    except:
-        if cache_key in PRICE_CACHE: return PRICE_CACHE[cache_key]['data'].copy()
+            df.columns = df.columns.get_level_values(0)
+        except:
+            pass
+        return df.dropna()
+    except Exception as e:
+        print(f"Data error {symbol} {interval}: {e}")
         return None
 
-def add_indicators(df):
+def calc_atr(df, p=14):
     try:
-        df['EMA20'] = df['Close'].ewm(span=20).mean()
-        df['EMA50'] = df['Close'].ewm(span=50).mean()
-        df['EMA200'] = df['Close'].ewm(span=200).mean()
-        delta = df['Close'].diff()
-        gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
-        loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
-        rs = gain / loss
-        df['RSI'] = 100 - (100 / (1 + rs))
-        tr = pd.concat([df['High'] - df['Low'], np.abs(df['High'] - df['Close'].shift()), np.abs(df['Low'] - df['Close'].shift())], axis=1).max(axis=1)
-        df['ATR'] = tr.rolling(14).mean()
-        df['DailyHigh'] = df['High'].rolling(20).max()
-        df['DailyLow'] = df['Low'].rolling(20).min()
-        return df
-    except: return df
+        high = df['High']
+        low = df['Low']
+        close = df['Close']
+        tr = pd.concat([high - low, (high - close.shift()).abs(), (low - close.shift()).abs()], axis=1).max(axis=1)
+        return tr.rolling(p).mean().iloc[-1]
+    except:
+        return 0
 
-def get_premium_discount(df):
-    try:
-        last = df.iloc[-1]
-        daily_high = df['DailyHigh'].iloc[-1]
-        daily_low = df['DailyLow'].iloc[-1]
-        daily_range = daily_high - daily_low
-        if daily_range == 0: return "NEUTRAL", 0.5, False, False
-        position = (last['Close'] - daily_low) / daily_range
-        recent_highs = df['High'].tail(10).values
-        eqh = False; weak_high = False
-        if len(recent_highs) >= 3:
-            top_highs = sorted(recent_highs)[-3:]
-            if (top_highs[-1] - top_highs[0]) / top_highs[-1] < 0.0008: eqh = True
-        last_high = df['High'].iloc[-1]
-        prev_high = df['DailyHigh'].iloc[-2] if len(df) > 2 else daily_high
-        if last_high > prev_high and (last_high - prev_high) / prev_high < 0.0015: weak_high = True
-        if position > 0.70: return "PREMIUM", position, eqh, weak_high
-        elif position < 0.30: return "DISCOUNT", position, eqh, weak_high
-        else: return "EQUILIBRIUM", position, eqh, weak_high
-    except: return "NEUTRAL", 0.5, False, False
+# ========== LUXALGO SMC LOGIC REBUILT ==========
 
-def detect_order_block(df, direction="BUY"):
+def get_swing_structure(df, length=10):
+    """Find last 2 swing highs/lows like LuxAlgo leg()"""
+    if df is None or len(df) < length * 3:
+        return None
     try:
-        last_10 = df.tail(10)
-        if direction == "BUY":
-            for i in range(len(last_10)-3, 0, -1):
-                if last_10['Close'].iloc[i] < last_10['Open'].iloc[i]:
-                    if last_10['Close'].iloc[i+1] > last_10['Open'].iloc[i+1]:
-                        return True, f"Bu-OB at {last_10['Low'].iloc[i]:.5f}"
+        # Rolling swing detection
+        highs = df['High'].rolling(window=length*2+1, center=True).max()
+        lows = df['Low'].rolling(window=length*2+1, center=True).min()
+        is_sh = df['High'] == highs
+        is_sl = df['Low'] == lows
+        sh = df[is_sh].tail(3)
+        sl = df[is_sl].tail(3)
+        if len(sh) < 2 or len(sl) < 2:
+            return None
+        return {
+            "last_high": sh['High'].iloc[-1],
+            "prev_high": sh['High'].iloc[-2],
+            "last_low": sl['Low'].iloc[-1],
+            "prev_low": sl['Low'].iloc[-2],
+            "hh": sh['High'].iloc[-1] > sh['High'].iloc[-2],
+            "hl": sl['Low'].iloc[-1] > sl['Low'].iloc[-2],
+            "ll": sl['Low'].iloc[-1] < sl['Low'].iloc[-2],
+            "lh": sh['High'].iloc[-1] < sh['High'].iloc[-2]
+        }
+    except:
+        return None
+
+def detect_bos_choch(df, length=10):
+    """BOS = Break of Structure with trend, CHoCH = Change of Character = SHIFT"""
+    st = get_swing_structure(df, length)
+    if not st:
+        return {"trend": "NEUTRAL", "signal": None, "is_shift": False, "last_high": 0, "last_low": 0}
+    close = df['Close'].iloc[-1]
+    try:
+        # Bullish BOS: close > last_high AND last_high > prev_high (uptrend continuation)
+        if close > st['last_high']:
+            if st['last_high'] > st['prev_high']:
+                return {"trend": "BULL", "signal": "BULL_BOS", "is_shift": False, "last_high": st['last_high'], "last_low": st['last_low']}
+            else:
+                # Break of previous LH = CHOCH = EARLY SHIFT
+                return {"trend": "BULL", "signal": "BULL_CHOCH", "is_shift": True, "last_high": st['last_high'], "last_low": st['last_low']}
+        # Bearish BOS
+        if close < st['last_low']:
+            if st['last_low'] < st['prev_low']:
+                return {"trend": "BEAR", "signal": "BEAR_BOS", "is_shift": False, "last_high": st['last_high'], "last_low": st['last_low']}
+            else:
+                return {"trend": "BEAR", "signal": "BEAR_CHOCH", "is_shift": True, "last_high": st['last_high'], "last_low": st['last_low']}
+        # No break - determine trend from swing pattern
+        if st['hh'] and st['hl']:
+            return {"trend": "BULL", "signal": None, "is_shift": False, "last_high": st['last_high'], "last_low": st['last_low']}
+        if st['ll'] and st['lh']:
+            return {"trend": "BEAR", "signal": None, "is_shift": False, "last_high": st['last_high'], "last_low": st['last_low']}
+        return {"trend": "NEUTRAL", "signal": None, "is_shift": False, "last_high": st['last_high'], "last_low": st['last_low']}
+    except:
+        return {"trend": "NEUTRAL", "signal": None, "is_shift": False, "last_high": 0, "last_low": 0}
+
+def detect_ob(df):
+    """
+    Order Block + Mitigation Block / Breaker Block
+    Bullish OB = last bearish candle before bullish impulse
+    If price mitigated it (wicked through), it becomes Bullish MB / Breaker
+    """
+    if df is None or len(df) < 25:
+        return None
+    try:
+        # Look in last 20 candles for OB
+        for i in range(len(df) - 6, len(df) - 20, -1):
+            c = df.iloc[i]
+            # Bullish OB pattern
+            if c['Close'] < c['Open']: # Bearish candle
+                future = df.iloc[i+1:i+4]
+                if len(future) < 3:
+                    continue
+                impulse = future['Close'].max() > c['High'] * 1.0008
+                if impulse:
+                    # Check if mitigated already
+                    after = df.iloc[i+4:]
+                    mitigated = (after['Low'].min() <= c['High']) if len(after) > 0 else False
+                    ob_type = "BULL_MB_BREAKER" if mitigated else "BULL_OB"
+                    return {"type": ob_type, "high": float(c['High']), "low": float(c['Low']), "mitigated": mitigated, "idx": i}
+            # Bearish OB pattern
+            if c['Close'] > c['Open']: # Bullish candle
+                future = df.iloc[i+1:i+4]
+                if len(future) < 3:
+                    continue
+                impulse = future['Close'].min() < c['Low'] * 0.9992
+                if impulse:
+                    after = df.iloc[i+4:]
+                    mitigated = (after['High'].max() >= c['Low']) if len(after) > 0 else False
+                    ob_type = "BEAR_MB_BREAKER" if mitigated else "BEAR_OB"
+                    return {"type": ob_type, "high": float(c['High']), "low": float(c['Low']), "mitigated": mitigated, "idx": i}
+        return None
+    except:
+        return None
+
+def detect_fvg(df, min_atr_pct=0.12):
+    """Fair Value Gap - Your logic: low > high[2] or high < low[2]"""
+    if df is None or len(df) < 5:
+        return None
+    try:
+        atr = calc_atr(df, 14)
+        if atr == 0 or pd.isna(atr):
+            return None
+        low = df['Low'].iloc[-1]
+        high = df['High'].iloc[-1]
+        high_2 = df['High'].iloc[-3]
+        low_2 = df['Low'].iloc[-3]
+        close = df['Close'].iloc[-1]
+
+        bull_fvg = low > high_2
+        bear_fvg = high < low_2
+        bull_size = (low - high_2) / atr * 100 if atr!= 0 else 0
+        bear_size = (low_2 - high) / atr * 100 if atr!= 0 else 0
+
+        if bull_fvg and bull_size > min_atr_pct:
+            sl = low_2 - 0.0005 if "JPY" not in str(df) else low_2 - 0.05
+            risk = close - sl
+            return {"type": "BULL_FVG", "entry": float(close), "sl": float(sl), "risk": float(risk), "top": float(low), "bottom": float(high_2), "size": float(bull_size)}
+        if bear_fvg and bear_size > min_atr_pct:
+            sl = high_2 + 0.0005 if "JPY" not in str(df) else high_2 + 0.05
+            risk = sl - close
+            return {"type": "BEAR_FVG", "entry": float(close), "sl": float(sl), "risk": float(risk), "top": float(low_2), "bottom": float(high), "size": float(bear_size)}
+        return None
+    except:
+        return None
+
+def get_premium_discount(df_htf):
+    """Premium/Discount Zones from HTF range - LuxAlgo style"""
+    if df_htf is None or len(df_htf) < 50:
+        return "EQUILIBRIUM", 0.5, 0, 0
+    try:
+        hi = df_htf['High'].tail(50).max()
+        lo = df_htf['Low'].tail(50).min()
+        close = df_htf['Close'].iloc[-1]
+        if hi == lo:
+            return "EQUILIBRIUM", 0.5, hi, lo
+        pct = (close - lo) / (hi - lo)
+        eq = (hi + lo) / 2
+        if pct >= 0.7:
+            return "PREMIUM", pct, eq, hi
+        elif pct <= 0.3:
+            return "DISCOUNT", pct, eq, lo
         else:
-            for i in range(len(last_10)-3, 0, -1):
-                if last_10['Close'].iloc[i] > last_10['Open'].iloc[i]:
-                    if last_10['Close'].iloc[i+1] < last_10['Open'].iloc[i+1]:
-                        return True, f"Be-OB at {last_10['High'].iloc[i]:.5f}"
-        return False, ""
-    except: return False, ""
+            return "EQUILIBRIUM", pct, eq, (hi+lo)/2
+    except:
+        return "EQUILIBRIUM", 0.5, 0, 0
 
-def detect_market_structure(df):
+def get_rsi(df, period=14):
     try:
-        highs = df['High'].tail(20); lows = df['Low'].tail(20)
-        prev_high = highs.iloc[-6:-1].max(); prev_low = lows.iloc[-6:-1].min()
-        if lows.iloc[-1] < prev_low and highs.iloc[-1] > prev_high: return "Bullish CHoCH", "Bullish"
-        if highs.iloc[-1] > prev_high and df['Close'].iloc[-1] < df['Open'].iloc[-1]: return "Bearish CHoCH", "Bearish"
-        if highs.iloc[-1] > highs.iloc[-5] and lows.iloc[-1] > lows.iloc[-5]: return "Bullish BOS", "Bullish"
-        elif highs.iloc[-1] < highs.iloc[-5] and lows.iloc[-1] < lows.iloc[-5]: return "Bearish BOS", "Bearish"
-        else: return "Ranging", "Neutral"
-    except: return "Unknown", "Neutral"
+        delta = df['Close'].diff()
+        gain = delta.where(delta > 0, 0).rolling(period).mean()
+        loss = -delta.where(delta < 0, 0).rolling(period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        return float(rsi.iloc[-1]) if not pd.isna(rsi.iloc[-1]) else 50.0
+    except:
+        return 50.0
 
-def check_confluence(df, direction, zone_info):
-    score = 0; confluence = []
-    try:
-        last = df.iloc[-1]; prev = df.iloc[-2]
-        zone, pos, eqh, weak_high = zone_info
-        if direction == "BUY" and last['Close'] > last['EMA20'] and last['EMA20'] > last['EMA50']:
-            score+=1; confluence.append("EMA Bullish Stack")
-        elif direction == "SELL" and last['Close'] < last['EMA20'] and last['EMA20'] < last['EMA50']:
-            score+=1; confluence.append("EMA Bearish Stack")
-        if direction == "BUY" and last['Close'] > last['EMA200']:
-            score+=1; confluence.append("Above EMA200")
-        elif direction == "SELL" and last['Close'] < last['EMA200']:
-            score+=1; confluence.append("Below EMA200")
-        if direction == "BUY" and 40 < last['RSI'] < 70:
-            score+=1; confluence.append(f"RSI {last['RSI']:.1f} Bullish")
-        elif direction == "SELL" and 30 < last['RSI'] < 60:
-            score+=1; confluence.append(f"RSI {last['RSI']:.1f} Bearish")
-        ob_hit, ob_text = detect_order_block(df, direction)
-        if ob_hit: score+=2; confluence.append(ob_text); confluence.append("OB RETEST")
-        ms_text, ms_bias = detect_market_structure(df)
-        if (direction == "BUY" and "Bullish" in ms_bias) or (direction == "SELL" and "Bearish" in ms_bias):
-            score+=1; confluence.append(ms_text)
-        if abs(last['Close'] - prev['Close']) > last['ATR'] * 0.5:
-            score+=1; confluence.append("MB Momentum")
-        if last['ATR'] > df['ATR'].tail(20).mean():
-            score+=1; confluence.append("ATR Expansion")
-        confluence.append(f"{zone} {pos*100:.0f}%")
-        if eqh: confluence.append("EQH Detected")
-        if weak_high: confluence.append("Weak High")
-    except Exception as e: print(f"confluence err {e}")
-    return score, confluence
+# ========== MAIN V12 ANALYSIS ==========
 
-def full_multi_tf_analysis(symbol, use_news_filter=True):
+def full_multi_tf_analysis(symbol, use_news_filter=True, rr_target=2.5):
+    """
+    V12 SHIFT HUNTER:
+    1. Daily/4H = Premium/Discount + HTF Bias
+    2. 1H/15M = Structure confirmation
+    3. 5M = FVG + OB/MB + CHoCH SHIFT (early reversal before HTF)
+    """
     try:
-        symbol = symbol.upper().strip()
-        # NEWS FILTER - can be toggled per user
-        if use_news_filter:
-            is_news, news_text = is_news_time(symbol, buffer_minutes=35)
-            if is_news:
-                return {"signal": False, "symbol": symbol, "reason": news_text, "score": 0, "news_block": True, "news_text": news_text}
-        df_15m = get_data(symbol, period="60d", interval="15m")
-        if df_15m is None:
-            return {"signal": False, "symbol": symbol, "reason": "No data", "score": 0}
-        df_15m = add_indicators(df_15m)
-        last = df_15m.iloc[-1]
-        try:
-            df_1h = df_15m.resample('1h').agg({'Open':'first','High':'max','Low':'min','Close':'last'}).dropna()
-            if len(df_1h) > 50:
-                df_1h['EMA50'] = df_1h['Close'].ewm(span=50).mean()
-                bias = "Bullish HTF" if df_1h.iloc[-1]['Close'] > df_1h.iloc[-1]['EMA50'] else "Bearish HTF"
-            else: bias = "Neutral HTF"
-        except: bias = "Neutral HTF"
-        zone, pos, eqh, weak_high = get_premium_discount(df_15m)
-        buy_score, buy_conf = check_confluence(df_15m, "BUY", (zone, pos, eqh, weak_high))
-        sell_score, sell_conf = check_confluence(df_15m, "SELL", (zone, pos, eqh, weak_high))
-        direction = "BUY" if buy_score >= sell_score else "SELL"
-        score = max(buy_score, sell_score)
-        confluence = buy_conf if direction == "BUY" else sell_conf
-        if zone == "PREMIUM" and pos > 0.75 and direction == "BUY" and (eqh or weak_high):
-            direction = "SELL"
-            score = sell_score + 2
-            confluence = sell_conf + [f"PREMIUM REVERSAL {pos*100:.0f}%", "EQH Weak High Sweep"]
-            if score < 4:
-                return {"signal": False, "symbol": symbol, "reason": f"BUY blocked in PREMIUM {pos*100:.0f}%", "score": score, "bias": bias, "confluence": confluence}
-        if zone == "DISCOUNT" and pos < 0.25 and direction == "SELL":
-            direction = "BUY"
-            score = buy_score + 2
-            confluence = buy_conf + [f"DISCOUNT REVERSAL {pos*100:.0f}%", "EQL Sweep"]
-            if score < 4:
-                return {"signal": False, "symbol": symbol, "reason": f"SELL blocked in DISCOUNT {pos*100:.0f}%", "score": score, "bias": bias, "confluence": confluence}
-        if score < 4:
-            return {"signal": False, "symbol": symbol, "reason": f"Low score {score}/8 in {zone}", "score": score, "bias": f"{bias} | {zone} {pos*100:.0f}%", "confluence": confluence}
-        atr = last['ATR']
-        if pd.isna(atr) or atr == 0:
-            atr = (last['High'] - last['Low']) * 0.5
-            if atr == 0: atr = last['Close'] * 0.001
-        entry = float(last['Close'])
-        if direction == "BUY": sl = entry - (atr * 1.5); tp = entry + (atr * 3.0)
-        else: sl = entry + (atr * 1.5); tp = entry - (atr * 3.0)
-        has_ob = any("OB" in c for c in confluence)
-        has_mb = any("MB" in c for c in confluence)
-        if score >= 7 and has_ob and has_mb: quality = "SNIPER Bu-OB/Be-OB+MB"
-        elif score >= 6 and has_ob: quality = "PREMIUM Be-OB"
-        elif score >= 6: quality = "PREMIUM"
-        else: quality = "STANDARD"
-        entry = round_by_symbol(symbol, entry); sl = round_by_symbol(symbol, sl); tp = round_by_symbol(symbol, tp)
-        if entry == sl:
-            if direction == "BUY": sl = round_by_symbol(symbol, sl - atr)
-            else: sl = round_by_symbol(symbol, sl + atr)
-        is_news2, news_text2 = is_news_time(symbol, buffer_minutes=20) if use_news_filter else (False, "")
-        return {"signal": True, "symbol": symbol, "direction": direction, "entry": entry, "sl": sl, "tp": tp, "score": score, "quality": quality, "bias": f"{bias} | {zone} {pos*100:.0f}% {'EQH' if eqh else ''} | OB:{has_ob} MB:{has_mb}", "confluence": confluence, "reason": f"{quality} {score}/8 - {zone} {pos*100:.0f}% {bias}", "news_warning": news_text2, "news_block": False}
+        # Load all timeframes
+        df_5m = get_data(symbol, period="5d", interval="5m")
+        df_15m = get_data(symbol, period="10d", interval="15m")
+        df_1h = get_data(symbol, period="1mo", interval="1h")
+        df_4h = get_data(symbol, period="3mo", interval="4h")
+        df_daily = get_data(symbol, period="6mo", interval="1d")
+
+        if df_5m is None or len(df_5m) < 100:
+            return {"signal": False, "symbol": symbol, "reason": "No 5m data - yfinance limit", "score": 0}
+
+        # ----- HTF BIAS -----
+        zone_daily, pct_daily, eq_daily, level_daily = get_premium_discount(df_daily if df_daily is not None else df_4h)
+        zone_4h, pct_4h, eq_4h, level_4h = get_premium_discount(df_4h if df_4h is not None else df_1h)
+
+        struct_4h = detect_bos_choch(df_4h, 10) if df_4h is not None else {"trend": "NEUTRAL", "signal": None, "is_shift": False}
+        struct_1h = detect_bos_choch(df_1h, 10) if df_1h is not None else {"trend": "NEUTRAL", "signal": None, "is_shift": False}
+        struct_15m = detect_bos_choch(df_15m, 10) if df_15m is not None else {"trend": "NEUTRAL", "signal": None, "is_shift": False}
+        struct_5m = detect_bos_choch(df_5m, 10)
+
+        # ----- LTF ENTRY TOOLS -----
+        fvg_5m = detect_fvg(df_5m, 0.12)
+        fvg_15m = detect_fvg(df_15m, 0.12) if df_15m is not None else None
+        ob_5m = detect_ob(df_5m)
+        ob_15m = detect_ob(df_15m) if df_15m is not None else None
+        rsi_5m = get_rsi(df_5m)
+
+        htf_bull = struct_4h['trend'] == "BULL" or struct_1h['trend'] == "BULL"
+        htf_bear = struct_4h['trend'] == "BEAR" or struct_1h['trend'] == "BEAR"
+
+        confluence = []
+        score = 0
+        direction = None
+        entry = sl = tp = 0
+
+        # Log zones
+        confluence.append(f"HTF: Daily {zone_daily} {pct_daily*100:.0f}% | 4H {zone_4h} {pct_4h*100:.0f}%")
+
+        # ===== CORE LOGIC: SHIFT DETECTION =====
+        # If 5m CHoCH in Discount/Premium, it's EARLY REVERSAL before HTF sees it
+        if struct_5m['is_shift'] and struct_5m['signal']:
+            if "BULL_CHOCH" in struct_5m['signal']:
+                if zone_daily == "DISCOUNT" or zone_4h == "DISCOUNT":
+                    direction = "BUY"
+                    confluence.append(f"🔥 5M SHIFT: {struct_5m['signal']} in DISCOUNT - EARLY BULL REVERSAL")
+                    score += 4 # Max points for shift in right zone
+                elif zone_daily == "PREMIUM":
+                    confluence.append(f"⚠️ 5M {struct_5m['signal']} in PREMIUM - risky counter")
+                    direction = "BUY"
+                    score += 1
+                else:
+                    direction = "BUY"
+                    confluence.append(f"⚡ 5M {struct_5m['signal']} - Potential Shift")
+                    score += 2
+            elif "BEAR_CHOCH" in struct_5m['signal']:
+                if zone_daily == "PREMIUM" or zone_4h == "PREMIUM":
+                    direction = "SELL"
+                    confluence.append(f"🔥 5M SHIFT: {struct_5m['signal']} in PREMIUM - EARLY BEAR REVERSAL")
+                    score += 4
+                elif zone_daily == "DISCOUNT":
+                    confluence.append(f"⚠️ 5M {struct_5m['signal']} in DISCOUNT - risky counter")
+                    direction = "SELL"
+                    score += 1
+                else:
+                    direction = "SELL"
+                    confluence.append(f"⚡ 5M {struct_5m['signal']} - Potential Shift")
+                    score += 2
+
+        # If no shift, follow BOS + HTF alignment
+        if not direction:
+            if struct_5m['signal'] and "BULL_BOS" in struct_5m['signal']:
+                if htf_bull or zone_daily == "DISCOUNT":
+                    direction = "BUY"
+                    confluence.append(f"✅ 5M {struct_5m['signal']} + HTF {struct_4h['trend']}/{struct_1h['trend']}")
+                    score += 2
+                else:
+                    confluence.append(f"5M BULL_BOS but HTF {struct_4h['trend']} - waiting")
+            elif struct_5m['signal'] and "BEAR_BOS" in struct_5m['signal']:
+                if htf_bear or zone_daily == "PREMIUM":
+                    direction = "SELL"
+                    confluence.append(f"✅ 5M {struct_5m['signal']} + HTF {struct_4h['trend']}/{struct_1h['trend']}")
+                    score += 2
+
+        # Fallback: Use FVG direction if no BOS yet
+        if not direction and fvg_5m:
+            direction = "BUY" if "BULL" in fvg_5m['type'] else "SELL"
+            confluence.append(f"FVG direction {fvg_5m['type']} - no BOS yet")
+
+        if not direction:
+            return {"signal": False, "symbol": symbol, "reason": f"No direction - HTF {zone_daily} {struct_4h['trend']} | 5M {struct_5m['signal']}", "score": score}
+
+        # ===== ENTRY: Must have 5M FVG in right direction =====
+        fvg_entry = None
+        if fvg_5m and ((direction == "BUY" and "BULL" in fvg_5m['type']) or (direction == "SELL" and "BEAR" in fvg_5m['type'])):
+            fvg_entry = fvg_5m
+            confluence.append(f"✅ 5M {fvg_5m['type']} {fvg_5m['size']:.2f}% ATR")
+            score += 3
+        elif fvg_15m and ((direction == "BUY" and "BULL" in fvg_15m['type']) or (direction == "SELL" and "BEAR" in fvg_15m['type'])):
+            fvg_entry = fvg_15m
+            confluence.append(f"✅ 15M {fvg_15m['type']} {fvg_15m['size']:.2f}% ATR (higher TF FVG)")
+            score += 2
+
+        if not fvg_entry:
+            return {"signal": False, "symbol": symbol, "reason": f"No {direction} FVG in 5m/15m - waiting for entry", "score": score}
+
+        entry = fvg_entry['entry']
+        sl = fvg_entry['sl']
+        risk = abs(entry - sl)
+        if risk == 0:
+            return {"signal": False, "symbol": symbol, "reason": "Zero risk", "score": score}
+        tp = entry + risk * rr_target if direction == "BUY" else entry - risk * rr_target
+
+        # ===== OB / MB / BREAKER =====
+        if ob_5m:
+            if direction == "BUY" and "BULL" in ob_5m['type']:
+                tag = "MB Breaker 🔥" if ob_5m['mitigated'] else "Order Block"
+                confluence.append(f"✅ 5M {tag} Low {ob_5m['low']:.5f} High {ob_5m['high']:.5f}")
+                score += 2 if not ob_5m['mitigated'] else 3
+            elif direction == "SELL" and "BEAR" in ob_5m['type']:
+                tag = "MB Breaker 🔥" if ob_5m['mitigated'] else "Order Block"
+                confluence.append(f"✅ 5M {tag} High {ob_5m['high']:.5f} Low {ob_5m['low']:.5f}")
+                score += 2 if not ob_5m['mitigated'] else 3
+        if ob_15m:
+            if direction == "BUY" and "BULL" in ob_15m['type']:
+                confluence.append(f"✅ 15M {ob_15m['type']} confirms")
+                score += 1
+            if direction == "SELL" and "BEAR" in ob_15m['type']:
+                confluence.append(f"✅ 15M {ob_15m['type']} confirms")
+                score += 1
+
+        # ===== MTF CONFIRMATION =====
+        if struct_15m['signal'] and direction in struct_15m['signal']:
+            confluence.append(f"✅ 15M {struct_15m['signal']} confirms 5M")
+            score += 1
+        if struct_1h['trend'] == ("BULL" if direction == "BUY" else "BEAR"):
+            confluence.append(f"✅ 1H Trend {struct_1h['trend']} aligned")
+            score += 1
+        if struct_4h['trend'] == ("BULL" if direction == "BUY" else "BEAR"):
+            confluence.append(f"✅ 4H Trend {struct_4h['trend']} aligned")
+            score += 1
+
+        # ===== PREMIUM/DISCOUNT SCORING =====
+        if direction == "BUY" and zone_daily == "DISCOUNT":
+            confluence.append(f"✅ Daily DISCOUNT {pct_daily*100:.0f}% - High prob BUY")
+            score += 2
+        elif direction == "SELL" and zone_daily == "PREMIUM":
+            confluence.append(f"✅ Daily PREMIUM {pct_daily*100:.0f}% - High prob SELL")
+            score += 2
+        elif direction == "BUY" and zone_daily == "PREMIUM":
+            confluence.append(f"❌ BUY in PREMIUM {pct_daily*100:.0f}% - LOW PROB, penalized")
+            score -= 2
+        elif direction == "SELL" and zone_daily == "DISCOUNT":
+            confluence.append(f"❌ SELL in DISCOUNT {pct_daily*100:.0f}% - LOW PROB, penalized")
+            score -= 2
+
+        # RSI health
+        if 30 < rsi_5m < 70:
+            confluence.append(f"✅ RSI 5M {rsi_5m:.1f} healthy")
+            score += 1
+
+        # ===== QUALITY =====
+        if score >= 9:
+            quality = "SNIPER 🔥🔥🔥 SHIFT"
+        elif score >= 7:
+            quality = "PREMIUM 🔥 SHIFT"
+        elif score >= 5:
+            quality = "STANDARD"
+        else:
+            quality = "WEAK"
+
+        # Threshold = 5 for 5M sniper (stricter than before because 5M noisy)
+        if score >= 5:
+            bias_text = f"Daily {zone_daily} {pct_daily*100:.0f}% | 4H {zone_4h} {struct_4h['trend']} | 5M {struct_5m['signal']} {'SHIFT' if struct_5m['is_shift'] else ''}"
+            return {
+                "signal": True,
+                "symbol": symbol,
+                "direction": direction,
+                "entry": round(float(entry), 5),
+                "sl": round(float(sl), 5),
+                "tp": round(float(tp), 5),
+                "score": int(score),
+                "quality": quality,
+                "bias": bias_text,
+                "confluence": confluence,
+                "reason": f"HTF {zone_daily} + 5M {struct_5m['signal']} + {fvg_entry['type']} + {ob_5m['type'] if ob_5m else 'No OB'} | Score {score}/12",
+                "news_warning": ""
+            }
+        else:
+            return {
+                "signal": False,
+                "symbol": symbol,
+                "reason": f"Weak {score}/12 - {' | '.join(confluence[:2])}",
+                "score": score
+            }
+
     except Exception as e:
         import traceback
-        print(f"full_multi_tf err {symbol} {e} {traceback.format_exc()}")
-        return {"signal": False, "symbol": symbol, "reason": f"Error {e}", "score": 0}
+        traceback.print_exc()
+        return {"signal": False, "symbol": symbol, "reason": f"V12 Error: {e}", "score": 0}
+
+# For backward compatibility with app.py
+def analyze_symbol(symbol, use_news_filter=True):
+    return full_multi_tf_analysis(symbol, use_news_filter)
