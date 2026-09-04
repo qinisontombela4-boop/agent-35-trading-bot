@@ -1,8 +1,6 @@
 """
-AGENT 35 - app.py V12.6 ULTIMATE FINAL INTEGRATED DUAL FREE
-- Your V12.5 code + Fix for Yahoo block
-- Uses Finnhub (60/min) + TwelveData (8/min) = R0 forever
-- 10 pairs every 5 min
+AGENT 35 - app.py V12.6 ULTIMATE FINAL + ALL FIXES + FULL DASHBOARD
+Your V12.5 + Dual Free Fix + Dashboard
 """
 
 import os
@@ -15,11 +13,10 @@ from datetime import datetime, timedelta
 from flask import Flask, request, jsonify, render_template_string, redirect
 from flask_sqlalchemy import SQLAlchemy
 import requests
-from trading_engine import full_multi_tf_analysis # Now uses dual free engine
+from trading_engine import full_multi_tf_analysis
 
 app = Flask(__name__)
 
-# ========== CONFIG ==========
 DATABASE_URL = os.environ.get('DATABASE_URL', 'sqlite:///agent35.db')
 if DATABASE_URL.startswith("postgres://"):
     DATABASE_URL = DATABASE_URL.replace("postgres://", "postgresql://", 1)
@@ -30,17 +27,16 @@ app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'agent35-final-v12-secre
 
 db = SQLAlchemy(app)
 
-# FIXED: Support both BOT_TOKEN and TELEGRAM_BOT_TOKEN env names
+# FIXED: Support both names - fixes your ENV typo screenshot
 BOT_TOKEN = os.environ.get('BOT_TOKEN', '') or os.environ.get('TELEGRAM_BOT_TOKEN', '')
 TELEGRAM_API = f"https://api.telegram.org/bot{BOT_TOKEN}" if BOT_TOKEN else ""
 RENDER_URL = os.environ.get('RENDER_EXTERNAL_URL', 'https://agent-35-trading-bot.onrender.com').rstrip('/')
 BOT_USERNAME = os.environ.get('BOT_USERNAME', 'Agent35_Signals_Bot')
 ADMIN_ID = os.environ.get('ADMIN_ID', '')
 
-# FIXED FOR DUAL FREE - 10 PAIRS = R0 FOREVER - NO YAHOO BLOCK
+# FIXED FOR DUAL FREE - 10 PAIRS = R0 FOREVER
 SCAN_PAIRS = ["XAUUSD", "EURUSD", "GBPUSD", "USDJPY", "GBPJPY", "EURJPY", "USDZAR", "BTCUSD", "NAS100", "US30"]
 
-# ========== DATABASE MODELS ==========
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     telegram_id = db.Column(db.String(100), unique=True, nullable=False)
@@ -100,7 +96,6 @@ class Journal(db.Model):
 with app.app_context():
     db.create_all()
 
-# ========== HELPERS ==========
 def generate_ref_code(username="USER"):
     base = (username[:3].upper() if username and len(username)>=3 else "AG35")
     base = ''.join([c for c in base if c.isalnum()])
@@ -151,7 +146,6 @@ def format_signal_msg(analysis, source="SCANNER"):
     bias = analysis.get('bias','')
     confluence = analysis.get('confluence',[])
     risk = abs(entry - sl)
-    rr = "2.5"
     src_tag = "🤖 AUTO SCAN V12.6 DUAL FREE" if source == "SCANNER" else "⚡ TRADINGVIEW SMC"
     msg = f"""{emoji} **{symbol} | {quality}**
 {src_tag}
@@ -159,7 +153,7 @@ def format_signal_msg(analysis, source="SCANNER"):
 **ENTRY:** `{entry:.5f}`
 **SL:** `{sl:.5f}`
 **TP:** `{tp:.5f}`
-**RR:** 1:{rr} | **Risk:** {risk:.5f}
+**RR:** 1:2.5 | **Risk:** {risk:.5f}
 **Score:** {score}/12
 
 **BIAS:** {bias}
@@ -170,13 +164,11 @@ def format_signal_msg(analysis, source="SCANNER"):
         msg += f"• {c}\n"
     msg += f"""
 ⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M UTC')}
-🧠 Engine: V12.6 DUAL FREE - Finnhub+TwelveData - 5M OB+MB+FVG+CHoCH
-
-⚠️ Risk 1% max. Set SL exactly.
+🧠 V12.6 DUAL FREE - 5M OB+MB+FVG+CHoCH + Premium/Discount
+⚠️ Risk 1% max.
 """
     return msg
 
-# ========== SCANNER ENGINE ==========
 last_signals = {}
 
 def scan_and_send():
@@ -212,7 +204,7 @@ def scan_and_send():
                     db.session.commit()
                 else:
                     print(f"⏭️ {symbol}: {analysis.get('reason','No signal')} Score:{analysis.get('score',0)}")
-                time.sleep(4) # FIXED: was 1 sec, now 4 sec for free API limit (68/min safe)
+                time.sleep(4) # FIXED from 1 to 4 for free API
 
         except Exception as e:
             print(f"CRITICAL Scan error: {e}")
@@ -233,7 +225,6 @@ if not hasattr(app, 'scanner_started'):
     app.scanner_started = True
     print(f"✅ Background 5m scanner started for {len(SCAN_PAIRS)} pairs - V12.6 DUAL FREE")
 
-# ========== FLASK ROUTES ==========
 @app.route('/')
 def home():
     with app.app_context():
@@ -252,9 +243,9 @@ def home():
     <body>
     <h1>🚀 AGENT 35 V12.6 DUAL FREE</h1>
     <div class="card">
-        <h3>🧠 Engine Status: ACTIVE DUAL FREE</h3>
-        <p>Finnhub 60/min + TwelveData 8/min = R0 - No Yahoo Block</p>
-        <p>5M FVG + OB/MB Breaker + BOS/CHoCH Shift + Daily Premium/Discount</p>
+        <h3>🧠 Engine: DUAL FREE ACTIVE - No Yahoo Block</h3>
+        <p>Finnhub 60/min + TwelveData 8/min = R0</p>
+        <p>5M FVG + OB/MB Breaker + BOS/CHoCH Shift + Premium/Discount</p>
         <p><b>Pairs:</b> {{pairs}}</p>
         <p>Users: {{total}} | Active: {{active}} | Signals: {{sig_count}}</p>
         {% if last_sig %}
@@ -262,6 +253,7 @@ def home():
         {% endif %}
     </div>
     <div class="card">
+        <a class="btn" href="/dashboard">📊 FULL DASHBOARD</a>
         <a class="btn" href="/scan">🔍 Manual Scan</a>
         <a class="btn btn-blue" href="/stats">📊 Stats</a>
         <a class="btn btn-blue" href="/leaderboard">🏆 Leaderboard</a>
@@ -271,49 +263,96 @@ def home():
     </body></html>
     """, pairs=", ".join(SCAN_PAIRS), total=total, active=active, sig_count=sig_count, last_sig=last_sig, bot=BOT_USERNAME, url=RENDER_URL)
 
+# ===== FULL DASHBOARD - NEW FEATURE RESTORED =====
+@app.route('/dashboard')
+def dashboard():
+    with app.app_context():
+        total_users = User.query.count()
+        active_users = User.query.filter(User.subscription_end > datetime.utcnow()).count() + User.query.filter_by(subscription_type="lifetime").count()
+        trial_users = User.query.filter_by(subscription_type="trial").count()
+        lifetime_users = User.query.filter_by(subscription_type="lifetime").count()
+        total_signals = Signal.query.count()
+        signals_today = Signal.query.filter(Signal.created_at >= datetime.utcnow() - timedelta(hours=24)).count()
+        top_referrers = User.query.order_by(User.referrals_count.desc()).limit(10).all()
+        last_signals_db = Signal.query.order_by(Signal.created_at.desc()).limit(20).all()
+        last_users = User.query.order_by(User.created_at.desc()).limit(10).all()
+        last_logs = ScanLog.query.order_by(ScanLog.created_at.desc()).limit(15).all()
+        td_key = "✅ YES" if os.environ.get('TWELVEDATA_API_KEY') else "❌ NO"
+        fh_key = "✅ YES" if os.environ.get('FINNHUB_API_KEY') else "❌ NO"
+        bot_key = "✅ YES" if BOT_TOKEN else "❌ NO"
+    html = f"""
+    <!DOCTYPE html><html><head><title>Dashboard V12.6</title><meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+    body{{font-family:Arial;background:#0a0a0a;color:#fff;margin:0;padding:15px}}
+  .header{{background:#1a1a1a;padding:20px;border-radius:15px;text-align:center;border:1px solid #00ffaa;margin-bottom:15px}}
+  .grid{{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:15px}}
+  .card{{background:#1e1e1e;padding:18px;border-radius:15px;border:1px solid #333}}
+  .card h3{{color:#00ffaa}}.stat{{font-size:28px;font-weight:bold;color:#00ffaa}}
+  .btn{{background:#00ffaa;color:#000;padding:10px 18px;border-radius:8px;text-decoration:none;display:inline-block;margin:4px;font-weight:bold;font-size:14px}}
+  .btn-blue{{background:#0088cc;color:#fff}} table{{width:100%;font-size:12px;border-collapse:collapse}} th{{background:#333;padding:8px;text-align:left}} td{{padding:6px;border-bottom:1px solid #333}}
+  .live{{color:#00ffaa;animation:blink 1s infinite}} @keyframes blink{{50%{{opacity:0.3}}}}
+    </style></head><body>
+    <div class="header"><h1>🚀 AGENT 35 V12.6 FULL DASHBOARD</h1><p><span class="live">● LIVE</span> DUAL FREE - R0 | 5 min scan | {', '.join(SCAN_PAIRS)}</p>
+    <a class="btn" href="/scan">🔍 Trigger Scan</a><a class="btn btn-blue" href="/health">💚 Health</a><a class="btn btn-blue" href="/">Home</a></div>
+    <div class="grid">
+        <div class="card"><h3>👥 Users</h3><div class="stat">{total_users}</div><p>Active: <b>{active_users}</b> | Trial: {trial_users} | Lifetime: {lifetime_users}</p></div>
+        <div class="card"><h3>📡 Signals</h3><div class="stat">{total_signals}</div><p>Last 24h: <b>{signals_today}</b></p></div>
+        <div class="card"><h3>🔑 API Keys - R0</h3><p>TwelveData: {td_key}</p><p>Finnhub: {fh_key}</p><p>Bot: {bot_key}</p><p>Limit: 68/min FREE</p></div>
+        <div class="card"><h3>⚙️ Scanner</h3><p>Interval: 5 min</p><p>Pairs: {len(SCAN_PAIRS)}</p><p>Anti-spam: 30 min</p></div>
+    </div>
+    <div class="grid" style="margin-top:15px">
+        <div class="card"><h3>🏆 Top Referrers</h3><table><tr><th>#</th><th>Name</th><th>Refs</th><th>Type</th></tr>
+    """
+    for i, u in enumerate(top_referrers, 1):
+        name = (u.first_name or u.username or f"User{i}")[:15]
+        html += f"<tr><td>{i}</td><td>{name}</td><td><b>{u.referrals_count}</b></td><td>{u.subscription_type}</td></tr>"
+    html += """</table></div><div class="card"><h3>📋 Last 10 Users</h3><table><tr><th>Time</th><th>Name</th><th>Type</th></tr>"""
+    for u in last_users:
+        name = (u.first_name or u.username or "NoName")[:12]
+        t = u.created_at.strftime('%m-%d %H:%M')
+        html += f"<tr><td>{t}</td><td>{name}</td><td>{u.subscription_type}</td></tr>"
+    html += """</table></div></div><div class="grid" style="margin-top:15px"><div class="card"><h3>📡 Last 20 Signals</h3><table><tr><th>Time</th><th>Symbol</th><th>Dir</th><th>Score</th></tr>"""
+    for s in last_signals_db:
+        t = s.created_at.strftime('%m-%d %H:%M')
+        html += f"<tr><td>{t}</td><td><b>{s.symbol}</b></td><td>{s.direction}</td><td>{s.score}/12</td></tr>"
+    html += """</table></div><div class="card"><h3>📝 Logs</h3>"""
+    for log in last_logs:
+        t = log.created_at.strftime('%H:%M')
+        html += f"<p style='font-size:11px'>[{t}] {log.message[:80]}</p>"
+    html += f"""</div></div><div class="card" style="margin-top:15px;text-align:center"><a class="btn" href="/scan">Scan</a><a class="btn btn-blue" href="/health">Health</a><p>Bot: @{BOT_USERNAME}</p></div></body></html>"""
+    return html
+
 @app.route('/stats')
 def stats():
     with app.app_context():
         total_users = User.query.count()
         active = User.query.filter(User.subscription_end > datetime.utcnow()).count() + User.query.filter_by(subscription_type="lifetime").count()
         signals = Signal.query.order_by(Signal.created_at.desc()).limit(20).all()
-        html = f"<h2>📊 Agent 35 Stats V12.6</h2>Total Users: {total_users}<br>Active: {active}<br><br><h3>Last 20 Signals</h3>"
+        html = f"<h2>📊 Agent 35 Stats V12.6</h2>Total: {total_users}<br>Active: {active}<br><h3>Last 20</h3>"
         for s in signals:
-            html += f"{s.created_at.strftime('%m-%d %H:%M')} - <b>{s.symbol} {s.direction}</b> {s.score}/12 {s.quality} Entry {s.entry} SL {s.sl}<br>"
-        html += '<br><a href="/">Home</a>'
+            html += f"{s.created_at.strftime('%m-%d %H:%M')} - <b>{s.symbol} {s.direction}</b> {s.score}/12 {s.quality}<br>"
+        html += '<br><a href="/dashboard">Dashboard</a> | <a href="/">Home</a>'
         return html
 
 @app.route('/leaderboard')
 def leaderboard():
     with app.app_context():
         top = User.query.order_by(User.referrals_count.desc()).limit(10).all()
-        html = "<h2>🏆 Referral Leaderboard - Top 10</h2><p>10 Referrals = Lifetime FREE</p>"
+        html = "<h2>🏆 Leaderboard - 10 refs = Lifetime FREE</h2>"
         for i, u in enumerate(top, 1):
             name = u.username or u.first_name or f"User {u.id}"
             html += f"{i}. {name} - {u.referrals_count} refs - {u.subscription_type}<br>"
-        html += '<br><a href="/">Home</a>'
+        html += '<br><a href="/dashboard">Dashboard</a>'
         return html
 
 @app.route('/scan')
 def manual_scan():
     threading.Thread(target=scan_and_send).start()
-    return jsonify({"status": "V12.6 DUAL FREE scan started in background", "time": datetime.utcnow().isoformat(), "pairs": SCAN_PAIRS})
+    return jsonify({"status": "V12.6 DUAL FREE scan started", "time": datetime.utcnow().isoformat(), "pairs": SCAN_PAIRS, "dashboard": f"{RENDER_URL}/dashboard"})
 
 @app.route('/health')
 def health():
-    td_key = os.environ.get('TWELVEDATA_API_KEY')
-    fh_key = os.environ.get('FINNHUB_API_KEY')
-    return jsonify({
-        "status": "ok",
-        "engine": "V12.6 DUAL FREE - Finnhub + TwelveData",
-        "twelvedata_key": "YES" if td_key else "NO - ADD TWELVEDATA_API_KEY",
-        "finnhub_key": "YES" if fh_key else "NO - ADD FINNHUB_API_KEY",
-        "bot_token": "YES" if BOT_TOKEN else "NO - ADD BOT_TOKEN",
-        "pairs": SCAN_PAIRS,
-        "cost": "R0",
-        "last_signals": {k: v.isoformat() for k,v in last_signals.items()},
-        "time": datetime.utcnow().isoformat()
-    })
+    return jsonify({"status": "ok", "engine": "V12.6 DUAL FREE - Finnhub + TwelveData - R0", "twelvedata_key": "YES" if os.environ.get('TWELVEDATA_API_KEY') else "NO - ADD TWELVEDATA_API_KEY", "finnhub_key": "YES" if os.environ.get('FINNHUB_API_KEY') else "NO - ADD FINNHUB_API_KEY", "bot_token": "YES" if BOT_TOKEN else "NO", "pairs": SCAN_PAIRS, "cost": "R0 - FREE FOREVER", "dashboard": "/dashboard", "last_signals": {k: v.isoformat() for k,v in last_signals.items()}, "time": datetime.utcnow().isoformat()})
 
 @app.route('/webhook', methods=['POST'])
 def tradingview_webhook():
@@ -339,14 +378,7 @@ def tradingview_webhook():
         direction = "BUY" if entry > sl else "SELL"
         if color == "#00ffaa": direction = "BUY"
         if color == "#ff0055": direction = "SELL"
-        msg = f"""
-⚡ **TRADINGVIEW SMC ALERT** - {box_id}
-{'🟢' if direction=='BUY' else '🔴'} **{symbol} {direction}**
-**Entry:** `{entry:.5f}`
-**SL:** `{sl:.5f}`
-**TP:** `{tp:.5f}`
-**Lots:** {lots} | **Risk:** ${risk_usd} | **RR:** 1:{rr}
-"""
+        msg = f"⚡ **TV SMC ALERT** - {box_id}\n{'🟢' if direction=='BUY' else '🔴'} **{symbol} {direction}**\nEntry: {entry:.5f} SL: {sl:.5f} TP: {tp:.5f}\nLots: {lots} Risk: ${risk_usd} RR: 1:{rr}"
         with app.app_context():
             target_users = []
             if user_id_db:
@@ -363,12 +395,10 @@ def tradingview_webhook():
             for u in target_users:
                 if send_telegram(u.telegram_id, msg):
                     sent += 1
-            if ADMIN_ID and sent == 0:
-                send_telegram(ADMIN_ID, msg + f"\n\n(No active users for {symbol})")
             sig = Signal(symbol=symbol, direction=direction, entry=entry, sl=sl, tp=tp, score=10, quality="TRADINGVIEW FVG", bias=f"TV {box_id}", confluence=json.dumps([f"TV FVG {box_id}", f"Lots {lots} Risk ${risk_usd}"]))
             db.session.add(sig)
             db.session.commit()
-        return jsonify({"status": "forwarded", "symbol": symbol, "sent": sent if 'sent' in locals() else 0})
+        return jsonify({"status": "forwarded", "symbol": symbol, "sent": sent})
     except Exception as e:
         print(f"TV Webhook error: {e}")
         import traceback; traceback.print_exc()
@@ -406,34 +436,16 @@ def telegram_webhook():
                             if referrer.referrals_count >= 10 and referrer.subscription_type!= "lifetime":
                                 referrer.subscription_type = "lifetime"
                                 referrer.subscription_end = datetime.utcnow() + timedelta(days=365*10)
-                                send_telegram(referrer.telegram_id, f"🎉 **LIFETIME UNLOCKED!**\nYou got 10 referrals!")
+                                send_telegram(referrer.telegram_id, f"🎉 LIFETIME UNLOCKED! You got 10 refs!")
                             else:
-                                send_telegram(referrer.telegram_id, f"👥 **New Referral!** {first_name} joined! Progress: {referrer.referrals_count}/10")
+                                send_telegram(referrer.telegram_id, f"👥 New Referral! {first_name} joined! {referrer.referrals_count}/10 for Lifetime")
                             db.session.commit()
-                    welcome = f"""
-🚀 **AGENT 35 V12.6 DUAL FREE - Welcome!**
-
-5M SMC Sniper - Finnhub+TwelveData FREE API
-
-Your Referral Link:
-`{RENDER_URL}/r/{user.referral_code}`
-
-10 paid referrals = **LIFETIME FREE** auto!
-
-Commands:
-/pairs - Choose 5 pairs
-/status - Check subscription & referrals
-/referral - Get your link & stats
-/scan - Trigger manual scan
-/pay - How to pay R500 Yearly
-
-Trial ends: {user.subscription_end.strftime('%Y-%m-%d %H:%M')}
-"""
+                    welcome = f"🚀 **AGENT 35 V12.6 DUAL FREE - Welcome!**\n\nYour Link: `{RENDER_URL}/r/{user.referral_code}`\n10 refs = Lifetime FREE auto!\n\nCommands:\n/pairs - Choose 5 pairs\n/status - Check sub\n/referral - Get link\n/dashboard - Open Dashboard\n/scan - Manual scan\n\nTrial ends: {user.subscription_end.strftime('%Y-%m-%d %H:%M')}"
                     send_telegram(chat_id, welcome)
                 else:
                     user.last_seen = datetime.utcnow()
                     db.session.commit()
-                    send_telegram(chat_id, f"Welcome back {first_name}! Code: `{user.referral_code}` Refs: {user.referrals_count}/10")
+                    send_telegram(chat_id, f"Welcome back {first_name}! Code: `{user.referral_code}` Refs: {user.referrals_count}/10\n/dashboard for full dashboard")
             elif text.startswith('/status'):
                 if not user:
                     send_telegram(chat_id, "Please /start first")
@@ -442,12 +454,15 @@ Trial ends: {user.subscription_end.strftime('%Y-%m-%d %H:%M')}
                     status_emoji = "✅ ACTIVE" if active else "❌ EXPIRED"
                     end_str = user.subscription_end.strftime('%Y-%m-%d %H:%M UTC') if user.subscription_end else "None"
                     pairs = ", ".join(get_user_pairs(user))
-                    send_telegram(chat_id, f"📊 **YOUR STATUS**\nSub: {user.subscription_type.upper()} {status_emoji}\nEnds: {end_str}\nRefs: {user.referrals_count}/10\nPairs: {pairs}\nCode: `{user.referral_code}`")
+                    send_telegram(chat_id, f"📊 **STATUS**\nSub: {user.subscription_type.upper()} {status_emoji}\nEnds: {end_str}\nRefs: {user.referrals_count}/10\nPairs: {pairs}\nCode: `{user.referral_code}`\nDashboard: {RENDER_URL}/dashboard")
             elif text.startswith('/referral'):
                 if user:
-                    send_telegram(chat_id, f"🔗 **YOUR REFERRAL**\nLink: `{RENDER_URL}/r/{user.referral_code}`\nRefs: {user.referrals_count}/10 for Lifetime FREE")
+                    send_telegram(chat_id, f"🔗 **REFERRAL**\nLink: `{RENDER_URL}/r/{user.referral_code}`\nRefs: {user.referrals_count}/10 for Lifetime")
             elif text.startswith('/pairs'):
-                send_telegram(chat_id, f"🎯 **CHOOSE YOUR 5 PAIRS**\nSend like: `XAUUSD,EURUSD,GBPUSD,GBPJPY,NAS100`\nAvailable: {', '.join(SCAN_PAIRS)}\nYour Current: {', '.join(get_user_pairs(user)) if user else 'None'}")
+                if not user:
+                    send_telegram(chat_id, "Please /start first")
+                else:
+                    send_telegram(chat_id, f"🎯 **CHOOSE 5 PAIRS**\nSend like: `XAUUSD,EURUSD,GBPUSD,GBPJPY,NAS100`\nAvailable: {', '.join(SCAN_PAIRS)}\nCurrent: {', '.join(get_user_pairs(user))}")
             elif ',' in text and len(text) < 80 and not text.startswith('/'):
                 if user:
                     chosen = [p.strip().upper().replace('GOLD','XAUUSD') for p in text.split(',')][:5]
@@ -456,26 +471,28 @@ Trial ends: {user.subscription_end.strftime('%Y-%m-%d %H:%M')}
                         user.selected_pairs = json.dumps(valid)
                         user.last_seen = datetime.utcnow()
                         db.session.commit()
-                        send_telegram(chat_id, f"✅ **Pairs updated!** Now: {', '.join(valid)}")
+                        send_telegram(chat_id, f"✅ Pairs updated: {', '.join(valid)}")
                     else:
                         send_telegram(chat_id, f"❌ Invalid. Use from: {', '.join(SCAN_PAIRS)}")
             elif text.startswith('/scan'):
                 if not user:
                     send_telegram(chat_id, "Please /start first")
                 elif not check_subscription(user):
-                    send_telegram(chat_id, "❌ Subscription expired. Use /pay to renew")
+                    send_telegram(chat_id, "❌ Expired. Use /pay to renew")
                 else:
-                    send_telegram(chat_id, f"🔍 **V12.6 DUAL FREE SCAN started...** Scanning {len(SCAN_PAIRS)} pairs")
+                    send_telegram(chat_id, f"🔍 V12.6 scan started for {len(SCAN_PAIRS)} pairs...")
                     threading.Thread(target=scan_and_send).start()
             elif text.startswith('/pay'):
-                send_telegram(chat_id, f"💳 **PAYMENT**\nR500 Yearly / R5000 Lifetime\nYour Code: `{user.referral_code if user else ''}`\nID: `{chat_id}`\nContact admin")
+                send_telegram(chat_id, f"💳 R500 Yearly / R5000 Lifetime\nYour Code: `{user.referral_code if user else ''}` ID: `{chat_id}` Contact admin")
             elif text.startswith('/leaderboard'):
                 top = User.query.order_by(User.referrals_count.desc()).limit(10).all()
-                txt = "🏆 **TOP 10 REFERRERS**\n10 refs = Lifetime FREE\n\n"
+                txt = "🏆 **TOP 10**\n10 refs = Lifetime FREE\n\n"
                 for i, u in enumerate(top, 1):
                     name = u.first_name or u.username or f"User{i}"
                     txt += f"{i}. {name} - {u.referrals_count} refs - {u.subscription_type}\n"
                 send_telegram(chat_id, txt)
+            elif text.startswith('/dashboard'):
+                send_telegram(chat_id, f"📊 **FULL DASHBOARD**\n{RENDER_URL}/dashboard\n\nSee users, signals, keys, logs, referrers")
             elif text.startswith('/journal'):
                 parts = text.split()
                 if len(parts) >= 3:
@@ -496,19 +513,13 @@ Trial ends: {user.subscription_end.strftime('%Y-%m-%d %H:%M')}
                         losses = len([j for j in journals if j.result == "loss"])
                         total = len(journals)
                         winrate = wins/total*100 if total>0 else 0
-                        send_telegram(chat_id, f"📔 **JOURNAL** Total: {total} Wins: {wins} Losses: {losses} Winrate: {winrate:.1f}%")
-            elif text.startswith('/test'):
-                if str(chat_id) == str(ADMIN_ID):
-                    analysis = full_multi_tf_analysis("XAUUSD", rr_target=2.5)
-                    send_telegram(chat_id, f"V12.6 Test XAUUSD: {str(analysis)[:3000]}")
-                else:
-                    send_telegram(chat_id, "Admin only")
+                        send_telegram(chat_id, f"📔 JOURNAL Total: {total} Wins: {wins} Losses: {losses} Winrate: {winrate:.1f}%")
             else:
                 if user:
-                    send_telegram(chat_id, "Commands: /status /referral /pairs /scan /pay /journal /leaderboard")
+                    send_telegram(chat_id, "Commands: /status /referral /pairs /scan /pay /journal /leaderboard /dashboard")
         return jsonify({"ok": True})
     except Exception as e:
-        print(f"Telegram webhook error: {e}")
+        print(f"TG webhook error: {e}")
         import traceback; traceback.print_exc()
         return jsonify({"ok": True})
 
@@ -518,33 +529,24 @@ def referral_redirect(code):
         referrer = User.query.filter_by(referral_code=code).first()
         ref_name = referrer.first_name if referrer and referrer.first_name else "Friend"
     return render_template_string("""
-    <!DOCTYPE html><html><head><title>Agent 35 - Join via {{code}}</title>
+    <!DOCTYPE html><html><head><title>Agent 35 - {{code}}</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-    body{font-family:Arial;background:#0a0a0a;color:#fff;padding:20px;text-align:center}
+    <style>body{font-family:Arial;background:#0a0a0a;color:#fff;padding:20px;text-align:center}
   .card{background:#1e1e1e;padding:30px;border-radius:20px;max-width:500px;margin:20px auto;border:1px solid #333}
-  .btn{background:#00ffaa;color:#000;padding:18px 35px;border-radius:12px;text-decoration:none;display:inline-block;font-weight:bold;font-size:18px;margin:10px}
+  .btn{background:#00ffaa;color:#000;padding:18px 35px;border-radius:12px;text-decoration:none;display:inline-block;font-weight:bold}
   .btn-tele{background:#0088cc;color:#fff}
   .badge{background:#00ffaa;color:#000;padding:5px 12px;border-radius:20px;font-size:12px}
-    </style></head>
-    <body>
+    </style></head><body>
     <h1>🚀 AGENT 35 V12.6 DUAL FREE</h1>
-    <p>5M SHIFT HUNTER - No Yahoo Block</p>
+    <p>5M SHIFT HUNTER - No Yahoo Block - R0 Forever</p>
     <div class="card">
-        <p>👋 <b>{{ref_name}}</b> invited you!</p>
-        <p>Referral Code: <code>{{code}}</code></p>
-        <h2>What you get:</h2>
-        <p>✅ 5M FVG + Order Block + Breaker Block</p>
-        <p>✅ BOS/CHoCH Shift Detection</p>
-        <p>✅ Premium/Discount Zones</p>
-        <p>✅ Finnhub+TwelveData FREE API - R0 forever</p>
-        <br>
-        <a class="btn btn-tele" href="https://t.me/{{bot}}?start={{code}}">🚀 Join on Telegram - 3 Days FREE</a>
-        <br><br>
-        <p><span class="badge">R500 Yearly / R5000 Lifetime</span></p>
-        <p>Refer 10 = <b>Lifetime FREE</b> auto!</p>
-    </div>
-    </body></html>
+        <p>👋 <b>{{ref_name}}</b> invited you! Code: {{code}}</p>
+        <p>✅ 5M FVG + OB/MB Breaker + BOS/CHoCH</p>
+        <p>✅ Premium/Discount + MTF</p>
+        <p>✅ Finnhub+TwelveData FREE</p>
+        <a class="btn btn-tele" href="https://t.me/{{bot}}?start={{code}}">🚀 Join Telegram - 3 Days FREE</a>
+        <br><br><p><span class="badge">R500 Yearly / R5000 Lifetime</span></p><p>Refer 10 = <b>Lifetime FREE</b></p>
+    </div></body></html>
     """, code=code, ref_name=ref_name, bot=BOT_USERNAME)
 
 @app.route('/admin/activate/<telegram_id>/<type_>')
@@ -568,27 +570,10 @@ def admin_activate(telegram_id, type_):
             if rp:
                 rp.status = "confirmed"
                 db.session.commit()
-        send_telegram(telegram_id, f"✅ **Activated!** {type_.upper()} subscription active!")
+        send_telegram(telegram_id, f"✅ Activated {type_.upper()}!")
         return f"Activated {telegram_id} as {type_}"
-
-@app.route('/admin/broadcast', methods=['POST'])
-def admin_broadcast():
-    secret = request.args.get('secret')
-    if secret!= os.environ.get('ADMIN_SECRET', 'admin123'):
-        return "Unauthorized", 401
-    data = request.get_json()
-    message = data.get('message','')
-    with app.app_context():
-        users = User.query.filter_by(is_active=True).all()
-        sent = 0
-        for u in users:
-            if check_subscription(u):
-                if send_telegram(u.telegram_id, message):
-                    sent += 1
-                    time.sleep(0.05)
-    return jsonify({"sent": sent})
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 10000))
-    print(f"🚀 Agent 35 V12.6 DUAL FREE starting on port {port}")
+    print(f"🚀 Agent 35 V12.6 DUAL FREE + DASHBOARD starting on port {port}")
     app.run(host='0.0.0.0', port=port)
