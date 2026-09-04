@@ -1,7 +1,7 @@
 import os, hashlib, requests, psycopg, threading, time, csv, io
 from psycopg.rows import dict_row
 from flask import Flask, request, redirect, session, jsonify, Response
-from datetime import datetime
+from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 import trading_engine as engine
 import yfinance as yf
@@ -31,6 +31,8 @@ STYLE = """
 .plan-popular{border-color:#10b981;box-shadow:0 0 20px rgba(16,185,129,0.15)}
 .plan-badge{position:absolute;top:-10px;right:16px;background:#10b981;color:#000;font-weight:800;font-size:11px;padding:4px 10px;border-radius:20px}
 .news-check{border-color:#f59e0b!important;background:rgba(245,158,11,0.08)!important}
+.refer-card{background:linear-gradient(135deg,#0e1625 0%,#112233 100%);border:1px solid #10b98155}
+.paused-banner{background:linear-gradient(135deg,#ef4444 0%,#991b1b 100%);color:#fff;padding:14px;border-radius:12px;text-align:center;font-weight:800;margin-bottom:14px}
 </style>
 <script>
 const ALL_SYMBOLS=["EURUSD","GBPUSD","USDJPY","EURJPY","GBPJPY","USDZAR","EURZAR","GBPZAR","ZARJPY","USDCHF","XAUUSD","GOLD","XAGUSD","BTCUSD","ETHUSD","SOLUSD","NAS100","US30","SPX500","GER40","UK100","JP225","USOIL","UKOIL","AAPL","TSLA","NVDA","MSFT"];
@@ -38,6 +40,7 @@ function addSym(s){let i=document.getElementById('symInput');let arr=i.value.spl
 function removeSym(s){let i=document.getElementById('symInput');let arr=i.value.split(',').filter(x=>x.trim()!=s.trim()&&x.trim()!='');i.value=arr.join(',');document.getElementById('symForm').submit();}
 function filterSyms(){let q=document.getElementById('symSearch').value.toUpperCase();let dd=document.getElementById('symDropdown');if(!q){dd.style.display='none';return}let f=ALL_SYMBOLS.filter(s=>s.includes(q)).slice(0,10);dd.innerHTML=f.map(s=>'<div onclick="addSym(\\''+s+'\\')"><b>'+s+'</b> - Click to Add</div>').join('');dd.style.display=f.length?'block':'none';}
 document.addEventListener('click', function(e){let box=document.getElementById('symSearch');let dd=document.getElementById('symDropdown');if(dd && e.target!==box &&!dd.contains(e.target)){dd.style.display='none';}});
+function copyRef(){let t=document.getElementById('refLink');t.select();document.execCommand('copy');alert('Referral link copied!');}
 </script>
 """
 
@@ -59,6 +62,24 @@ def init_db():
         cur.execute("INSERT INTO agent35_users (email,password,is_creator,plan,payment_status,paid_at,sessions,referral_code,referral_count,timezone,news_filter) VALUES (%s,%s,TRUE,'lifetime','approved',NOW(),'24/7',%s,0,'Africa/Johannesburg',TRUE)", ('creator@agent35.com', pw, f"AG35-CREATOR-{os.urandom(2).hex().upper()}"))
     conn.commit(); cur.close(); conn.close()
 init_db()
+
+def is_subscription_active(user):
+    if not user: return False
+    if user.get('is_creator'): return True
+    if user.get('payment_status')!= 'approved': return False
+    if user.get('plan') == 'lifetime': return True
+    if user.get('plan') == 'yearly':
+        paid_at = user.get('paid_at')
+        if not paid_at: return False
+        try:
+            if datetime.now(ZoneInfo("UTC")) - paid_at.replace(tzinfo=ZoneInfo("UTC")) < timedelta(days=365):
+                return True
+        except:
+            # fallback if naive
+            if datetime.utcnow() - paid_at.replace(tzinfo=None) < timedelta(days=365):
+                return True
+        return False
+    return False
 
 def send_telegram(chat_id, text, trade_id=None, stage="signal"):
     if not TELEGRAM_TOKEN or not chat_id: return False
@@ -112,9 +133,9 @@ def build_signal_msg(res, user=None):
 
 def layout(content, email="", active="dashboard"):
     is_creator="creator" in email.lower()
-    ad="active" if active=="dashboard" else ""; aj="active" if active=="journal" else ""; asi="active" if active=="signals" else ""; aset="active" if active=="settings" else ""; am="active" if active=="master" else ""; ag="active" if active=="guide" else ""; ap="active" if active=="payment" else ""
+    ad="active" if active=="dashboard" else ""; aj="active" if active=="journal" else ""; asi="active" if active=="signals" else ""; aset="active" if active=="settings" else ""; am="active" if active=="master" else ""; ag="active" if active=="guide" else ""; ap="active" if active=="payment" else ""; ar="active" if active=="referrals" else ""
     master_tab=f'<a href="/master" class="{am}">Master</a>' if is_creator else ""
-    tabs=f'<div class="nav-tabs"><a href="/dashboard" class="{ad}">Dashboard</a><a href="/journal" class="{aj}">Journal</a><a href="/signals" class="{asi}">All Signals</a><a href="/settings" class="{aset}">Settings</a><a href="/payment" class="{ap}">Plans</a><a href="/guide" class="{ag}">Guide</a>{master_tab}</div>'
+    tabs=f'<div class="nav-tabs"><a href="/dashboard" class="{ad}">Dashboard</a><a href="/journal" class="{aj}">Journal</a><a href="/signals" class="{asi}">All Signals</a><a href="/settings" class="{aset}">Settings</a><a href="/payment" class="{ap}">Plans</a><a href="/referrals" class="{ar}">Refer & Earn</a><a href="/guide" class="{ag}">Guide</a>{master_tab}</div>'
     return f'<html><head><meta name="viewport" content="width=device-width, initial-scale=1"><title>Agent 35</title>{STYLE}</head><body><div class="header"><div class="logo">{LOGO_SVG} AGENT 35 <div class="clock-bar"><span class="live-dot"></span><span id="utcClock">UTC --:--:--</span> | <span id="sastClock">SAST --:--:--</span> | <span id="sessClock" style="color:#10b981;font-weight:800">Loading</span></div></div><div><span style="font-size:11px;color:#94a3b8">{email}</span> <a href="/logout" style="color:#94a3b8;text-decoration:none;margin-left:10px">Logout</a></div></div><div style="padding:14px;max-width:1400px;margin:auto">{tabs}{content}</div><script>function updateClock(){{const now=new Date();const utc=now.toISOString().substr(11,8);document.getElementById("utcClock").innerText="UTC "+utc;try{{const sast=new Date(now.toLocaleString("en-US",{{timeZone:"Africa/Johannesburg"}}));document.getElementById("sastClock").innerText="SAST "+sast.toLocaleTimeString("en-GB");}}catch(e){{document.getElementById("sastClock").innerText="SAST "+utc;}} const h=now.getUTCHours();let s=[];if(h>=22||h<6)s.push("Sydney");if(h>=0&&h<9)s.push("Asia");if(h>=8&&h<16)s.push("London");if(h>=13&&h<21)s.push("New York");if(s.length==0)s=["Off Hours"];document.getElementById("sessClock").innerText=s.join(" + ")+" ACTIVE";}} setInterval(updateClock,1000);updateClock();</script></body></html>'
 
 def get_live_price(symbol):
@@ -138,7 +159,8 @@ def home():
 
 @app.route('/r/<code>')
 def referral_link(code):
-    session['ref_code']=code.upper().strip(); return redirect('/')
+    session['ref_code']=code.upper().strip()
+    return redirect('/')
 
 @app.route('/guide')
 def guide_page():
@@ -146,92 +168,42 @@ def guide_page():
     content = """
     <h1 style='color:#10b981'>📘 How to Use Agent 35</h1>
     <p style='color:#94a3b8'>Welcome to Agent 35 - Your professional trading assistant</p>
-
-    <div class='guide-step'>
-        <b>1️⃣ Getting Started</b><br>
-        <span style='color:#cbd5e1'>After you login, go to Dashboard. Choose your 5 favorite pairs from the search box (e.g. EURUSD, XAUUSD, BTCUSD). These are the pairs you will receive signals for.</span>
-    </div>
-
-    <div class='guide-step'>
-        <b>2️⃣ Link Your Telegram</b><br>
-        <span style='color:#cbd5e1'>
-        - Click <b>Link Telegram</b> in Dashboard<br>
-        - It will open Telegram bot @Sniper035_bot - Click START<br>
-        - Go back and click <b>Test Telegram</b> to confirm it's working<br>
-        - You will now receive signals directly on your phone
-        </span>
-    </div>
-
-    <div class='guide-step'>
-        <b>3️⃣ Understanding Your Signals</b><br>
-        <span style='color:#cbd5e1'>
-        Each signal shows you:<br>
-        <b>Symbol & Direction:</b> e.g. EURUSD BUY or SELL<br>
-        <b>Quality:</b> SNIPER = best setup, PREMIUM = strong, STANDARD = good<br>
-        <b>Entry, Stop Loss (SL) and Take Profit (TP)</b> - clear levels to use<br>
-        <b>Confluence:</b> Why the signal was generated<br><br>
-        In Telegram you have 2 buttons: ✅ TOOK ENTRY if you took the trade, ❌ SKIP if you didn't.
-        </span>
-    </div>
-
-    <div class='guide-step'>
-        <b>4️⃣ Dashboard</b><br>
-        <span style='color:#cbd5e1'>
-        - <b>SCAN NOW</b> - Check for new signals immediately<br>
-        - <b>Win Rate & Profit</b> - Based on trades you marked as TOOK<br>
-        - <b>Top Bar Clock</b> - Shows UTC, SAST and which market session is active
-        </span>
-    </div>
-
-    <div class='guide-step'>
-        <b>5️⃣ Journal</b><br>
-        <span style='color:#cbd5e1'>
-        - All trades you marked as TOOK appear here organized by month and day<br>
-        - Shows when you took the trade, when it closed, and how long it lasted<br>
-        - You can close a trade early or export your journal to CSV<br>
-        - Use Clear Month to clean up - your full history stays in All Signals
-        </span>
-    </div>
-
-    <div class='guide-step'>
-        <b>6️⃣ Settings</b><br>
-        <span style='color:#cbd5e1'>
-        - <b>Account Size & Lot Size</b> - For calculating your profit<br>
-        - <b>Trading Sessions</b> - Choose when you want to receive signals (London, New York, Asia, Sydney or 24/7)<br>
-        - <b>News Filter</b> - Turn ON to avoid risky news events (Recommended ON)<br>
-        - <b>Timezone</b> - Set your local timezone for correct times
-        </span>
-    </div>
-
-    <div class='guide-step'>
-        <b>7️⃣ Tips for Best Results</b><br>
-        <span style='color:#cbd5e1'>
-        - Focus on SNIPER and PREMIUM signals<br>
-        - Always use Stop Loss - never trade without it<br>
-        - Check Journal weekly to see your performance<br>
-        - Keep your Telegram linked and notifications ON
-        </span>
-    </div>
-
-    <div class='card' style='text-align:center; margin-top:20px'>
-        <p style='color:#94a3b8'>Need help? Contact support on Telegram</p>
-        <a class='btn' href='/dashboard'>Back to Dashboard</a>
-    </div>
+    <div class='guide-step'><b>1️⃣ Getting Started</b><br><span style='color:#cbd5e1'>After you login, choose your 5 favorite pairs from the search box (e.g. EURUSD, XAUUSD, BTCUSD). These are the pairs you will receive signals for.</span></div>
+    <div class='guide-step'><b>2️⃣ Link Your Telegram</b><br><span style='color:#cbd5e1'>- Click <b>Link Telegram</b> in Dashboard<br>- Open @Sniper035_bot - Click START<br>- Click <b>Test Telegram</b> to confirm<br>- You will now receive signals on your phone</span></div>
+    <div class='guide-step'><b>3️⃣ Understanding Signals</b><br><span style='color:#cbd5e1'><b>Symbol & Direction:</b> e.g. EURUSD BUY or SELL<br><b>Quality:</b> SNIPER = best, PREMIUM = strong, STANDARD = good<br><b>Entry, SL and TP</b> - clear levels<br>In Telegram: ✅ TOOK ENTRY if you took it, ❌ SKIP if not.</span></div>
+    <div class='guide-step'><b>4️⃣ Dashboard</b><br><span style='color:#cbd5e1'>- <b>SCAN NOW</b> - Check for new signals<br>- <b>Win Rate & Profit</b> - Based on your TOOK trades<br>- <b>Refer & Earn</b> - Invite friends and get Lifetime free</span></div>
+    <div class='guide-step'><b>5️⃣ Journal</b><br><span style='color:#cbd5e1'>- All TOOK trades organized by month and day<br>- Shows duration, close time, result<br>- Export to CSV or Clear Month</span></div>
+    <div class='guide-step'><b>6️⃣ Settings</b><br><span style='color:#cbd5e1'>- Account Size & Lot Size for profit calculation<br>- Trading Sessions - when you want signals<br>- News Filter - ON recommended<br>- Timezone</span></div>
+    <div class='guide-step'><b>7️⃣ Refer & Earn</b><br><span style='color:#cbd5e1'>Bought Yearly R500? Refer 10 friends who buy any plan and get Lifetime R5000 automatically for FREE. Your link is in Dashboard and Refer & Earn page.</span></div>
+    <div class='card' style='text-align:center; margin-top:20px'><a class='btn' href='/dashboard'>Back to Dashboard</a></div>
     """
     return layout(content, email, "guide")
 
 @app.route('/auth', methods=['POST'])
 def auth():
-    email=request.form['email'].lower().strip(); pw=hashlib.sha256(request.form['password'].encode()).hexdigest(); ref_by=session.get('ref_code')
+    email=request.form['email'].lower().strip(); pw=hashlib.sha256(request.form['password'].encode()).hexdigest()
+    ref_code_session=session.get('ref_code')
     conn=get_conn(); cur=conn.cursor()
     cur.execute("SELECT * FROM agent35_users WHERE email=%s AND password=%s", (email, pw)); u=cur.fetchone()
     if not u:
+        # Find referrer email from referral_code if exists
+        referred_by_email = None
+        if ref_code_session:
+            cur.execute("SELECT email FROM agent35_users WHERE referral_code=%s", (ref_code_session,))
+            ref_row = cur.fetchone()
+            if ref_row:
+                referred_by_email = ref_row['email']
         my_code=f"AG35-{email[:3].upper()}-{os.urandom(2).hex().upper()}"
-        cur.execute("INSERT INTO agent35_users (email,password,plan,payment_status,symbols,sessions,referral_code,referred_by,referral_count,timezone,news_filter) VALUES (%s,%s,'none','pending','EURUSD,XAUUSD','London,New York',%s,%s,0,'Africa/Johannesburg',TRUE) RETURNING *", (email,pw,my_code,ref_by)); u=cur.fetchone(); conn.commit()
+        cur.execute("INSERT INTO agent35_users (email,password,plan,payment_status,symbols,sessions,referral_code,referred_by,referral_count,timezone,news_filter) VALUES (%s,%s,'none','pending','EURUSD,XAUUSD','London,New York',%s,%s,0,'Africa/Johannesburg',TRUE) RETURNING *", (email,pw,my_code,referred_by_email)); u=cur.fetchone(); conn.commit()
     if not u.get('referral_code'):
         my_code=f"AG35-{u['email'][:3].upper()}-{os.urandom(2).hex().upper()}"
         cur.execute("UPDATE agent35_users SET referral_code=%s WHERE email=%s", (my_code, u['email'])); conn.commit(); u['referral_code']=my_code
-    cur.close(); conn.close(); session['email']=u['email']; session['is_creator']=u['is_creator']; session.pop('ref_code', None)
+    cur.close(); conn.close(); session['email']=u['email']; session['is_creator']=u['is_creator']
+    # keep ref_code for potential later but clear after signup to avoid reuse loop
+    if u['payment_status']=='pending' and not u['is_creator']:
+        session.pop('ref_code', None)
+        return redirect('/payment')
+    session.pop('ref_code', None)
     if u['is_creator']: return redirect('/master')
     return redirect('/dashboard')
 
@@ -239,21 +211,84 @@ def auth():
 def dashboard():
     if 'email' not in session: return redirect('/')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); user=cur.fetchone()
+    if not user:
+        cur.close(); conn.close(); return redirect('/logout')
+    # Check subscription active
+    active_sub = is_subscription_active(user)
+    if not active_sub and not user['is_creator']:
+        # if pending, redirect to payment with banner, but still show dashboard with paused banner
+        pass
     cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY created_at DESC LIMIT 8", (session['email'],)); trades=cur.fetchall()
     cur.execute("SELECT COALESCE(SUM(pnl),0) as pnl, COUNT(*) FILTER (WHERE status='win' OR status='win_early') as wins, COUNT(*) FILTER (WHERE status='loss') as losses, COUNT(*) FILTER (WHERE status IN ('win','loss','be','win_early')) as closed, COALESCE(SUM(close_r),0) as total_r FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early')", (session['email'],)); stats=cur.fetchone()
+    # referrals list
+    cur.execute("SELECT email, plan, payment_status, created_at FROM agent35_users WHERE referred_by=%s ORDER BY created_at DESC LIMIT 20", (session['email'],)); referred_users=cur.fetchall()
     cur.close(); conn.close()
     pnl=stats['pnl']; wr=(stats['wins']/stats['closed']*100) if stats['closed']>0 else 0; curr_sym=CUR.get(user['currency'],'$'); total_r = stats['total_r'] or 0
     syms=[s for s in (user['symbols'] or '').split(',') if s.strip()]; chips="".join([f"<span class='chip chip-active'><b>{s}</b><span class='x' onclick=\"removeSym('{s}')\">x</span></span>" for s in syms])
     rows="".join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td><b>{t['symbol']}</b></td><td><span class='badge { 'win' if 'win' in t['status'] else 'loss' if t['status']=='loss' else 'bull'}'>{t['status'].upper()}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)} ({t.get('close_r',0)}R)</td></tr>" for t in trades]) or "<tr><td colspan=4>No trades yet</td></tr>"
     pay_ref=user['payment_ref'] or session['email']; sess_display=user['sessions'] or 'London,New York'; news_stat = "ON 🛡️" if user.get('news_filter') else "OFF ⚠️"
-    content=f"<div class='card' style='padding:12px;display:flex;justify-content:space-between'><span>Sessions: <b>{sess_display}</b> | News: <b style='color:#f59e0b'>{news_stat}</b></span><span>WR: {wr:.1f}% | {total_r:.1f}R | {curr_sym}{pnl:.2f}</span></div><div class='grid grid4'><div class='card'><div class='stat-label'>Total Profit</div><div class='stat-value'>{curr_sym}{round(pnl,2)} <span class='badge bull'>{round(wr,1)}% {total_r:.1f}R</span></div></div><div class='card'><div class='stat-label'>Account Size</div><div class='stat-value' style='font-size:18px'>{curr_sym}{user['account_size']}</div><a href='/settings' class='btn-outline'>Edit</a></div><div class='card' style='position:relative'><div class='stat-label'>Watchlist {len(syms)}/5</div><div style='margin:12px 0'>{chips}</div><form id='symForm' method='POST' action='/quick-symbols'><input type='hidden' name='symbols' id='symInput' value=\"{user['symbols']}\"></form><input id='symSearch' class='searchbox' placeholder='Search pairs...' oninput='filterSyms()' autocomplete='off'><div id='symDropdown' class='dropdown'></div></div><div class='card'><a class='btn' href='/scan'>SCAN NOW</a><a href='https://t.me/{TELEGRAM_BOT_USERNAME}?start={pay_ref}' target='_blank' class='btn-outline'>Link Telegram</a><a href='/test-telegram' class='btn-test'>Test Telegram</a></div></div><div class='card' style='margin-top:14px'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th></tr>{rows}</table></div>"
+    base_url = request.host_url.rstrip('/')
+    ref_link = f"{base_url}/r/{user['referral_code']}" if user.get('referral_code') else ""
+    ref_count = user.get('referral_count',0) or 0
+    ref_progress = f"{ref_count}/10"
+    # paused banner
+    paused_html = ""
+    if not active_sub:
+        paused_html = f"<div class='paused-banner'>🚫 SIGNALS PAUSED - Payment not verified. Please pay and wait for approval. Ref: {user.get('payment_ref') or 'Not set'}<br><a href='/payment' style='color:#fff;text-decoration:underline'>Go to Payment Page</a></div>"
+    refer_card = f"""
+    <div class='card refer-card'>
+        <div style='display:flex;justify-content:space-between;align-items:center'><b style='color:#10b981'>🎁 Refer & Earn</b><span class='badge bull'>{ref_progress} - {ref_count*10}%</span></div>
+        <div style='margin-top:10px;font-size:12px;color:#94a3b8'>Bought Yearly R500? Refer 10 friends who buy any plan → Get Lifetime R5000 FREE auto!</div>
+        <div style='margin-top:10px;display:flex;gap:6px'><input id='refLink' value='{ref_link}' readonly style='flex:1;background:#070d1a'><button onclick='copyRef()' class='btn' style='width:90px'>Copy</button></div>
+        <div style='margin-top:8px'><a href='/referrals' class='btn-outline' style='margin-top:6px'>View My Referrals</a></div>
+        <div style='margin-top:8px;background:#070d1a;padding:8px;border-radius:8px;font-size:11px'>
+            <div style='background:#1a2535;height:10px;border-radius:10px;overflow:hidden'><div style='background:#10b981;height:10px;width:{min(ref_count*10,100)}%'></div></div>
+            <div style='margin-top:4px;color:#94a3b8'>{10-ref_count} more to get Lifetime FREE</div>
+        </div>
+    </div>
+    """
+    content=f"{paused_html}<div class='card' style='padding:12px;display:flex;justify-content:space-between;flex-wrap:wrap'><span>Sessions: <b>{sess_display}</b> | News: <b style='color:#f59e0b'>{news_stat}</b> | Plan: <b>{user.get('plan','none').upper()} - {user.get('payment_status','pending').upper()}</b></span><span>WR: {wr:.1f}% | {total_r:.1f}R | {curr_sym}{pnl:.2f}</span></div><div class='grid grid4'><div class='card'><div class='stat-label'>Total Profit</div><div class='stat-value'>{curr_sym}{round(pnl,2)} <span class='badge bull'>{round(wr,1)}% {total_r:.1f}R</span></div></div><div class='card'><div class='stat-label'>Account Size</div><div class='stat-value' style='font-size:18px'>{curr_sym}{user['account_size']}</div><a href='/settings' class='btn-outline'>Edit</a></div><div class='card' style='position:relative'><div class='stat-label'>Watchlist {len(syms)}/5</div><div style='margin:12px 0'>{chips}</div><form id='symForm' method='POST' action='/quick-symbols'><input type='hidden' name='symbols' id='symInput' value=\"{user['symbols']}\"></form><input id='symSearch' class='searchbox' placeholder='Search pairs...' oninput='filterSyms()' autocomplete='off'><div id='symDropdown' class='dropdown'></div></div><div class='card'><a class='btn' href='/scan' style='{"opacity:0.4;pointer-events:none" if not active_sub else ""}'>{'PAUSED' if not active_sub else 'SCAN NOW'}</a><a href='https://t.me/{TELEGRAM_BOT_USERNAME}?start={pay_ref}' target='_blank' class='btn-outline'>Link Telegram</a><a href='/test-telegram' class='btn-test'>Test Telegram</a></div></div>{refer_card}<div class='card' style='margin-top:14px'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th></tr>{rows}</table></div>"
     return layout(content, session['email'], "dashboard")
 
+@app.route('/referrals')
+def referrals_page():
+    if 'email' not in session: return redirect('/')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); user=cur.fetchone()
+    cur.execute("SELECT email, plan, payment_status, paid_at, created_at FROM agent35_users WHERE referred_by=%s ORDER BY created_at DESC", (session['email'],)); referred=cur.fetchall()
+    cur.execute("SELECT COUNT(*) as cnt FROM agent35_users WHERE referred_by=%s AND payment_status='approved'", (session['email'],)); approved_cnt=cur.fetchone()['cnt']
+    cur.close(); conn.close()
+    base_url = request.host_url.rstrip('/')
+    ref_link = f"{base_url}/r/{user['referral_code']}" if user.get('referral_code') else ""
+    ref_count = user.get('referral_count',0) or 0
+    rows="".join([f"<tr><td>{r['email']}</td><td>{r['plan']}</td><td>{r['payment_status'].upper()}</td><td>{'✅ PAID' if r['payment_status']=='approved' else '⏳ Pending'}</td><td>{r['created_at'].strftime('%Y-%m-%d')}</td></tr>" for r in referred]) or "<tr><td colspan=5>No referrals yet - Share your link!</td></tr>"
+    content=f"""
+    <div class='card refer-card' style='text-align:center'>
+        <h2 style='color:#10b981;margin:0'>🎁 Refer & Earn Lifetime FREE</h2>
+        <p style='color:#94a3b8'>Share your link. When 10 friends buy any plan (R500 or R5000), you get Lifetime R5000 automatically.</p>
+        <div style='max-width:500px;margin:16px auto;display:flex;gap:6px'><input id='refLink' value='{ref_link}' readonly><button onclick='copyRef()' class='btn' style='width:90px'>Copy</button></div>
+        <div style='display:flex;justify-content:center;gap:12px;margin-top:12px;flex-wrap:wrap'>
+            <div class='card' style='min-width:140px'><div class='stat-label'>Total Referrals</div><div class='stat-value'>{len(referred)}</div></div>
+            <div class='card' style='min-width:140px'><div class='stat-label'>Paid & Counted</div><div class='stat-value' style='color:#10b981'>{approved_cnt} / 10</div></div>
+            <div class='card' style='min-width:140px'><div class='stat-label'>Progress</div><div class='stat-value'>{min(approved_cnt*10,100)}%</div></div>
+        </div>
+        <div style='max-width:400px;margin:12px auto;background:#1a2535;height:14px;border-radius:14px;overflow:hidden'><div style='background:linear-gradient(90deg,#10b981,#059669);height:14px;width:{min(approved_cnt*10,100)}%'></div></div>
+        <div style='color:#94a3b8;font-size:12px'>{10-approved_cnt if approved_cnt<10 else 0} more paid referrals needed for Lifetime FREE</div>
+        {"<div class='badge win' style='margin-top:12px;font-size:14px;padding:8px 16px'>🎉 YOU HAVE LIFETIME!</div>" if user.get('plan')=='lifetime' and approved_cnt>=10 else ""}
+    </div>
+    <div class='card'><h3>My Referred Users</h3><table><tr><th>Email</th><th>Plan</th><th>Status</th><th>Counted</th><th>Date</th></tr>{rows}</table></div>
+    <div class='card'><h4>How it works</h4><p style='color:#94a3b8;font-size:13px'>1. Share your link {ref_link}<br>2. Friend signs up via your link<br>3. Friend pays R500 Yearly or R5000 Lifetime and gets approved by admin<br>4. Your counter goes up by 1 automatically<br>5. At 10 paid referrals, your account upgrades to Lifetime R5000 FREE automatically - no need to contact support</p><a class='btn' href='/dashboard'>Back to Dashboard</a></div>
+    """
+    return layout(content, session['email'], "referrals")
+
+#... JOURNAL, SIGNALS, etc keep same as before (trimmed for brevity but included full)...
 @app.route('/journal')
 @app.route('/journal/<month_str>')
 def journal(month_str=None):
     if 'email' not in session: return redirect('/')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); user=cur.fetchone()
+    if not is_subscription_active(user) and not user.get('is_creator'):
+        cur.close(); conn.close()
+        return layout(f"<div class='paused-banner'>🚫 Journal Paused - Payment not verified. <a href='/payment' style='color:#fff;text-decoration:underline'>Pay Now</a></div>", session['email'], "journal")
     cur.execute("SELECT DISTINCT TO_CHAR(created_at, 'YYYY-MM') as month, TO_CHAR(created_at, 'Mon YYYY') as month_label FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY month DESC", (session['email'],))
     months = cur.fetchall()
     if not month_str: month_str = months[0]['month'] if months else datetime.now().strftime('%Y-%m')
@@ -308,7 +343,8 @@ def journal(month_str=None):
 def export_journal():
     if 'email' not in session: return redirect('/')
     month_str = request.args.get('month')
-    conn=get_conn(); cur=conn.cursor()
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); user=cur.fetchone()
+    if not is_subscription_active(user): cur.close(); conn.close(); return redirect('/payment')
     if month_str: cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s AND TO_CHAR(created_at,'YYYY-MM')=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY created_at", (session['email'], month_str))
     else: cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY created_at", (session['email'],))
     trades=cur.fetchall(); cur.close(); conn.close()
@@ -335,7 +371,10 @@ def clear_journal():
 @app.route('/signals')
 def signals():
     if 'email' not in session: return redirect('/')
-    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s ORDER BY created_at DESC LIMIT 300", (session['email'],)); trades=cur.fetchall()
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); user=cur.fetchone()
+    if not is_subscription_active(user) and not user.get('is_creator'):
+        cur.close(); conn.close(); return layout(f"<div class='paused-banner'>🚫 Signals Paused - <a href='/payment' style='color:#fff;text-decoration:underline'>Pay Now</a></div>", session['email'], "signals")
+    cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s ORDER BY created_at DESC LIMIT 300", (session['email'],)); trades=cur.fetchall()
     cur.execute("SELECT COUNT(*) FILTER (WHERE status='win' OR status='win_early') as wins, COUNT(*) FILTER (WHERE status='loss') as losses FROM agent35_trades WHERE user_email=%s", (session['email'],)); stats=cur.fetchone(); cur.close(); conn.close()
     def fmt(v):
         if v is None: return "-"
@@ -361,16 +400,28 @@ def manual_close():
 @app.route('/payment')
 def payment_page():
     ref=f"AG35-{datetime.now().strftime('%m%d')}-{os.urandom(2).hex().upper()}"
+    email = session.get('email','')
+    conn=get_conn(); cur=conn.cursor()
+    if email:
+        cur.execute("SELECT * FROM agent35_users WHERE email=%s", (email,)); u=cur.fetchone()
+    else:
+        u=None
+    cur.close(); conn.close()
+    paid_banner = ""
+    if u and is_subscription_active(u):
+        paid_banner = f"<div class='card' style='background:#10b98122;border-color:#10b981;text-align:center'><b style='color:#10b981'>✅ Your {u.get('plan')} plan is active - Signals ON</b><br><span style='font-size:12px'>Refer 10 friends to get Lifetime FREE</span><br><a href='/referrals' class='btn' style='margin-top:10px'>Refer & Earn</a></div>"
     content=f"""
+    {paid_banner}
     <div style='max-width:900px;margin:auto'>
-        <div style='text-align:center;margin-bottom:24px'><h1 style='color:#10b981;margin:0'>Choose Your Plan</h1></div>
+        <div style='text-align:center;margin-bottom:24px'><h1 style='color:#10b981;margin:0'>Choose Your Plan</h1><p style='color:#94a3b8'>Payment verification required before signals start</p></div>
         <div class='grid grid2'>
-            <div class='plan-card'><h3 style='margin:0;color:#fff'>Yearly Access</h3><div style='font-size:32px;font-weight:800;color:#fff;margin:12px 0'>R500 <span style='font-size:14px;color:#94a3b8'>/ year</span></div><a href='/submit-payment?ref={ref}&plan=yearly' class='btn-outline' style='margin-top:18px'>Select Yearly - R500</a></div>
-            <div class='plan-card plan-popular'><div class='plan-badge'>MOST POPULAR</div><h3 style='margin:0;color:#fff'>Lifetime Access</h3><div style='font-size:32px;font-weight:800;color:#10b981;margin:12px 0'>R5000 <span style='font-size:14px;color:#94a3b8'>/ once</span></div><a href='/submit-payment?ref={ref}&plan=lifetime' class='btn' style='margin-top:18px'>Select Lifetime - R5000</a></div>
+            <div class='plan-card'><h3 style='margin:0;color:#fff'>Yearly Access</h3><div style='font-size:32px;font-weight:800;color:#fff;margin:12px 0'>R500 <span style='font-size:14px;color:#94a3b8'>/ year</span></div><p style='color:#94a3b8;font-size:12px'>• Full signals access for 1 year<br>• Refer 10 → Get Lifetime FREE</p><a href='/submit-payment?ref={ref}&plan=yearly' class='btn-outline' style='margin-top:18px'>Select Yearly - R500</a></div>
+            <div class='plan-card plan-popular'><div class='plan-badge'>MOST POPULAR</div><h3 style='margin:0;color:#fff'>Lifetime Access</h3><div style='font-size:32px;font-weight:800;color:#10b981;margin:12px 0'>R5000 <span style='font-size:14px;color:#94a3b8'>/ once</span></div><p style='color:#94a3b8;font-size:12px'>• Lifetime access never expires<br>• No need to refer</p><a href='/submit-payment?ref={ref}&plan=lifetime' class='btn' style='margin-top:18px'>Select Lifetime - R5000</a></div>
         </div>
         <div class='card' style='margin-top:20px'>
-            <h3 style='color:#10b981;margin-top:0'>💳 How to Pay</h3>
+            <h3 style='color:#10b981;margin-top:0'>💳 How to Pay - Capitec</h3>
             <div>Account Number: <b style='color:#fff;font-size:16px'>{CAPITEC_ACC}</b> | Reference: <b style='color:#10b981;font-size:18px'>{ref}</b></div>
+            <p style='color:#94a3b8;font-size:11px'>Use reference <b>{ref}</b> exactly. Signals are PAUSED until admin verifies payment.</p>
             <div style='margin-top:16px;display:flex;gap:10px;flex-wrap:wrap'>
                 <a href='/submit-payment?ref={ref}&plan=yearly' class='btn' style='background:#121d30;color:#fff;border:1px solid #1e2d45'>I Paid R500 Yearly - {ref}</a>
                 <a href='/submit-payment?ref={ref}&plan=lifetime' class='btn'>I Paid R5000 Lifetime - {ref}</a>
@@ -378,7 +429,7 @@ def payment_page():
         </div>
     </div>
     """
-    return layout(content, session.get('email',''), "payment")
+    return layout(content, email, "payment")
 
 @app.route('/submit-payment')
 def submit_payment():
@@ -389,7 +440,7 @@ def submit_payment():
     except: cur.execute("INSERT INTO agent35_payments (user_email,plan,ref_code,amount,status) VALUES (%s,%s,%s,%s,'pending')", (session['email'],plan,ref,amount))
     cur.execute("UPDATE agent35_users SET payment_ref=%s, plan=%s, payment_status='pending' WHERE email=%s", (ref,plan,session['email'])); conn.commit(); cur.close(); conn.close()
     tg_link=f"https://t.me/{TELEGRAM_BOT_USERNAME}?start={ref}"
-    return layout(f"<div class='card' style='text-align:center;max-width:500px;margin:auto'><h2 style='color:#10b981'>Payment Submitted: {ref}</h2><a href='{tg_link}' target='_blank' class='btn'>Link Telegram Now</a><a class='btn-outline' href='/dashboard'>Back</a></div>", session['email'])
+    return layout(f"<div class='card' style='text-align:center;max-width:500px;margin:auto'><h2 style='color:#f59e0b'>⏳ Payment Submitted: {ref}</h2><p>Signals PAUSED until verified</p><a href='{tg_link}' target='_blank' class='btn'>Link Telegram Now (Required)</a><a class='btn-outline' href='/dashboard'>Back to Dashboard - Paused</a></div>", session['email'])
 
 @app.route('/test-telegram')
 def test_telegram():
@@ -399,7 +450,7 @@ def test_telegram():
     use_news = u.get('news_filter', True)
     res = engine.full_multi_tf_analysis("USDCHF", use_news_filter=use_news)
     msg = build_signal_msg(res if res.get('signal') else {'symbol': 'USDCHF','direction': 'BUY','entry': 0.79635,'sl': 0.79450,'tp': 0.80005,'score': 7,'quality': 'PREMIUM','confluence': ['Test'],'reason': 'Test signal','news_warning': ''}, u)
-    ok = send_telegram(u['telegram_id'], f"🧪 Test Telegram - Working!\n\n{msg}", trade_id=99999, stage="signal")
+    ok = send_telegram(u['telegram_id'], f"🧪 Test V9.9 - Working!\n\n{msg}", trade_id=99999, stage="signal")
     cur.close(); conn.close()
     content = f"<div class='card' style='text-align:center'><h3 style='color:#10b981'>✅ Sent!</h3><div style='background:#070d1a;padding:12px;border-radius:10px;text-align:left;font-size:12px;white-space:pre-wrap'>{msg}</div><br><a class='btn' href='/dashboard'>Back</a></div>" if ok else "<div class='card'><h3>Failed - check bot token</h3></div>"
     return layout(content, session['email'])
@@ -407,34 +458,36 @@ def test_telegram():
 @app.route('/quick-symbols', methods=['POST'])
 def quick_symbols():
     if 'email' not in session: return redirect('/')
-    conn=get_conn(); cur=conn.cursor(); cur.execute("UPDATE agent35_users SET symbols=%s WHERE email=%s",(request.form['symbols'][:100], session['email'])); conn.commit(); cur.close(); conn.close(); return redirect('/dashboard')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); u=cur.fetchone()
+    if not is_subscription_active(u) and not u.get('is_creator'):
+        cur.close(); conn.close()
+        return layout(f"<div class='paused-banner'>🚫 Signals Paused - Payment not verified</div>", session['email'])
+    cur.execute("UPDATE agent35_users SET symbols=%s WHERE email=%s",(request.form['symbols'][:100], session['email'])); conn.commit(); cur.close(); conn.close(); return redirect('/dashboard')
 
 @app.route('/scan')
 def scan():
     if 'email' not in session: return redirect('/')
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s",(session['email'],)); user=cur.fetchone()
+    if not is_subscription_active(user):
+        cur.close(); conn.close()
+        return layout(f"<div class='paused-banner'>🚫 SIGNALS PAUSED - Your payment is not verified yet. Admin must approve R500/R5000 payment.<br>Ref: {user.get('payment_ref','Not set')}<br><a href='/payment' style='color:#fff;text-decoration:underline'>Go to Payment</a></div><br><a class='btn' href='/dashboard'>Dashboard</a>", session['email'])
     symbols=(user['symbols'] or "EURUSD").split(",")[:5]; results=[]; use_news = user.get('news_filter', True)
     for sym in symbols:
         sym=sym.strip().upper()
         if not sym: continue
-        try:
-            res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
-        except Exception as e:
-            res={"signal":False,"symbol":sym,"reason":f"Error {e}"}
+        try: res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
+        except Exception as e: res={"signal":False,"symbol":sym,"reason":f"Error {e}"}
         res['symbol']=sym; results.append(res)
         if res.get('signal') and res.get('score',0) >= 4 and not res.get('news_block'):
             cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '5 minutes' LIMIT 1", (session['email'], sym))
-            if cur.fetchone():
-                continue
+            if cur.fetchone(): continue
             cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id",(session['email'],res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['entry'],res['sl'],res['bias'],str(res.get('confluence',''))))
-            new_row=cur.fetchone(); tid=new_row['id'] if new_row else 0
-            conn.commit()
+            new_row=cur.fetchone(); tid=new_row['id'] if new_row else 0; conn.commit()
             if user['telegram_id']:
-                msg=build_signal_msg(res, user)
-                send_telegram(user['telegram_id'], msg, trade_id=tid, stage="signal")
+                msg=build_signal_msg(res, user); send_telegram(user['telegram_id'], msg, trade_id=tid, stage="signal")
     conn.commit(); cur.close(); conn.close()
     html="".join([f"<div class='card' style='border-left:4px solid #10b981'><b>{r['symbol']} {r.get('direction','')} {r.get('score',0)}/8 {r.get('quality','')}</b><br>Entry {r.get('entry','')} SL {r.get('sl','')} TP {r.get('tp','')}<br><small>{r.get('bias','')} | {r.get('reason','')}</small></div>" if r.get('signal') else f"<div class='card' style='opacity:0.6'><b>{r['symbol']} - No setup</b><br><small>{r.get('reason','')}</small></div>" for r in results])
-    return layout(f"<h2>Scan Results - Premium Fixed - News {'ON' if use_news else 'OFF'}</h2>{html}<br><a class='btn' href='/journal'>Journal</a>", session['email'])
+    return layout(f"<h2>Scan Results - News {'ON' if use_news else 'OFF'}</h2>{html}<br><a class='btn' href='/journal'>Journal</a>", session['email'])
 
 @app.route('/settings', methods=['GET','POST'])
 def settings():
@@ -458,7 +511,7 @@ def settings():
     sel_usd="selected" if u['currency']=='USD' else ""; sel_zar="selected" if u['currency']=='ZAR' else ""; sel_eur="selected" if u['currency']=='EUR' else ""; sel_12="selected" if u['risk_reward']=='1:2' else ""; sel_13="selected" if u['risk_reward']=='1:3' else ""; sel_14="selected" if u['risk_reward']=='1:4' else ""
     sess=(u['sessions'] or 'London,New York'); c_london="checked" if "London" in sess else ""; c_ny="checked" if "New York" in sess else ""; c_asia="checked" if "Asia" in sess else ""; c_sydney="checked" if "Sydney" in sess else ""; c_all="checked" if "24/7" in sess else ""
     utz = u.get('timezone') or 'Africa/Johannesburg'; news_checked = "checked" if u.get('news_filter', True) else ""
-    content=f"<div style='max-width:700px;margin:auto'><h2 style='color:#10b981'>Settings</h2><form method='POST'><div class='settings-section'><div style='display:grid;grid-template-columns:1fr 1fr;gap:12px'><div><label>Currency</label><select name='currency'><option value='USD' {sel_usd}>USD</option><option value='ZAR' {sel_zar}>ZAR</option><option value='EUR' {sel_eur}>EUR</option></select></div><div><label>Account Size</label><input name='acc' type='number' value='{u['account_size']}'></div><div><label>Lot Size</label><input name='lot' type='number' step='0.01' value='{u['lot_size']}'></div><div><label>RR</label><select name='rr'><option {sel_12}>1:2</option><option {sel_13}>1:3</option><option {sel_14}>1:4</option></select></div></div><label>Symbols</label><input name='symbols' value='{u['symbols']}'><label>Telegram @</label><input name='tg' value='{u['telegram_username'] or ''}'><label>TZ</label><select name='timezone'><option value='{utz}' selected>{utz}</option><option value='Africa/Johannesburg'>Africa/Johannesburg</option><option value='Europe/London'>Europe/London</option><option value='America/New_York'>America/New_York</option><option value='UTC'>UTC</option></select><div style='margin-top:16px'><label>Trading Sessions</label><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'><label class='sess-check'><input type='checkbox' name='sess_london' {c_london}> London</label><label class='sess-check'><input type='checkbox' name='sess_ny' {c_ny}> NY</label><label class='sess-check'><input type='checkbox' name='sess_asia' {c_asia}> Asia</label><label class='sess-check'><input type='checkbox' name='sess_sydney' {c_sydney}> Sydney</label></div><label class='sess-check' style='margin-top:8px'><input type='checkbox' name='sess_all' {c_all}> 24/7</label></div><div style='margin-top:18px'><label>📰 News Filter</label><label class='sess-check news-check'><input type='checkbox' name='news_filter' {news_checked}> ✅ Avoid High-Impact News (35min) - Recommended ON</label><p style='font-size:11px;color:#94a3b8;margin-top:6px'>Blocks signals during major news events to protect your trades.</p></div></div><button class='btn'>Save Settings</button><a href='/dashboard' class='btn-outline'>Back</a></form></div>"
+    content=f"<div style='max-width:700px;margin:auto'><h2 style='color:#10b981'>Settings</h2><form method='POST'><div class='settings-section'><div style='display:grid;grid-template-columns:1fr 1fr;gap:12px'><div><label>Currency</label><select name='currency'><option value='USD' {sel_usd}>USD</option><option value='ZAR' {sel_zar}>ZAR</option><option value='EUR' {sel_eur}>EUR</option></select></div><div><label>Account Size</label><input name='acc' type='number' value='{u['account_size']}'></div><div><label>Lot Size</label><input name='lot' type='number' step='0.01' value='{u['lot_size']}'></div><div><label>RR</label><select name='rr'><option {sel_12}>1:2</option><option {sel_13}>1:3</option><option {sel_14}>1:4</option></select></div></div><label>Symbols</label><input name='symbols' value='{u['symbols']}'><label>Telegram @</label><input name='tg' value='{u['telegram_username'] or ''}'><label>TZ</label><select name='timezone'><option value='{utz}' selected>{utz}</option><option value='Africa/Johannesburg'>Africa/Johannesburg</option><option value='Europe/London'>Europe/London</option><option value='America/New_York'>America/New_York</option><option value='UTC'>UTC</option></select><div style='margin-top:16px'><label>Trading Sessions</label><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px'><label class='sess-check'><input type='checkbox' name='sess_london' {c_london}> London</label><label class='sess-check'><input type='checkbox' name='sess_ny' {c_ny}> NY</label><label class='sess-check'><input type='checkbox' name='sess_asia' {c_asia}> Asia</label><label class='sess-check'><input type='checkbox' name='sess_sydney' {c_sydney}> Sydney</label></div><label class='sess-check' style='margin-top:8px'><input type='checkbox' name='sess_all' {c_all}> 24/7</label></div><div style='margin-top:18px'><label>📰 News Filter</label><label class='sess-check news-check'><input type='checkbox' name='news_filter' {news_checked}> ✅ Avoid High-Impact News - Recommended ON</label></div></div><button class='btn'>Save Settings</button><a href='/dashboard' class='btn-outline'>Back</a></form></div>"
     return layout(content, session['email'], "settings")
 
 @app.route('/telegram/webhook', methods=['POST'])
@@ -472,8 +525,14 @@ def tg_webhook():
             cur.execute("SELECT t.*, u.account_size, u.risk_reward, u.currency_symbol FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.id=%s", (tid,)); tr=cur.fetchone()
             if tr:
                 if action=='took':
-                    cur.execute("UPDATE agent35_trades SET status='took', hit_entry_at=NOW(), archived=FALSE WHERE id=%s", (tid,)); conn.commit()
-                    send_telegram(chat_id, f"📝 {tr['symbol']} Tracking started", trade_id=tid, stage="active")
+                    # check active sub still
+                    cur.execute("SELECT payment_status, plan, is_creator, paid_at FROM agent35_users WHERE email=%s", (tr['user_email'],))
+                    uu=cur.fetchone()
+                    if not is_subscription_active(uu):
+                        send_telegram(chat_id, "🚫 Your subscription is paused - please renew")
+                    else:
+                        cur.execute("UPDATE agent35_trades SET status='took', hit_entry_at=NOW(), archived=FALSE WHERE id=%s", (tid,)); conn.commit()
+                        send_telegram(chat_id, f"📝 {tr['symbol']} Tracking started", trade_id=tid, stage="active")
                 elif action=='skip':
                     cur.execute("UPDATE agent35_trades SET status='skipped', be_done=TRUE, lock_done=TRUE WHERE id=%s", (tid,)); conn.commit()
                 elif action=='closeearly':
@@ -493,7 +552,7 @@ def tg_webhook():
             chat_id=data['message']['chat']['id']; username=data['message']['chat'].get('username',''); text=data['message'].get('text','').strip()
             ref=text.split('/start')[-1].strip() if '/start' in text else text.strip()
             if not ref: cur.close(); conn.close(); return jsonify({"ok":True})
-            cur.execute("SELECT email FROM agent35_users WHERE payment_ref=%s OR email=%s OR payment_ref ILIKE %s", (ref, ref.lower(), f"%{ref}%")); row=cur.fetchone()
+            cur.execute("SELECT email FROM agent35_users WHERE payment_ref=%s OR email=%s OR payment_ref ILIKE %s OR referral_code=%s", (ref, ref.lower(), f"%{ref}%", ref)); row=cur.fetchone()
             if row:
                 cur.execute("UPDATE agent35_users SET telegram_id=%s, telegram_username=%s WHERE email=%s", (str(chat_id), username, row['email'])); conn.commit()
                 send_telegram(chat_id, f"✅ Linked! {row['email']}")
@@ -514,9 +573,12 @@ def cron_update():
     def do_update():
         try:
             conn=get_conn(); cur=conn.cursor()
-            cur.execute("SELECT t.*, u.account_size, u.risk_reward, u.telegram_id FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.status='took' AND t.archived=FALSE AND t.created_at > NOW() - INTERVAL '12 hours' LIMIT 20")
+            cur.execute("SELECT t.*, u.account_size, u.risk_reward, u.telegram_id, u.payment_status, u.plan, u.is_creator, u.paid_at FROM agent35_trades t JOIN agent35_users u ON u.email=t.user_email WHERE t.status='took' AND t.archived=FALSE AND t.created_at > NOW() - INTERVAL '12 hours' LIMIT 20")
             rows=cur.fetchall()
             for tr in rows:
+                # skip if not active sub
+                if not is_subscription_active(tr):
+                    continue
                 live=get_live_price(tr['symbol'])
                 if not live: continue
                 close,high,low=live; r_now = calc_r_now(tr, close)
@@ -544,17 +606,19 @@ def cron_update():
         except Exception as e:
             print(f"cron update err {e} {traceback.format_exc()}")
     threading.Thread(target=do_update, daemon=True).start()
-    return jsonify({"ok":True, "version":"V9.8.2 CLEAN GUIDE"})
+    return jsonify({"ok":True, "version":"V9.9 REFERRAL"})
 
 @app.route('/cron/scan-all')
 def cron_scan_all():
     def do_scan():
         try:
             conn=get_conn(); cur=conn.cursor()
-            cur.execute("SELECT * FROM agent35_users WHERE (payment_status='approved' OR is_creator=TRUE) AND symbols IS NOT NULL AND telegram_id IS NOT NULL")
+            cur.execute("SELECT * FROM agent35_users WHERE payment_status='approved' AND symbols IS NOT NULL AND telegram_id IS NOT NULL")
             users=cur.fetchall()
             scanned=0
             for user in users:
+                if not is_subscription_active(user):
+                    continue
                 if not is_session_active(user['sessions'] or 'London,New York'):
                     continue
                 symbols=(user['symbols'] or "EURUSD").split(",")[:5]
@@ -562,17 +626,13 @@ def cron_scan_all():
                 for sym in symbols:
                     sym=sym.strip().upper()
                     if not sym: continue
-                    if not user.get('telegram_id'):
-                        continue
-                    cur.execute("SELECT direction, timeframe_bias, created_at FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '30 minutes' ORDER BY created_at DESC LIMIT 1", (user['email'], sym))
+                    cur.execute("SELECT direction FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '30 minutes' ORDER BY created_at DESC LIMIT 1", (user['email'], sym))
                     last = cur.fetchone()
-                    try:
-                        res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
+                    try: res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
                     except: continue
                     if res.get('news_block'): continue
                     if last:
-                        if last['direction'] == res.get('direction'):
-                            continue
+                        if last['direction'] == res.get('direction'): continue
                         else:
                             cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND created_at > NOW() - INTERVAL '15 minutes' LIMIT 1", (user['email'], sym))
                             if cur.fetchone(): continue
@@ -581,16 +641,15 @@ def cron_scan_all():
                     row=cur.fetchone(); conn.commit()
                     if row and user['telegram_id']:
                         msg=build_signal_msg(res, user)
-                        ok = send_telegram(user['telegram_id'], msg, trade_id=row['id'], stage="signal")
-                        if ok: scanned+=1
+                        if send_telegram(user['telegram_id'], msg, trade_id=row['id'], stage="signal"): scanned+=1
             conn.commit(); cur.close(); conn.close()
         except Exception as e:
             print(f"scan-all err {e} {traceback.format_exc()}")
     threading.Thread(target=do_scan, daemon=True).start()
-    return jsonify({"ok":True, "msg":"V9.8.2 scanner started"})
+    return jsonify({"ok":True, "msg":"V9.9 scanner started"})
 
 @app.route('/healthz')
-def health(): return jsonify({"status":"ok","version":"V9.8.2-CLEAN-GUIDE","utc":datetime.utcnow().isoformat()})
+def health(): return jsonify({"status":"ok","version":"V9.9-REFERRAL","utc":datetime.utcnow().isoformat()})
 
 @app.route('/master')
 def master():
@@ -600,16 +659,19 @@ def master():
     cur.execute("SELECT COUNT(*) as total FROM agent35_users"); total_users=cur.fetchone()['total']
     cur.execute("SELECT COUNT(*) as c FROM agent35_users WHERE payment_status='approved'"); approved=cur.fetchone()['c']
     cur.execute("SELECT COUNT(*) as c FROM agent35_users WHERE payment_status='pending'"); pending=cur.fetchone()['c']
-    cur.execute("SELECT * FROM agent35_payments WHERE status='pending' ORDER BY created_at DESC LIMIT 20"); payments=cur.fetchall()
-    cur.execute("SELECT email, plan, payment_status, telegram_id, symbols, news_filter FROM agent35_users ORDER BY created_at DESC LIMIT 30"); users=cur.fetchall()
+    cur.execute("SELECT * FROM agent35_payments WHERE status='pending' ORDER BY created_at DESC LIMIT 30"); payments=cur.fetchall()
+    cur.execute("SELECT email, plan, payment_status, telegram_id, symbols, referral_code, referred_by, referral_count, paid_at FROM agent35_users ORDER BY created_at DESC LIMIT 50"); users=cur.fetchall()
+    cur.execute("SELECT referred_by, COUNT(*) as cnt FROM agent35_users WHERE payment_status='approved' AND referred_by IS NOT NULL GROUP BY referred_by"); ref_stats=cur.fetchall()
     cur.close(); conn.close()
-    pay_rows="".join([f"<tr><td>{p['ref_code']}</td><td>{p['user_email']}</td><td>{p['plan']}</td><td><a href='/master/approve?ref={p['ref_code']}' class='btn' style='padding:6px'>Approve</a></td></tr>" for p in payments]) or "<tr><td colspan=4>No pending</td></tr>"
-    user_rows="".join([f"<tr><td>{u['email']}</td><td>{u['plan']}/{u['payment_status']}</td><td>{'✅' if u['telegram_id'] else '❌'}</td><td>{u['symbols']}</td><td>{'🛡️' if u.get('news_filter') else 'OFF'}</td></tr>" for u in users])
+    pay_rows="".join([f"<tr><td>{p['ref_code']}</td><td>{p['user_email']}</td><td>{p['plan']}</td><td>R{p['amount']}</td><td><a href='/master/approve?ref={p['ref_code']}' class='btn' style='padding:6px'>Approve</a> <a href='/master/reject?ref={p['ref_code']}' class='btn-danger'>Reject</a></td></tr>" for p in payments]) or "<tr><td colspan=5>No pending</td></tr>"
+    user_rows="".join([f"<tr><td>{u['email']}</td><td>{u['plan']}/{u['payment_status']}</td><td>{'✅' if u['telegram_id'] else '❌'}</td><td>{u['referral_code']}</td><td>{u['referred_by'] or '-'}</td><td>{u['referral_count']}</td><td>{u['paid_at'].strftime('%Y-%m-%d') if u['paid_at'] else '-'}</td></tr>" for u in users])
+    ref_rows="".join([f"<tr><td>{s['referred_by']}</td><td>{s['cnt']}/10</td><td>{'✅ READY FOR UPGRADE' if s['cnt']>=10 else f\"{10-s['cnt']} left\"}</td></tr>" for s in ref_stats])
     content=f"""
-    <h1 style='color:#10b981'>👑 Master V9.8.2 Clean Guide</h1>
-    <div class='grid grid4'><div class='card'>Total {total_users}</div><div class='card'>Approved {approved}</div><div class='card'>Pending {pending}</div><div class='card'><a href='/cron/scan-all' target='_blank' class='btn'>TEST SCANNER</a></div></div>
-    <div class='card'><h3>Pending Payments</h3><table><tr><th>Ref</th><th>Email</th><th>Plan</th><th>Action</th></tr>{pay_rows}</table></div>
-    <div class='card'><h3>Users</h3><table><tr><th>Email</th><th>Plan</th><th>TG</th><th>Symbols</th><th>News</th></tr>{user_rows}</table></div>
+    <h1 style='color:#10b981'>👑 Master V9.9 Referral + Pause</h1>
+    <div class='grid grid4'><div class='card'>Total {total_users}</div><div class='card'>Approved {approved}</div><div class='card'>Pending {pending}</div><div class='card'><a href='/cron/scan-all' target='_blank' class='btn'>TEST SCANNER (only approved)</a></div></div>
+    <div class='card'><h3>⏳ Pending Payments - Signals PAUSED until you approve</h3><table><tr><th>Ref</th><th>Email</th><th>Plan</th><th>Amount</th><th>Action</th></tr>{pay_rows}</table></div>
+    <div class='card'><h3>🎁 Referral Leaderboard (auto counts only paid)</h3><table><tr><th>Referrer Email</th><th>Paid Count</th><th>Status</th></tr>{ref_rows or '<tr><td colspan=3>No referrals yet</td></tr>'}</table></div>
+    <div class='card'><h3>All Users</h3><table><tr><th>Email</th><th>Plan/Status</th><th>TG</th><th>Own Code</th><th>Referred By</th><th>Count</th><th>Paid At</th></tr>{user_rows}</table></div>
     <div class='card'><a href='/setup-webhook' class='btn-outline'>Setup Webhook</a> <a href='/cron/update-trades' class='btn-outline'>Update Trades</a> <a href='/master/clear' class='btn-danger'>Clear OLD SENT</a></div>
     """
     return layout(content, session['email'], "master")
@@ -620,13 +682,57 @@ def master_approve():
     conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); r=cur.fetchone()
     if not r or not r['is_creator']: cur.close(); conn.close(); return redirect('/dashboard')
     ref=request.args.get('ref')
-    cur.execute("UPDATE agent35_payments SET status='approved' WHERE ref_code=%s", (ref,))
-    cur.execute("UPDATE agent35_users SET payment_status='approved', paid_at=NOW() WHERE payment_ref=%s", (ref,))
-    cur.execute("SELECT user_email FROM agent35_payments WHERE ref_code=%s", (ref,)); row=cur.fetchone(); conn.commit()
-    if row:
-        cur.execute("SELECT telegram_id FROM agent35_users WHERE email=%s", (row['user_email'],)); u=cur.fetchone()
-        if u and u['telegram_id']: send_telegram(u['telegram_id'], f"✅ Payment {ref} Approved!")
+    # approve payment
+    cur.execute("UPDATE agent35_payments SET status='approved' WHERE ref_code=%s RETURNING user_email, plan", (ref,))
+    pay_row = cur.fetchone()
+    if not pay_row:
+        cur.close(); conn.close(); return redirect('/master')
+    buyer_email = pay_row['user_email']
+    plan_bought = pay_row['plan']
+    cur.execute("UPDATE agent35_users SET payment_status='approved', paid_at=NOW(), plan=%s WHERE email=%s RETURNING referred_by", (plan_bought, buyer_email))
+    buyer = cur.fetchone()
+    conn.commit()
+    # REFERRAL LOGIC: increment referrer count
+    if buyer and buyer.get('referred_by'):
+        referrer_email = buyer['referred_by']
+        # only count if buyer is approved (now) and referrer exists
+        cur.execute("SELECT referral_count, plan, payment_status FROM agent35_users WHERE email=%s", (referrer_email,))
+        ref_user = cur.fetchone()
+        if ref_user:
+            # increment count
+            cur.execute("UPDATE agent35_users SET referral_count = COALESCE(referral_count,0)+1 WHERE email=%s RETURNING referral_count, plan", (referrer_email,))
+            updated_ref = cur.fetchone()
+            conn.commit()
+            new_count = updated_ref['referral_count']
+            ref_plan = updated_ref['plan']
+            # auto upgrade: if yearly buyer refers 10 paid users -> lifetime free
+            if new_count >= 10 and ref_plan == 'yearly':
+                cur.execute("UPDATE agent35_users SET plan='lifetime', payment_status='approved', paid_at=NOW() WHERE email=%s", (referrer_email,))
+                conn.commit()
+                # notify referrer
+                cur.execute("SELECT telegram_id FROM agent35_users WHERE email=%s", (referrer_email,))
+                tg = cur.fetchone()
+                if tg and tg.get('telegram_id'):
+                    send_telegram(tg['telegram_id'], f"🎉🎉 CONGRATS! You referred {new_count} paid friends! You have been auto-upgraded to LIFETIME R5000 FREE! 🚀")
+    # notify buyer
+    cur.execute("SELECT telegram_id FROM agent35_users WHERE email=%s", (buyer_email,))
+    bu = cur.fetchone()
+    if bu and bu.get('telegram_id'):
+        send_telegram(bu['telegram_id'], f"✅ Payment {ref} Approved! Your plan {plan_bought} is active. Signals ON! Welcome to Agent 35")
     cur.close(); conn.close()
+    return redirect('/master')
+
+@app.route('/master/reject')
+def master_reject():
+    if 'email' not in session: return redirect('/')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT is_creator FROM agent35_users WHERE email=%s", (session['email'],)); r=cur.fetchone()
+    if not r or not r['is_creator']: cur.close(); conn.close(); return redirect('/dashboard')
+    ref=request.args.get('ref')
+    cur.execute("UPDATE agent35_payments SET status='rejected' WHERE ref_code=%s", (ref,))
+    cur.execute("SELECT user_email FROM agent35_payments WHERE ref_code=%s", (ref,)); row=cur.fetchone()
+    if row:
+        cur.execute("UPDATE agent35_users SET payment_status='rejected' WHERE email=%s", (row['user_email'],))
+    conn.commit(); cur.close(); conn.close()
     return redirect('/master')
 
 @app.route('/master/clear')
