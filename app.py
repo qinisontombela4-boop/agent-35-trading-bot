@@ -29,7 +29,6 @@ def format_price(symbol, price):
     except: return str(price)
 
 LOGO_SVG = '<svg width="34" height="34" viewBox="0 0 100 100"><rect width="100" height="100" rx="18" fill="#0b111c" stroke="#10b981" stroke-width="3"/><text x="50%" y="58%" dominant-baseline="middle" text-anchor="middle" font-weight="900" font-size="48" fill="#10b981">35</text></svg>'
-
 STYLE = """
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;600;800&display=swap');
@@ -183,6 +182,7 @@ def save_settings():
     conn=get_conn(); cur=conn.cursor()
     cur.execute("UPDATE agent35_users SET symbols=%s, sessions=%s, currency=%s, news_filter=%s WHERE email=%s",(request.form['symbols'].upper(), request.form['sessions'], request.form['currency'], request.form['news_filter']=='TRUE', session['email'])); conn.commit(); cur.close(); conn.close()
     return redirect('/dashboard')
+    
 @app.route('/referrals')
 def referrals_page():
     if 'email' not in session: return redirect('/')
@@ -356,6 +356,7 @@ def manual_close():
     cur.close()
     conn.close()
     return redirect('/journal')
+    
 @app.route('/r/<code>')
 def referral_redirect(code):
     conn=get_conn(); cur=conn.cursor()
