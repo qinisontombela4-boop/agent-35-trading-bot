@@ -585,55 +585,86 @@ def cron_update():
             print(f"cron update err {e} {traceback.format_exc()}")
     threading.Thread(target=do_update, daemon=True).start()
     return jsonify({"ok":True})
-
 @app.route("/cron/scan-all")
 def cron_scan_all():
-    scanned=0; checked=0; details=[]
+    scanned = 0
+    checked = 0
+    details = []
     try:
-        conn=get_conn(); cur=conn.cursor()
-        cur.execute("SELECT email,telegram_id,symbols,news_filter FROM agent35_users WHERE payment_status='approved' AND telegram_id IS NOT NULL AND telegram_id!=''")
-        users=cur.fetchall()
-        print(f"CRON V12.6.2 {len(users)} users KEY={bool(TWELVE_KEY)}")
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT email, telegram_id, symbols, news_filter FROM agent35_users WHERE payment_status='approved' AND telegram_id IS NOT NULL AND telegram_id!= ''")
+        users = cur.fetchall()
+        print(f"CRON V12.6.2 checking {len(users)} users KEY={bool(TWELVE_KEY)}")
         for u in users:
-            email=u['email']; tgid=u['telegram_id']
-            syms_str=u.get('symbols') or ''
-            use_news=u.get('news_filter',True)
-            if not syms_str: continue
-            syms=[s.strip().upper() for s in syms_str.split(',') if s.strip()]
-            checked+=1
+            email = u['email']
+            tgid = u['telegram_id']
+            syms_str = u.get('symbols') or ''
+            use_news = u.get('news_filter', True)
+            if not syms_str:
+                continue
+            syms = [s.strip().upper() for s in syms_str.split(',') if s.strip()]
+            checked += 1
             for sym in syms:
-                cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '4 hours' LIMIT 1",(email,sym))
-                if cur.fetchone(): 
+                cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '4 hours' LIMIT 1", (email, sym))
+                if cur.fetchone():
                     print(f"SKIP {sym} {email} dup <4h")
                     continue
                 try:
-                    res=engine.full_multi_tf_analysis(sym,use_news_filter=use_news)
+                    res = engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
                 except Exception as e:
                     print(f"Scan err {sym} {e} {traceback.format_exc()}")
+                    details.append(f"ERR {sym} {e}")
                     continue
                 if not res.get('signal'):
                     print(f"SKIP {sym} {email}: {res.get('reason')} Score {res.get('score')}")
                     details.append(f"SKIP {sym}: {res.get('reason')}")
                     continue
-                if res.get('score',0)>=4:
+                if res.get('score', 0) >= 4:
                     try:
-                        cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id",(email,res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['entry'],res['sl'],res['bias'],str(res.get('confluence',''))))
-                        row=cur.fetchone(); conn.commit()
+                        cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id", (email, res['symbol'], res['direction'], res['entry'], res['sl'], res['tp'], res['entry'], res['sl'], res['bias'], str(res.get('confluence',''))))
+                        row = cur.fetchone()
+                        conn.commit()
                         if row and tgid:
-                            msg=build_signal_msg(res,u)
-                            send_telegram(tgid,msg,trade_id=row['id'],stage="signal")
-                            scanned+=1
+                            msg = build_signal_msg(res, u)
+                            send_telegram(tgid, msg, trade_id=row['id'], stage="signal")
+                            scanned += 1
                             print(f"SENT {sym} {res['direction']} {res['score']}/8 to {email}")
                     except Exception as e:
-                        print(f"DB err {e}"); conn.rollback()
-        cur.close(); conn.close()
+                        print(f"DB err {e}")
+                        conn.rollback()
+        cur.close()
+        conn.close()
         return jsonify({"ok":True,"checked":checked,"sent":scanned,"details":details[:30]})
     except Exception as e:
         print(f"CRON fatal {e} {traceback.format_exc()}")
-        return jsonify({"ok":False,"error":str(e)}),500
-@app.route('/healthz')
-def health(): return jsonify({"status":"ok","version":"V12.6.1-FIXED-DECIMALS","utc":datetime.utcnow().isoformat(),"finnhub": "YES" if FINNHUB_KEY else "NO","twelve": "YES" if TWELVE_KEY else "NO"})
+        return jsonify({"ok":False,"error":str(e)}), 500
 
+@app.route("/cron/update-trades")
+def cron_update_trades():
+    try:
+        conn = get_conn()
+        cur = conn.cursor()
+        cur.execute("SELECT id, symbol, direction, entry, sl, original_entry FROM agent35_trades WHERE status='took' AND archived=FALSE")
+        trades = cur.fetchall()
+        for t in trades:
+            live = get_live_price(t['symbol'])
+            if not live:
+                continue
+            close_price = live[0]
+            r_now = (close_price - t['entry']) / abs(t['entry'] - t['sl']) if t['direction'] == 'BUY' else (t['entry'] - close_price) / abs(t['entry'] - t['sl'])
+            if r_now >= 1 and not t.get('be_done'):
+                cur.execute("UPDATE agent35_trades SET sl=original_entry, be_done=TRUE WHERE id=%s", (t['id'],))
+                conn.commit()
+        cur.close()
+        conn.close()
+        return jsonify({"ok":True})
+    except Exception as e:
+        return jsonify({"ok":False,"error":str(e)})
+
+@app.route("/healthz")
+def healthz():
+    return jsonify({"ok":True,"v":"V12.6.2","key":bool(TWELVE_KEY),"time":datetime.utcnow().isoformat()})
 @app.route('/master')
 def master():
     if 'email' not in session: return redirect('/')
