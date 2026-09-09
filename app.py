@@ -452,8 +452,14 @@ def scan():
     for sym in symbols:
         sym=sym.strip().upper()
         if not sym: continue
-        try: res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
-        except Exception as e: res={"signal":False,"symbol":sym,"reason":f"Error {e}"}
+        try:
+    res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
+except Exception as e:
+    print(f"Scan err {sym} {e} {traceback.format_exc()}")
+    continue
+if not res.get('signal'):
+    print(f"SKIP {sym} {user['email']}: {res.get('reason')} Score {res.get('score')}")
+    continue
         res['symbol']=sym; results.append(res)
         if res.get('signal') and res.get('score',0) >= 4 and not res.get('news_block'):
             cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '5 minutes' LIMIT 1", (session['email'], sym))
