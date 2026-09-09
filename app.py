@@ -7,19 +7,6 @@ import trading_engine as engine
 import traceback
 from collections import defaultdict
 
-def format_price(symbol, price):
-    if price is None: return "-"
-    s = symbol.upper()
-    try:
-        p = float(price)
-        if "JPY" in s:
-            return f"{p:.3f}" # 156.123
-        if "XAU" in s or "GOLD" in s or "BTC" in s:
-            return f"{p:.2f}" # 2045.12
-        return f"{p:.5f}" # 1.08567
-    except:
-        return str(price)
-
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'agent35-secret-2025')
 DATABASE_URL = os.environ.get('DATABASE_URL','').strip()
@@ -162,15 +149,28 @@ def is_session_active(user_sessions):
     return False
 
 def build_signal_msg(res, user=None):
-    sym = res.get('symbol','?')
-    direction = res.get('direction','?')
-    score = res.get('score',0)
-    dec = 3 if "JPY" in sym else 2 if "XAU" in sym or "GOLD" in sym or "BTC" in sym else 5
-    rr = res.get('rr','?')
     try:
-        return f"<b>🔥 AGENT 35 {res.get('quality','A')} {score}/8</b>\n\n<b>{sym} {'🟢 BUY' if direction=='BUY' else '🔴 SELL'}</b>\nRR: {rr}\n\n<b>Entry:</b> {res.get('entry',0):.{dec}f}\n<b>SL:</b> {res.get('sl',0):.{dec}f}\n<b>TP:</b> {res.get('tp',0):.{dec}f}\n\n<b>Bias:</b> {res.get('bias','')}\n<b>Reason:</b> {res.get('reason','')}\n\n<i>FIXED V12.6.2</i>"
-    except:
-        return str(res)
+        sym=res['symbol']; direction=res['direction']; entry=res['entry']; sl=res['sl']; tp=res['tp']; score=res['score']; confluence=res.get('confluence',[]); reason=res.get('reason',''); quality=res.get('quality','STANDARD')
+        try:
+            user_tz = (user.get('timezone') if user and user.get('timezone') else 'Africa/Johannesburg')
+            now_local = datetime.now(ZoneInfo(user_tz)).strftime("%H:%M %Z")
+            now_sast = datetime.now(ZoneInfo("Africa/Johannesburg")).strftime("%H:%M SAST")
+        except:
+            now_local=datetime.utcnow().strftime("%H:%M UTC"); now_sast=now_local
+        rr_val=(tp-entry)/(entry-sl) if direction=="BUY" and (entry-sl)!=0 else (entry-tp)/(sl-entry) if (sl-entry)!=0 else 0
+        acc = user.get('account_size',1000) if user else 1000
+        risk_money = acc * (RISK_PCT/100)
+        conf_text="\n".join([f"• {c}" for c in confluence[:8]])
+        news_warn = res.get('news_warning','')
+        if news_warn: conf_text += f"\n\n⚠️ {news_warn}"
+        header="🔥🔥 SNIPER 🔥🔥" if "SNIPER" in quality else "🔥 PREMIUM" if "PREMIUM" in quality else "📊"
+        emoji="🟢" if direction=="BUY" else "🔴"
+        entry_f = format_price(sym, entry)
+        sl_f = format_price(sym, sl)
+        tp_f = format_price(sym, tp)
+        return f"{emoji} {sym} {direction} | {quality} {score}/8\n{header}\n💰 Entry: {entry_f}\n🛑 SL: {sl_f}\n🎯 TP: {tp_f}\n📊 RR: 1:{rr_val:.1f} | Risk: ${risk_money:.2f}\n\n🔍 Confluence:\n{conf_text}\n\n📝 {reason}\n⏰ {now_local} | {now_sast}\n"
+    except Exception as e:
+        return f"{res.get('symbol')} {res.get('direction')} {res.get('entry')} {e}"
 
 def layout(content, email="", active="dashboard"):
     is_creator="creator" in email.lower()
@@ -261,11 +261,7 @@ def dashboard():
     pnl=stats['pnl']; wr=(stats['wins']/stats['closed']*100) if stats['closed']>0 else 0; curr_sym=CUR.get(user['currency'],'$'); total_r = stats['total_r'] or 0
     syms=[s for s in (user['symbols'] or '').split(',') if s.strip()]
     chips="".join([f"<span class='chip chip-active'><b>{s}</b><span class='x' onclick=\"removeSym('{s}')\">x</span></span>" for s in syms])
-    # FIXED DECIMALS DISPLAY
-rows = "".join([
-    f"<tr><td><b>{t['symbol']}</b></td><td>{t['direction']}</td><td>{format_price(t['symbol'], t['entry'])}<br><small>SL {format_price(t['symbol'], t['sl'])} TP {format_price(t['symbol'], t['tp'])}</small></td><td><span class=badge>{t['status']}</span></td></tr>"
-    for t in trades
-]) or "<tr><td colspan=4>No trades yet</td></tr>"
+    rows="".join([f"<tr><td>{t['created_at'].strftime('%m-%d %H:%M')}</td><td><b>{t['symbol']}</b></td><td><span class='badge win'>{t['status'].upper()}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)}</td></tr>" for t in trades]) or "<tr><td colspan=4>No trades yet</td></tr>"
     pay_ref=user['payment_ref'] or session['email']
     sess_display=user['sessions'] or 'London,New York'
     news_stat = "ON" if user.get('news_filter') else "OFF"
@@ -296,49 +292,58 @@ def referrals_page():
     return layout(content, session['email'], "referrals")
 
 @app.route('/journal')
-def journal():
-    if 'email' not in session:
-        return redirect('/')
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM agent35_trades WHERE user_email=%s AND archived=FALSE ORDER BY created_at DESC LIMIT 100", (session['email'],))
+@app.route('/journal/<month_str>')
+def journal(month_str=None):
+    if 'email' not in session: return redirect('/')
+    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s", (session['email'],)); user=cur.fetchone()
+    if not is_subscription_active(user) and not user.get('is_creator'):
+        cur.close(); conn.close()
+        return layout(f"<div class='paused-banner'>Journal Paused - <a href='/payment' style='color:#fff'>Pay Now</a></div>", session['email'], "journal")
+    cur.execute("SELECT DISTINCT TO_CHAR(created_at, 'YYYY-MM') as month, TO_CHAR(created_at, 'Mon YYYY') as month_label FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') ORDER BY month DESC", (session['email'],))
+    months = cur.fetchall()
+    if not month_str: month_str = months[0]['month'] if months else datetime.now().strftime('%Y-%m')
+    cur.execute("SELECT *, EXTRACT(EPOCH FROM (closed_at - COALESCE(hit_entry_at, created_at)))/3600 as duration_hours FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND status IN ('took','active','win','loss','be','win_early') AND TO_CHAR(created_at, 'YYYY-MM') = %s ORDER BY created_at DESC", (session['email'], month_str))
     trades = cur.fetchall()
-    cur.close()
-    conn.close()
-
-    rows_html = ""
+    cur.execute("SELECT COALESCE(SUM(pnl),0) as pnl, COUNT(*) FILTER (WHERE status='win' OR status='win_early') as wins, COUNT(*) FILTER (WHERE status='loss') as losses, COUNT(*) FILTER (WHERE status IN ('win','loss','be','win_early')) as closed, COALESCE(SUM(close_r),0) as total_r FROM agent35_trades WHERE user_email=%s AND archived=FALSE AND TO_CHAR(created_at, 'YYYY-MM')=%s AND status IN ('took','active','win','loss','be','win_early')", (session['email'], month_str))
+    stats = cur.fetchone(); cur.close(); conn.close()
+    curr_sym=CUR.get(user['currency'],'$') if user else '$'; total_r = stats['total_r'] or 0; wr = (stats['wins']/stats['closed']*100) if stats['closed'] and stats['closed']>0 else 0
+    def fmt_time(dt):
+        if not dt: return "-"
+        try: return dt.strftime('%H:%M:%S')
+        except: return "-"
+    def fmt_duration(hours):
+        if hours is None: return "Open"
+        try:
+            h=float(hours)
+            if h<0: return "Open"
+            if h<1: return f"{int(h*60)}m"
+            elif h<24: return f"{int(h)}h {int((h-int(h))*60)}m"
+            else: return f"{int(h//24)}d {int(h%24)}h"
+        except: return "-"
+    def sl_status(t):
+        entry = t.get('original_entry') or t.get('entry'); curr_sl = t.get('sl')
+        if not entry or not curr_sl: return f"SL {format_price(t['symbol'], curr_sl)}"
+        try:
+            if t.get('be_done') and abs(float(curr_sl)-float(entry))<0.001: return f"BE {format_price(t['symbol'], curr_sl)}"
+            elif t.get('lock_done'): return f"+1R {format_price(t['symbol'], curr_sl)}"
+            else: return f"SL {format_price(t['symbol'], curr_sl)}"
+        except: return f"SL {format_price(t['symbol'], curr_sl)}"
+    month_tabs = "".join([f"<a href='/journal/{m['month']}' style='padding:8px 14px;border-radius:20px;text-decoration:none;font-size:12px;font-weight:700;margin:4px;display:inline-block;{'background:#10b981;color:#000' if m['month']==month_str else 'background:#121d30;color:#94a3b8;border:1px solid #1e2d45'}'>{m['month_label']}</a>" for m in months]) or "<span style='color:#64748b'>No months</span>"
+    by_day = defaultdict(list)
     for t in trades:
-        entry_f = format_price(t['symbol'], t['entry'])
-        sl_f = format_price(t['symbol'], t['sl'])
-        tp_f = format_price(t['symbol'], t['tp'])
-        rows_html += f"""
-        <tr>
-            <td>{t['created_at'].strftime('%m-%d %H:%M') if t['created_at'] else ''}</td>
-            <td><b>{t['symbol']}</b> {t['direction']}</td>
-            <td>{entry_f}<br><small style='color:#94a3b8'>SL {sl_f} / TP {tp_f}</small></td>
-            <td><span style='padding:4px 8px;border-radius:12px;background:#121d30;font-size:10px'>{t['status']}</span></td>
-            <td>{t.get('confluence','')[:40]}</td>
-        </tr>
-        """
-    if not rows_html:
-        rows_html = "<tr><td colspan=5 style='text-align:center;color:#64748b'>No trades yet</td></tr>"
-
-    content = f"""
-    <div class='card'>
-        <h3 style='margin:0'>Journal - FIXED Decimals</h3>
-        <p style='color:#64748b;font-size:12px'>JPY=3 Gold=2 Forex=5 | Single API Cached</p>
-        <div style='overflow:auto'>
-            <table>
-                <tr><th>Time</th><th>Pair/Dir</th><th>Entry / SL / TP</th><th>Status</th><th>Confluence</th></tr>
-                {rows_html}
-            </table>
-        </div>
-    </div>
-    <div class='card'>
-        <a class='btn' href='/dashboard'>Back to Dashboard</a>
-    </div>
-    """
-    return layout(content, session['email'])
+        day_key = t['created_at'].strftime('%Y-%m-%d - %A')
+        by_day[day_key].append(t)
+    rows_html=""
+    for day, day_trades in by_day.items():
+        rows_html+=f"<tr style='background:#121d30'><td colspan=9 style='font-weight:800;color:#10b981;padding:10px'>{day} - {len(day_trades)} trades</td></tr>"
+        for t in day_trades:
+            took_time = t.get('hit_entry_at') or t['created_at']; closed_time = t.get('closed_at')
+            entry_d = format_price(t['symbol'], t.get('original_entry') or t.get('entry')); orig_sl_d = format_price(t['symbol'], t.get('original_sl') or t.get('sl')); tp_d = format_price(t['symbol'], t.get('tp'))
+            if entry_d=="-" and orig_sl_d=="-": continue
+            rows_html+=f"<tr><td>{t['created_at'].strftime('%d')}</td><td style='font-size:11px'>{fmt_time(took_time)}</td><td style='font-size:11px'>{fmt_time(closed_time) if closed_time else '<span style=color:#f59e0b>Open</span>'}</td><td style='font-weight:700'>{fmt_duration(t.get('duration_hours'))}</td><td><b>{t['symbol']}</b> {t['direction']}</td><td style='font-size:11px'>{entry_d} / {orig_sl_d} / {tp_d}<br><span style='color:#94a3b8'>{sl_status(t)}</span></td><td><span class='badge win'>{t['status'].upper()}</span></td><td>{curr_sym}{round(t['pnl'] or 0,2)}</td><td><a href='/manual-close?id={t['id']}' style='color:#10b981'>Close</a></td></tr>"
+    if not rows_html: rows_html="<tr><td colspan=9>No trades this month</td></tr>"
+    content=f"<div class='card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap'><h3>{month_str} - {wr:.1f}% | {total_r:.1f}R | {curr_sym}{stats['pnl']:.2f} | FIXED DECIMALS</h3><a href='/clear-journal?month={month_str}' onclick=\"return confirm('Clear {month_str}?')\" class='btn-danger'>Clear {month_str}</a></div><div style='margin:12px 0'>{month_tabs}</div><div style='overflow:auto'><table><tr><th>Day</th><th>Took</th><th>Closed</th><th>Duration</th><th>Pair</th><th>Entry/SL/TP</th><th>Status</th><th>PNL</th><th>Action</th></tr>{rows_html}</table></div></div><div class='card'><a class='btn-outline' href='/export-journal?month={month_str}'>Export CSV</a> <a class='btn' href='/dashboard'>Dashboard</a></div>"
+    return layout(content, session['email'], "journal")
 
 @app.route('/export-journal')
 def export_journal():
