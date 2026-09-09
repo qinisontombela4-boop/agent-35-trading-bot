@@ -586,44 +586,51 @@ def cron_update():
     threading.Thread(target=do_update, daemon=True).start()
     return jsonify({"ok":True})
 
-@app.route('/cron/scan-all')
+@app.route("/cron/scan-all")
 def cron_scan_all():
-    def do_scan():
-        try:
-            conn=get_conn(); cur=conn.cursor()
-            cur.execute("SELECT * FROM agent35_users WHERE payment_status='approved' AND symbols IS NOT NULL AND telegram_id IS NOT NULL")
-            users=cur.fetchall()
-            for user in users:
-                if not is_subscription_active(user): continue
-                if not is_session_active(user['sessions'] or 'London,New York'): continue
-                symbols=(user['symbols'] or "EURUSD").split(",")[:5]
-                use_news = user.get('news_filter', True)
-                for sym in symbols:
-                    sym=sym.strip().upper()
-                    if not sym: continue
-                    cur.execute("SELECT direction FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '30 minutes' ORDER BY created_at DESC LIMIT 1", (user['email'], sym))
-                    last = cur.fetchone()
-                    try: res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
-                    except: continue
-                    if res.get('news_block'): continue
-                    if last:
-                        if last['direction'] == res.get('direction'): continue
-                        else:
-                            cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND created_at > NOW() - INTERVAL '15 minutes' LIMIT 1", (user['email'], sym))
-                            if cur.fetchone(): continue
-                    if not res.get('signal') or res.get('score',0) < 4: continue
-                    cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id",(user['email'],res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['entry'],res['sl'],res['bias'],str(res.get('confluence',''))))
-                    row=cur.fetchone(); conn.commit()
-                    if row and user['telegram_id']:
-                        msg=build_signal_msg(res, user)
-                        send_telegram(user['telegram_id'], msg, trade_id=row['id'], stage="signal")
-                    time.sleep(4)
-            conn.commit(); cur.close(); conn.close()
-        except Exception as e:
-            print(f"scan-all err {e} {traceback.format_exc()}")
-    threading.Thread(target=do_scan, daemon=True).start()
-    return jsonify({"ok":True})
-
+    scanned=0; checked=0; details=[]
+    try:
+        conn=get_conn(); cur=conn.cursor()
+        cur.execute("SELECT email,telegram_id,symbols,news_filter FROM agent35_users WHERE payment_status='approved' AND telegram_id IS NOT NULL AND telegram_id!=''")
+        users=cur.fetchall()
+        print(f"CRON V12.6.2 {len(users)} users KEY={bool(TWELVE_KEY)}")
+        for u in users:
+            email=u['email']; tgid=u['telegram_id']
+            syms_str=u.get('symbols') or ''
+            use_news=u.get('news_filter',True)
+            if not syms_str: continue
+            syms=[s.strip().upper() for s in syms_str.split(',') if s.strip()]
+            checked+=1
+            for sym in syms:
+                cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '4 hours' LIMIT 1",(email,sym))
+                if cur.fetchone(): 
+                    print(f"SKIP {sym} {email} dup <4h")
+                    continue
+                try:
+                    res=engine.full_multi_tf_analysis(sym,use_news_filter=use_news)
+                except Exception as e:
+                    print(f"Scan err {sym} {e} {traceback.format_exc()}")
+                    continue
+                if not res.get('signal'):
+                    print(f"SKIP {sym} {email}: {res.get('reason')} Score {res.get('score')}")
+                    details.append(f"SKIP {sym}: {res.get('reason')}")
+                    continue
+                if res.get('score',0)>=4:
+                    try:
+                        cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id",(email,res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['entry'],res['sl'],res['bias'],str(res.get('confluence',''))))
+                        row=cur.fetchone(); conn.commit()
+                        if row and tgid:
+                            msg=build_signal_msg(res,u)
+                            send_telegram(tgid,msg,trade_id=row['id'],stage="signal")
+                            scanned+=1
+                            print(f"SENT {sym} {res['direction']} {res['score']}/8 to {email}")
+                    except Exception as e:
+                        print(f"DB err {e}"); conn.rollback()
+        cur.close(); conn.close()
+        return jsonify({"ok":True,"checked":checked,"sent":scanned,"details":details[:30]})
+    except Exception as e:
+        print(f"CRON fatal {e} {traceback.format_exc()}")
+        return jsonify({"ok":False,"error":str(e)}),500
 @app.route('/healthz')
 def health(): return jsonify({"status":"ok","version":"V12.6.1-FIXED-DECIMALS","utc":datetime.utcnow().isoformat(),"finnhub": "YES" if FINNHUB_KEY else "NO","twelve": "YES" if TWELVE_KEY else "NO"})
 
