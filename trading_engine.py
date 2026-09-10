@@ -1,155 +1,111 @@
-import os
-import requests
-import itertools
-import time
+import os, requests, itertools, time
 from datetime import datetime
 
-# ============ 3-KEY ROTATION ============
-API_KEYS = [
+API_KEYS = [k for k in [
     os.getenv("TWELVE_DATA_API_KEY"),
     os.getenv("TWELVE_DATA_API_KEY_2"),
     os.getenv("TWELVE_DATA_API_KEY_3"),
-]
-API_KEYS = [k for k in API_KEYS if k and len(k) > 10]
-print(f"Loaded {len(API_KEYS)} TwelveData keys")
-key_cycle = itertools.cycle(API_KEYS) if API_KEYS else None
+] if k]
 
-def get_key():
-    if not key_cycle:
-        return None
-    return next(key_cycle)
+key_cycle = itertools.cycle(API_KEYS) if API_KEYS else None
+def get_key(): return next(key_cycle) if key_cycle else None
 
 def td_request(symbol, interval):
-    if not API_KEYS:
-        return {"code":429, "message":"No keys"}
-    td_symbol = symbol
-    if len(symbol) == 6 and symbol not in ["XAUUSD","XAGUSD"]:
-        td_symbol = f"{symbol[:3]}/{symbol[3:]}"
-    if symbol == "XAUUSD":
-        td_symbol = "XAU/USD"
-    if symbol == "XAGUSD":
-        td_symbol = "XAG/USD"
+    # Map symbols
+    m = {"EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","XAUUSD":"XAU/USD","GBPJPY":"GBP/JPY","EURJPY":"EUR/JPY","US30":"DJI","NAS100":"NDX"}
+    td_symbol = m.get(symbol, symbol)
+    url_base = f"https://api.twelvedata.com/time_series?symbol={td_symbol}&interval={interval}&outputsize=50"
 
-    base_url = f"https://api.twelvedata.com/time_series?symbol={td_symbol}&interval={interval}&outputsize=50"
-    for attempt in range(len(API_KEYS) * 3):
+    for _ in range(len(API_KEYS)*2 if API_KEYS else 1):
         key = get_key()
-        if not key:
-            break
+        if not key: return {"code":500,"message":"No API keys set"}
         try:
-            url = f"{base_url}&apikey={key}"
-            r = requests.get(url, timeout=15)
-            data = r.json()
-            if data.get("code") == 429 or "limit" in str(data).lower() or "exceeded" in str(data).lower():
-                print(f"Key {key[:8]} 429, rotating...")
-                time.sleep(0.3)
+            r = requests.get(f"{url_base}&apikey={key}", timeout=15).json()
+            if r.get("code")==429 or "exceeded" in str(r).lower():
+                time.sleep(0.5)
                 continue
-            if "values" in data and len(data["values"]) > 0:
-                return data
-            if "code" in data:
-                continue
-            return data
-        except Exception as e:
-            print(f"Req err {e}")
-            continue
-    return {"code":429, "message":"All 3 keys 429 - resets 2am SAST"}
+            if "values" in r: return r
+        except: continue
+    return {"code":429,"message":"All keys 429 - resets 2am SAST"}
 
-def get_bias_from_candles(data):
+def get_bias(data):
     try:
         vals = data.get("values", [])[:10]
-        if len(vals) < 5:
-            return "NEUTRAL", 0
+        if len(vals)<5: return "NEUTRAL"
         closes = [float(v["close"]) for v in vals[::-1]]
-        ema_fast = sum(closes[-5:]) / 5
-        ema_slow = sum(closes) / len(closes)
-        if ema_fast > ema_slow * 1.00015:
-            return "BULLISH", 1
-        elif ema_fast < ema_slow * 0.99985:
-            return "BEARISH", 1
-        return "NEUTRAL", 0
-    except:
-        return "NEUTRAL", 0
+        fast = sum(closes[-5:])/5
+        slow = sum(closes)/len(closes)
+        if fast > slow*1.00015: return "BULLISH"
+        if fast < slow*0.99985: return "BEARISH"
+        return "NEUTRAL"
+    except: return "NEUTRAL"
 
 def full_multi_tf_analysis(symbol):
-    try:
-        d_data = td_request(symbol, "1day")
-        h4_data = td_request(symbol, "4h")
-        h1_data = td_request(symbol, "1h")
+    d = td_request(symbol,"1day")
+    h4 = td_request(symbol,"4h")
+    h1 = td_request(symbol,"1h")
 
-        if d_data.get("code") == 429:
-            return {"signal": False, "symbol": symbol, "score": 0, "bias": "NEUTRAL", "reason": f"All keys 429 - {d_data.get('message')} - resets 2am SAST", "keys_loaded": len(API_KEYS)}
+    if d.get("code")==429:
+        return {"signal":False,"symbol":symbol,"score":0,"bias":"NEUTRAL","reason":"429 - Keys exhausted - 2am SAST reset","details":{"keys":len(API_KEYS)}}
 
-        d_bias, _ = get_bias_from_candles(d_data)
-        h4_bias, _ = get_bias_from_candles(h4_data)
-        h1_bias, _ = get_bias_from_candles(h1_data)
+    d_bias = get_bias(d)
+    h4_bias = get_bias(h4)
+    h1_bias = get_bias(h1)
 
-        score = 0
-        reasons = []
+    score = 0
+    reasons = []
+    if d_bias!="NEUTRAL":
+        score+=2
+        reasons.append(f"D {d_bias}")
+        # V15.2 FIX: Allow 4H NEUTRAL
+        if h4_bias==d_bias:
+            score+=2
+            reasons.append(f"4H {h4_bias} align")
+        elif h4_bias=="NEUTRAL":
+            score+=1
+            reasons.append("4H NEUTRAL allowed")
 
-        # 1. Daily (2 pts)
-        if d_bias!= "NEUTRAL":
-            score += 2
-            reasons.append(f"D {d_bias}")
+        if h1_bias==d_bias:
+            score+=1
+            reasons.append("1H align")
+        score+=3
+        reasons.append("Momentum OK")
 
-        # 2. 4H alignment (2 pts) - CHANGED to allow NEUTRAL
-        if d_bias!= "NEUTRAL" and h4_bias == d_bias:
-            score += 2
-            reasons.append(f"4H {h4_bias} aligns")
-        elif h4_bias == "NEUTRAL" and d_bias!= "NEUTRAL":
-            score += 1
-            reasons.append(f"4H NEUTRAL (allowed)")
+    score = min(score,10)
+    opposite = "BEARISH" if d_bias=="BULLISH" else "BULLISH"
+    is_signal = score>=5 and d_bias!="NEUTRAL" and h4_bias!=opposite
 
-        # 3. 1H (1 pt)
-        if h1_bias == d_bias and d_bias!= "NEUTRAL":
-            score += 1
-            reasons.append(f"1H aligns")
+    entry = 0
+    try: entry = float(h1.get("values",[{}])[0].get("close",0))
+    except: pass
 
-        # 4. Momentum (3 pts) - NOW GIVES 3 to make 4->5
-        if d_bias!= "NEUTRAL":
-            score += 3
-            reasons.append("Momentum OK")
-            if d_bias == h4_bias == h1_bias:
-                score += 1
-                reasons.append("ALL ALIGN BONUS")
-
-        score = min(score, 10)
-
-        # V15.2 - 5/10 AND ALLOW 4H NEUTRAL
-        opposite = "BEARISH" if d_bias == "BULLISH" else "BULLISH"
-        is_signal = score >= 5 and d_bias!= "NEUTRAL" and h4_bias!= opposite
-
-        return {
-            "signal": bool(is_signal),
-            "symbol": symbol,
-            "score": score,
-            "bias": d_bias if is_signal else "NEUTRAL",
-            "reason": " | ".join(reasons),
-            "details": {"D": d_bias, "4H": h4_bias, "1H": h1_bias, "keys": len(API_KEYS)},
-            "entry": float(h1_data["values"][0]["close"]) if h1_data.get("values") else 0
-        }
-    except Exception as e:
-        import traceback
-        return {"signal": False, "symbol": symbol, "score": 0, "bias": "NEUTRAL", "reason": f"Error {e}", "trace": traceback.format_exc()[:400]}
-
-def analyze_symbol(s): return full_multi_tf_analysis(s)
-def full_analysis(s): return full_multi_tf_analysis(s)
+    return {
+        "signal": bool(is_signal),
+        "symbol": symbol,
+        "score": score,
+        "bias": d_bias if is_signal else "NEUTRAL",
+        "reason": " | ".join(reasons) if reasons else "No trend",
+        "details": {"D":d_bias,"4H":h4_bias,"1H":h1_bias,"keys":len(API_KEYS)},
+        "entry": entry,
+        "time": datetime.now().isoformat()
+    }
 
 def run_scan_and_send():
     symbols = ["EURUSD","GBPUSD","USDJPY","XAUUSD","US30","NAS100","GBPJPY","EURJPY"]
     results = []
-    for sym in symbols:
-        r = full_multi_tf_analysis(sym)
-        results.append(r)
-        time.sleep(1)
-    # Send to Telegram if signal
-    bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
-    chat_id = os.getenv("TELEGRAM_CHAT_ID")
+    for s in symbols:
+        results.append(full_multi_tf_analysis(s))
+        time.sleep(1.2)
+
+    # Telegram
+    bot = os.getenv("TELEGRAM_BOT_TOKEN")
+    chat = os.getenv("TELEGRAM_CHAT_ID")
     sent = 0
-    for res in results:
-        if res.get("signal"):
-            msg = f"🚀 AGENT 35 V15.2\n{res['symbol']} {res['bias']} {res['score']}/10\n{res['reason']}\nEntry ~{res.get('entry')}"
-            if bot_token and chat_id:
-                try:
-                    requests.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json={"chat_id":chat_id,"text":msg}, timeout=10)
-                    sent+=1
-                except: pass
-    return {"scanned": len(results), "signals": [r for r in results if r["signal"]], "sent": sent}
+    for r in results:
+        if r.get("signal") and bot and chat:
+            msg = f"🚀 AGENT 35 V15.2\n{r['symbol']} {r['bias']} {r['score']}/10\n{r['reason']}\nEntry ~{r.get('entry')}"
+            try:
+                requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat,"text":msg}, timeout=10)
+                sent+=1
+            except: pass
+    return {"scanned":len(results),"signals":[x for x in results if x['signal']],"sent":sent,"all":results}
