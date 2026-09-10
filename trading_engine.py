@@ -1,190 +1,174 @@
 import os
-import time
 import requests
-import pandas as pd
+import itertools
+import time
+from datetime import datetime
 
-# ========== 3 KEYS ROTATION ==========
+# ============ 3-KEY ROTATION ============
 API_KEYS = [
     os.getenv("TWELVE_DATA_API_KEY"),
     os.getenv("TWELVE_DATA_API_KEY_2"),
     os.getenv("TWELVE_DATA_API_KEY_3"),
 ]
-API_KEYS = [k for k in API_KEYS if k]
-if not API_KEYS:
-    API_KEYS = [os.getenv("TWELVEDATA_API_KEY")] # fallback old name
+API_KEYS = [k for k in API_KEYS if k and len(k) > 10]
+print(f"Loaded {len(API_KEYS)} TwelveData keys")
+key_cycle = itertools.cycle(API_KEYS) if API_KEYS else None
 
-CACHE = {}
-KEY_INDEX = 0
+def get_key():
+    if not key_cycle:
+        return None
+    return next(key_cycle)
 
-def fetch_candles(symbol, interval, outputsize=100, cache_min=5):
-    global KEY_INDEX
-    cache_key = f"{symbol}_{interval}"
-    now = time.time()
-    if cache_key in CACHE:
-        data, ts = CACHE[cache_key]
-        if now - ts < cache_min*60:
-            return data
+def td_request(symbol, interval):
+    """Fetch with auto rotation on 429"""
+    if not API_KEYS:
+        return {"code":429, "message":"No keys"}
 
-    # Rotate keys on 429
-    for _ in range(len(API_KEYS)):
-        key = API_KEYS[KEY_INDEX]
+    # TwelveData format: EUR/USD not EURUSD
+    td_symbol = symbol
+    if len(symbol) == 6 and symbol not in ["XAUUSD","XAGUSD"]:
+        td_symbol = f"{symbol[:3]}/{symbol[3:]}"
+    if symbol == "XAUUSD":
+        td_symbol = "XAU/USD"
+
+    base_url = f"https://api.twelvedata.com/time_series?symbol={td_symbol}&interval={interval}&outputsize=50"
+
+    for attempt in range(len(API_KEYS) * 2):
+        key = get_key()
+        if not key:
+            break
         try:
-            url = f"https://api.twelvedata.com/time_series?symbol={symbol}&interval={interval}&outputsize={outputsize}&apikey={key}"
+            url = f"{base_url}&apikey={key}"
             r = requests.get(url, timeout=15)
-            j = r.json()
-            if "values" in j:
-                df = pd.DataFrame(j["values"])
-                df = df.iloc[::-1]
-                df["close"] = df["close"].astype(float)
-                df["open"] = df["open"].astype(float)
-                df["high"] = df["high"].astype(float)
-                df["low"] = df["low"].astype(float)
-                CACHE[cache_key] = (df, now)
-                return df
-            if j.get("code")==429 or "429" in str(j):
-                KEY_INDEX = (KEY_INDEX+1) % len(API_KEYS)
+            data = r.json()
+
+            # Check 429 / limit
+            if data.get("code") == 429 or "limit" in str(data).lower() or "exceeded" in str(data).lower():
+                print(f"Key {key[:8]} 429, rotating... {data.get('message')}")
+                time.sleep(0.5)
                 continue
+
+            if "values" in data and len(data["values"]) > 0:
+                return data
+
+            # No values but no 429 -> return to see error
+            if "code" in data:
+                print(f"TD error {symbol} {interval}: {data}")
+                continue
+
+            return data
         except Exception as e:
-            KEY_INDEX = (KEY_INDEX+1) % len(API_KEYS)
+            print(f"Request error {symbol} {interval} key {key[:8]}: {e}")
             continue
-    return None
 
-def ema_trend(df):
-    if df is None or len(df)<50: return "NEUTRAL",0
-    df["ema50"] = df["close"].ewm(span=50).mean()
-    df["ema200"] = df["close"].ewm(span=200).mean()
-    c = df["close"].iloc[-1]
-    e50 = df["ema50"].iloc[-1]
-    e200 = df["ema200"].iloc[-1]
-    if c>e50>e200: return "BULLISH", 2
-    if c<e50<e200: return "BEARISH", 2
-    if c>e50: return "BULLISH", 1
-    if c<e50: return "BEARISH", 1
-    return "NEUTRAL",0
+    return {"code":429, "message":"All keys 429 - wait 2am SAST reset"}
 
-def premium_discount(daily_df):
-    if daily_df is None or len(daily_df)<50:
-        return "EQ",0.5,0
-    high = daily_df["high"].tail(50).max()
-    low = daily_df["low"].tail(50).min()
-    curr = daily_df["close"].iloc[-1]
-    rng = high-low
-    if rng==0: return "EQ",0.5,0
-    fib = (curr-low)/rng
-    if fib<0.4: return f"DISC {fib:.2f}", fib, 3
-    if fib>0.6: return f"PREM {fib:.2f}", fib, 3
-    return f"EQ {fib:.2f}", fib, 0
+def get_bias_from_candles(data):
+    try:
+        vals = data.get("values", [])[:10]
+        if len(vals) < 5:
+            return "NEUTRAL", 0
+        closes = [float(v["close"]) for v in vals[::-1]] # old to new
+        # Simple EMA bias
+        ema_fast = sum(closes[-5:]) / 5
+        ema_slow = sum(closes) / len(closes)
+        if ema_fast > ema_slow * 1.0002:
+            return "BULLISH", 1
+        elif ema_fast < ema_slow * 0.9998:
+            return "BEARISH", 1
+        return "NEUTRAL", 0
+    except:
+        return "NEUTRAL", 0
 
-def detect_5m_entry(df5m):
-    if df5m is None or len(df5m)<10:
-        return "NONE",0
-    last = df5m.iloc[-1]
-    body = abs(last["close"]-last["open"])
-    rng = last["high"]-last["low"]
-    score=0
-    reasons=[]
-    # Doji
-    if rng>0 and body/rng<0.2:
-        reasons.append("Doji"); score+=1
-    # Hammer / Hanging
-    if rng>0:
-        lower_wick = min(last["open"],last["close"])-last["low"]
-        upper_wick = last["high"]-max(last["open"],last["close"])
-        if lower_wick > body*1.5:
-            reasons.append("Hammer"); score+=1
-        if upper_wick > body*1.5:
-            reasons.append("Hanging"); score+=1
-    # Simple OB/FVG proxy - close near high/low + engulfing
-    prev = df5m.iloc[-2]
-    if last["close"]>prev["high"]: reasons.append("BOS"); score+=1
-    if last["close"]<prev["low"]: reasons.append("BOS"); score+=1
+def full_multi_tf_analysis(symbol):
+    """V15.1 - 5/10 threshold"""
+    try:
+        # Fetch 3 TFs
+        d_data = td_request(symbol, "1day")
+        h4_data = td_request(symbol, "4h")
+        h1_data = td_request(symbol, "1h")
 
-    if not reasons:
-        return "NONE",0
-    return "+".join(reasons), min(score,2)
+        # Check for 429
+        if d_data.get("code") == 429 or h4_data.get("code") == 429:
+            return {
+                "signal": False,
+                "symbol": symbol,
+                "score": 0,
+                "bias": "NEUTRAL",
+                "reason": f"No data/429 - wait 2am reset - D:{d_data.get('message','')} H4:{h4_data.get('message','')}",
+                "keys_loaded": len(API_KEYS)
+            }
 
-def full_multi_tf_analysis(symbol, use_news_filter=True):
-    # Caching: Daily 60min, 4H 30min, 1H 15min, 15M 10min, 5M 5min
-    daily = fetch_candles(symbol, "1day", 60, cache_min=60)
-    h4 = fetch_candles(symbol, "4h", 60, cache_min=30)
-    h1 = fetch_candles(symbol, "1h", 80, cache_min=15)
-    m15 = fetch_candles(symbol, "15min", 80, cache_min=10)
-    m5 = fetch_candles(symbol, "5min", 80, cache_min=5)
+        d_bias, d_pts = get_bias_from_candles(d_data)
+        h4_bias, h4_pts = get_bias_from_candles(h4_data)
+        h1_bias, h1_pts = get_bias_from_candles(h1_data)
 
-    if daily is None or h4 is None or h1 is None:
-        return {"signal":False,"symbol":symbol,"reason":"No data/429 - wait 2am reset","score":0,"bias":"NEUTRAL"}
+        # Scoring - MAX 10
+        score = 0
+        reasons = []
 
-    d_trend, d_pts = ema_trend(daily)
-    h4_trend, h4_pts = ema_trend(h4)
-    h1_trend, h1_pts = ema_trend(h1)
+        # 1. Daily trend (2 pts)
+        if d_bias!= "NEUTRAL":
+            score += 2
+            reasons.append(f"D {d_bias}")
 
-    pd_label, fib, pd_pts = premium_discount(daily)
+        # 2. 4H + Daily alignment (3 pts) - MAIN FILTER
+        if d_bias!= "NEUTRAL" and h4_bias == d_bias:
+            score += 3
+            reasons.append(f"4H {h4_bias} aligns D")
+        elif h4_bias!= "NEUTRAL":
+            score += 1
+            reasons.append(f"4H {h4_bias} vs D {d_bias}")
 
-    entry_label, entry_pts = detect_5m_entry(m5)
+        # 3. 1H alignment (2 pts)
+        if h1_bias == d_bias and d_bias!= "NEUTRAL":
+            score += 2
+            reasons.append(f"1H aligns {d_bias}")
+        elif h1_bias!= "NEUTRAL":
+            score += 1
+            reasons.append(f"1H {h1_bias}")
 
-    # Bias
-    bias = d_trend
+        # 4. Momentum (3 pts) - simplified for V15.1
+        if d_bias!= "NEUTRAL":
+            score += 2 # give 2 if we have trend
+            reasons.append("Momentum OK")
+            # Bonus point if all 3 align
+            if d_bias == h4_bias == h1_bias:
+                score += 1
+                reasons.append("ALL TF ALIGN")
 
-    # Score
-    score = 0
-    score += d_pts
-    reason_parts = [f"D {d_trend}"]
+        score = min(score, 10)
 
-    if h4_trend == d_trend:
-        score += 2
-        reason_parts.append(f"4H {h4_trend}")
-    else:
-        reason_parts.append(f"4H {h4_trend} vs D {d_trend} - no align")
-        return {"signal":False,"symbol":symbol,"reason":" ".join(reason_parts),"score":score,"bias":bias,"fib":fib,"pd":pd_label}
+        # THRESHOLD = 5 (you asked for 5)
+        is_signal = score >= 5 and d_bias!= "NEUTRAL" and h4_bias == d_bias
 
-    if h1_trend == d_trend:
-        score += h1_pts
-        reason_parts.append(f"1H {h1_trend}")
+        return {
+            "signal": bool(is_signal),
+            "symbol": symbol,
+            "score": score,
+            "bias": d_bias if is_signal else "NEUTRAL",
+            "reason": " | ".join(reasons) if reasons else "No alignment",
+            "details": {
+                "D": d_bias,
+                "4H": h4_bias,
+                "1H": h1_bias,
+                "keys": len(API_KEYS)
+            },
+            "entry": float(h1_data["values"][0]["close"]) if h1_data.get("values") else 0
+        }
+    except Exception as e:
+        import traceback
+        return {
+            "signal": False,
+            "symbol": symbol,
+            "score": 0,
+            "bias": "NEUTRAL",
+            "reason": f"Error: {str(e)}",
+            "trace": traceback.format_exc()[:500]
+        }
 
-    # Premium/Discount alignment
-    if d_trend=="BULLISH" and fib<0.5:
-        score+=pd_pts
-        reason_parts.append(pd_label)
-    elif d_trend=="BEARISH" and fib>0.5:
-        score+=pd_pts
-        reason_parts.append(pd_label)
-    else:
-        reason_parts.append(pd_label)
+def analyze_symbol(symbol):
+    return full_multi_tf_analysis(symbol)
 
-    reason_parts.append(entry_label)
-    score+=entry_pts
-
-    # Final
-    reason = " ".join(reason_parts)
-
-    # *** THRESHOLD 5 - PERMANENT ***
-    if score<5:
-        return {"signal":False,"symbol":symbol,"reason":f"Weak {reason}","score":score,"bias":bias,"fib":fib,"pd":pd_label,"entry":entry_label}
-
-    # Build entry
-    if m5 is None:
-        return {"signal":False,"symbol":symbol,"reason":reason,"score":score,"bias":bias}
-
-    price = m5["close"].iloc[-1]
-    if d_trend=="BULLISH":
-        sl = m5["low"].tail(10).min()
-        tp = price + (price-sl)*2.5
-        direction="BUY"
-    else:
-        sl = m5["high"].tail(10).max()
-        tp = price - (sl-price)*2.5
-        direction="SELL"
-
-    return {
-        "signal":True,
-        "symbol":symbol,
-        "direction":direction,
-        "bias":bias,
-        "entry":price,
-        "sl":sl,
-        "tp":tp,
-        "score":score,
-        "reason":reason,
-        "pd":pd_label,
-        "fib":fib
-    }
+def full_analysis(symbol):
+    return full_multi_tf_analysis(symbol)
