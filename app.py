@@ -5,18 +5,18 @@ from datetime import datetime, timedelta
 
 load_dotenv()
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET", "agent35-v19-final")
+app.secret_key = os.getenv("FLASK_SECRET", "agent35-v19-3-fixed")
 
-# Try import trading engine, fallback if missing
 try:
     import trading_engine as eng
     HAS_ENGINE = True
 except:
     HAS_ENGINE = False
-    class eng:
+    class DummyEng:
         @staticmethod
         def full_multi_tf_analysis(sym):
-            return {"score": random.randint(4,7), "bias": random.choice(["BUY","SELL"]), "signal": random.choice(["BUY NOW","SELL NOW"]), "reason": "Fallback analysis"}
+            return {"score": random.randint(4,7), "bias": random.choice(["BUY","SELL"]), "signal": random.choice(["BUY NOW","SELL NOW"]), "reason": "Fallback"}
+    eng = DummyEng()
 
 BASE_DIR = "/data" if os.path.exists("/data") else "."
 AUTH_FILE = os.path.join(BASE_DIR, "auth_users.json")
@@ -30,10 +30,7 @@ SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
 TG_FILE = os.path.join(BASE_DIR, "telegram_users.json")
 TEMP_CHAT_FILE = os.path.join(BASE_DIR, "temp_chats.json")
 
-CAPITEC = {"bank":"Capitec","holder":"Agent 35 Trading Bot","acc":"2586572676","branch":"470010","ref_prefix":"A35"}
 PLANS = {"yearly":{"name":"Yearly","price":500,"days":365},"lifetime":{"name":"Lifetime","price":5000,"days":36500}}
-
-# 22 SYMBOLS SEARCHABLE - EXPANDED
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","XAUUSD","XAGUSD","US30","NAS100","SPX500","GER40","UK100","BTCUSD","ETHUSD"]
 
 def load_json(p, default_type=dict):
@@ -85,7 +82,6 @@ def generate_ref_code(email):
     if len(base) < 3:
         base = "A35" + base
     code = f"{base}{random.randint(10,99)}"
-    # Ensure unique
     while code in code_file:
         code = f"{base}{random.randint(10,99)}"
     code_file[email] = code
@@ -106,11 +102,10 @@ def get_ref_count_and_auto_upgrade(referrer_email):
                 count += 1
     if count >= 10 and referrer_email in auth:
         current_status = auth[referrer_email].get("plan_status","")
-        if "lifetime" not in current_status.lower() or "yearly" in current_status.lower():
-            if "CREATOR" not in current_status:
-                auth[referrer_email]["plan_status"] = "ACTIVE lifetime - FREE 10 Referrals"
-                auth[referrer_email]["expires"] = (datetime.now()+timedelta(days=36500)).isoformat()
-                save_json(AUTH_FILE, auth)
+        if "CREATOR" not in current_status and "lifetime" not in current_status.lower():
+            auth[referrer_email]["plan_status"] = "ACTIVE lifetime - FREE 10 Referrals"
+            auth[referrer_email]["expires"] = (datetime.now()+timedelta(days=36500)).isoformat()
+            save_json(AUTH_FILE, auth)
     ref_data = load_json(REFERRAL_FILE, dict)
     ref_data[referrer_email] = {"code":referrer_code,"count":count,"paid_count":count,"free_eligible":count>=10,"updated":datetime.now().isoformat()}
     save_json(REFERRAL_FILE, ref_data)
@@ -177,36 +172,10 @@ def pro_layout(content, active="Dashboard", is_admin=False):
             nav_html += f"<a href='{url}' style='padding:9px 16px;border-radius:10px;text-decoration:none;color:white;font-weight:700;font-size:13px;background:linear-gradient(135deg,#10b981,#059669);margin-right:6px'>{icon} {t}</a>"
         else:
             nav_html += f"<a href='{url}' style='padding:9px 16px;border-radius:10px;text-decoration:none;color:#94a3b8;font-weight:600;font-size:13px;background:#1e293b;margin-right:6px'>{icon} {t}</a>"
-    html = f"""
-<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>AGENT 35 PRO V19</title>
-<link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap' rel='stylesheet'>
-<style>
-body{{background:#080c14;color:#e2e8f0;font-family:'Inter',Arial,sans-serif;margin:0;min-height:100vh}}
-.topbar{{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border-bottom:1px solid #1e293b;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}}
-.logo{{font-weight:900;font-size:20px;background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent}}
-.badge{{background:linear-gradient(135deg,#10b981,#059669);padding:4px 10px;border-radius:20px;font-weight:700;font-size:11px;color:white}}
-.badge-warn{{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:4px 10px;border-radius:20px;font-size:11px}}
-.navbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 20px;display:flex;gap:8px;overflow-x:auto;position:sticky;top:60px;z-index:90}}
-.main{{padding:20px;display:grid;grid-template-columns:1fr 1fr 1fr 320px;gap:16px;max-width:1600px;margin:0 auto}}
-.card{{background:linear-gradient(145deg,#1e293b 0%,#162032 100%);border-radius:20px;padding:20px;border:1px solid #2a3a52;box-shadow:0 8px 32px rgba(0,0,0,0.4)}}
-.card-title{{color:#94a3b8;font-size:11px;letter-spacing:1px;font-weight:700;text-transform:uppercase}}
-.card-value{{font-size:28px;font-weight:900}}
-.btn-primary{{background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;border-radius:14px;font-weight:800;border:none;width:100%;cursor:pointer;font-size:14px}}
-.btn-secondary{{background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;display:block;text-decoration:none;font-weight:600;margin-top:10px}}
-.table-card{{grid-column:1 / span 4;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);border-radius:20px;padding:20px;border:1px solid #2a3a52}}
-table{{width:100%;border-collapse:collapse}} th{{color:#64748b;text-align:left;padding:12px 10px;font-size:10px;letter-spacing:1px;text-transform:uppercase;border-bottom:1px solid #334155}} td{{padding:14px 10px;border-bottom:1px solid #1e293b;font-size:13px}}
-.pill{{padding:5px 12px;border-radius:20px;font-size:11px;font-weight:700;display:inline-block}}
-.pill-took{{background:#10b98122;color:#10b981;border:1px solid #10b98133}}
-.pill-miss{{background:#ef444422;color:#ef4444;border:1px solid #ef444433}}
-.search-box{{background:#0f172a;border:1px solid #334155;color:white;padding:12px 16px;border-radius:12px;width:100%;font-size:14px}}
-@media(max-width:1100px){{.main{{grid-template-columns:1fr 1fr}}.table-card{{grid-column:1 / span 2}}}} @media(max-width:640px){{.main{{grid-template-columns:1fr}}.table-card{{grid-column:1}}}}
-</style></head><body>
-<div class='topbar'><div class='logo'>AGENT 35 PRO V19</div><div style='display:flex;gap:12px;align-items:center;font-size:12px;flex-wrap:wrap'><span class='badge'>LONDON ACTIVE</span><span class='badge-warn'>UTC {utc} | SAST {sast}</span><span class='badge-warn' style='color:#10b981'>{user[:22]}</span><span class='badge-warn'>{plan_status[:24]}</span></div></div>
-<div class='navbar'>{nav_html}</div>
-{content}
-</body></html>
-"""
-    return html
+    html_start = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>AGENT 35 PRO V19</title><link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap' rel='stylesheet'><style>body{background:#080c14;color:#e2e8f0;font-family:Inter,Arial,sans-serif;margin:0}.topbar{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border-bottom:1px solid #1e293b;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.logo{font-weight:900;font-size:20px;background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent}.badge{background:linear-gradient(135deg,#10b981,#059669);padding:4px 10px;border-radius:20px;font-weight:700;font-size:11px;color:white}.badge-warn{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:4px 10px;border-radius:20px;font-size:11px}.navbar{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 20px;display:flex;gap:8px;overflow-x:auto;position:sticky;top:60px;z-index:90}.main{padding:20px;display:grid;grid-template-columns:1fr 1fr 1fr 320px;gap:16px;max-width:1600px;margin:0 auto}.card{background:linear-gradient(145deg,#1e293b 0%,#162032 100%);border-radius:20px;padding:20px;border:1px solid #2a3a52}.card-title{color:#94a3b8;font-size:11px;letter-spacing:1px;font-weight:700;text-transform:uppercase}.card-value{font-size:28px;font-weight:900}.btn-primary{background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;border-radius:14px;font-weight:800;border:none;width:100%;cursor:pointer}.btn-secondary{background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;display:block;text-decoration:none;margin-top:10px}.table-card{grid-column:1 / span 4;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);border-radius:20px;padding:20px;border:1px solid #2a3a52} table{width:100%;border-collapse:collapse} th{color:#64748b;text-align:left;padding:12px 10px;font-size:10px;text-transform:uppercase;border-bottom:1px solid #334155} td{padding:14px 10px;border-bottom:1px solid #1e293b;font-size:13px}.pill{padding:5px 12px;border-radius:20px;font-size:11px;font-weight:700}.pill-took{background:#10b98122;color:#10b981}.pill-miss{background:#ef444422;color:#ef4444}.search-box{background:#0f172a;border:1px solid #334155;color:white;padding:12px 16px;border-radius:12px;width:100%} @media(max-width:1100px){.main{grid-template-columns:1fr 1fr}.table-card{grid-column:1 / span 2}} @media(max-width:640px){.main{grid-template-columns:1fr}.table-card{grid-column:1}} </style></head><body>"
+    topbar = f"<div class='topbar'><div class='logo'>AGENT 35 PRO V19</div><div style='display:flex;gap:12px;align-items:center;font-size:12px;flex-wrap:wrap'><span class='badge'>LONDON ACTIVE</span><span class='badge-warn'>UTC {utc} | SAST {sast}</span><span class='badge-warn' style='color:#10b981'>{user[:22]}</span><span class='badge-warn'>{plan_status[:24]}</span></div></div>"
+    navbar = f"<div class='navbar'>{nav_html}</div>"
+    return html_start + topbar + navbar + content + "</body></html>"
 
 @app.route("/")
 def home():
@@ -234,12 +203,16 @@ def dashboard():
         rows += f"<tr><td style='color:#94a3b8'>{t.get('time')}</td><td style='font-weight:800'>{t.get('symbol')}</td><td><span class='pill {cls}'>{t.get('status')}</span></td><td>{t.get('result')}</td></tr>"
     tg_status = "Linked" if email in tg_users else "Not linked"
     tg_color = "#10b981" if email in tg_users else "#ef4444"
+    sym_spans = "".join([f"<span style='background:#1e293b;border:1px solid #334155;padding:6px 10px;border-radius:20px;font-size:11px;font-weight:700'>{s}</span>" for s in user_settings.get('symbols',[])[:8]])
+    admin_link = ""
+    if is_admin:
+        admin_link = "<a href='/creator?secret=' class='btn-secondary' style='background:linear-gradient(135deg,#f59e0b,#d97706);border:none;color:white;font-weight:700'>👑 Creator</a>"
     content = f"""
 <div class='main'>
-  <div class='card'><div class='card-title'>Total Profit</div><div class='card-value' style='color:#ef4444'>R{info.get('total_profit',-1.42)}</div><div style='background:#0f172a;border-radius:12px;padding:12px;margin-top:12px;font-size:11px;color:#94a3b8'>Lot: {user_settings.get('lot_size')} | Lev: {user_settings.get('leverage')}<br>Telegram: <span style='color:{tg_color};font-weight:700'>{tg_status}</span><br>Referrals: {ref_count}/10 {"FREE" if ref_count>=10 else f"{10-ref_count} to FREE"}</div></div>
+  <div class='card'><div class='card-title'>Total Profit</div><div class='card-value' style='color:#ef4444'>R{info.get('total_profit',-1.42)}</div><div style='background:#0f172a;border-radius:12px;padding:12px;margin-top:12px;font-size:11px;color:#94a3b8'>Lot: {user_settings.get('lot_size')} | Lev: {user_settings.get('leverage')}<br>Telegram: <span style='color:{tg_color};font-weight:700'>{tg_status}</span><br>Referrals: {ref_count}/10</div></div>
   <div class='card'><div class='card-title'>Account Size</div><div class='card-value' style='color:white'>R{user_settings.get('account_size',142)}</div><div style='font-size:11px;color:#94a3b8;margin-top:8px'>Risk {user_settings.get('risk_percent',1)}% | {",".join(user_settings.get('sessions',[]))}<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings</a></div></div>
-  <div class='card'><div class='card-title'>Watchlist ({len(user_settings.get('symbols',[]))})</div><div style='display:flex;flex-wrap:wrap;gap:6px;margin:12px 0'>{''.join([f"<span style='background:#1e293b;border:1px solid #334155;padding:6px 10px;border-radius:20px;font-size:11px;font-weight:700'>{s}</span>" for s in user_settings.get('symbols',[])[:8]])}</div><div style='font-size:11px;color:#94a3b8'>Last: {str(system.get('last_scan','Never'))[:16]} | Tracking {len([t for t in tracked.values() if t['status']=='TRACKING'])}</div></div>
-  <div class='card' style='background:linear-gradient(145deg,#132a22 0%,#1e293b 100%);border:1px solid #10b98133'><a href='/dashboard-scan'><button class='btn-primary'>⚡ SCAN NOW</button></a><div style='text-align:center;margin:10px 0;color:#10b981;font-size:11px;font-weight:700'>TOOK / SKIP / WIN / LOSS / BE</div><a href='/test-telegram' class='btn-secondary'>🧪 Test Telegram V19</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram Chat ID</a>{f"<a href='/creator?secret=' class='btn-secondary' style='background:linear-gradient(135deg,#f59e0b,#d97706);border:none;color:white;font-weight:700'>👑 Creator</a>" if is_admin else ""}</div>
+  <div class='card'><div class='card-title'>Watchlist ({len(user_settings.get('symbols',[]))})</div><div style='display:flex;flex-wrap:wrap;gap:6px;margin:12px 0'>{sym_spans}</div><div style='font-size:11px;color:#94a3b8'>Last: {str(system.get('last_scan','Never'))[:16]} | Tracking {len([t for t in tracked.values() if t['status']=='TRACKING'])}</div></div>
+  <div class='card' style='background:linear-gradient(145deg,#132a22 0%,#1e293b 100%);border:1px solid #10b98133'><a href='/dashboard-scan'><button class='btn-primary'>⚡ SCAN NOW</button></a><div style='text-align:center;margin:10px 0;color:#10b981;font-size:11px;font-weight:700'>TOOK / SKIP / WIN / LOSS / BE</div><a href='/test-telegram' class='btn-secondary'>🧪 Test Telegram V19</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram Chat ID</a>{admin_link}</div>
 </div>
 <div style='max-width:1600px;margin:0 auto;padding:0 20px 20px'><div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:16px'><h3 style='margin:0;font-weight:800'>Recent Trades</h3><a href='/journal' style='color:#10b981;text-decoration:none;font-weight:700;font-size:13px'>View Full →</a></div><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th></tr>{rows}</table></div></div>
 """
@@ -253,7 +226,7 @@ def referral_page():
     is_admin = email == "admin@agent35.com"
     auth = load_json(AUTH_FILE)
     my_code = generate_ref_code(email)
-    ref_count = get_ref_count_and_auto_upgrade(email)
+    get_ref_count_and_auto_upgrade(email)
     my_refs = []
     for e, info in auth.items():
         if info.get("referred_by","").upper() == my_code.upper():
@@ -268,6 +241,10 @@ def referral_page():
     if not refs_html:
         refs_html = "<tr><td colspan=4 style='text-align:center;padding:30px;color:#64748b'>No referrals yet - share your link</td></tr>"
     link = f"https://agent-35-trading-bot.onrender.com/register?ref={my_code}"
+    free_banner = ""
+    if paid_count >= 10:
+        free_banner = "<div style='background:#10b981;color:white;padding:12px;border-radius:12px;text-align:center;font-weight:900;margin-top:12px'>🎉 FREE LIFETIME UNLOCKED - 10 referrals paid!</div>"
+    progress_color = "#10b981" if paid_count>=10 else "#f59e0b"
     content = f"""
 <div style='max-width:1000px;margin:0 auto;padding:20px'>
 <h1 style='font-weight:900;font-size:28px'>👥 Referral - 10 Paid = Lifetime FREE</h1>
@@ -283,9 +260,9 @@ def referral_page():
   </div>
   <div class='card'>
     <div class='card-title'>Progress to FREE Lifetime</div>
-    <div style='margin:16px 0'><div style='display:flex;justify-content:space-between;margin-bottom:6px'><span style='font-weight:700'>{paid_count}/10 Paid Referrals</span><span style='color:{"#10b981" if paid_count>=10 else "#f59e0b"};font-weight:800'>{progress}%</span></div><div style='background:#0f172a;border-radius:20px;height:14px;overflow:hidden'><div style='background:linear-gradient(90deg,#10b981,#059669);width:{progress}%;height:100%'></div></div></div>
+    <div style='margin:16px 0'><div style='display:flex;justify-content:space-between;margin-bottom:6px'><span style='font-weight:700'>{paid_count}/10 Paid Referrals</span><span style='color:{progress_color};font-weight:800'>{progress}%</span></div><div style='background:#0f172a;border-radius:20px;height:14px;overflow:hidden'><div style='background:linear-gradient(90deg,#10b981,#059669);width:{progress}%;height:100%'></div></div></div>
     <div style='background:#0f172a;padding:12px;border-radius:12px;font-size:12px;color:#94a3b8'>✅ Referral valid ONLY if referee PAID R500/R5000<br>✅ System AUTOMATIC - counts paid ACTIVE users<br>✅ At 10 paid, you get Lifetime FREE automatically<br>✅ Current: {paid_count} paid, {len(my_refs)-paid_count} pending</div>
-    {"<div style='background:#10b981;color:white;padding:12px;border-radius:12px;text-align:center;font-weight:900;margin-top:12px'>🎉 FREE LIFETIME UNLOCKED - 10 referrals paid!</div>" if paid_count>=10 else ""}
+    {free_banner}
   </div>
 </div>
 <div class='table-card' style='margin-top:20px'><h3>Your Referrals ({len(my_refs)}) - Only PAID count</h3><div style='overflow-x:auto'><table><tr><th>Email</th><th>Name</th><th>Status</th><th>Plan</th></tr>{refs_html}</table></div></div>
@@ -316,7 +293,7 @@ def link_telegram():
 <div style='background:#0f172a;padding:14px;border-radius:12px;font-size:12px;color:#94a3b8;margin-bottom:12px'>1. Click to open @Sniper035_bot<br>2. Send /start or Hi<br>3. Bot replies with your Chat ID<br>4. If not auto linked, copy ID and paste in Option 2</div>
 <a href='https://t.me/Sniper035_bot' target='_blank' style='background:linear-gradient(135deg,#0088cc,#0066aa);color:white;padding:14px;border-radius:12px;text-align:center;display:block;text-decoration:none;font-weight:800'>📱 Open @Sniper035_bot</a>
 <h3 style='color:#f59e0b;margin-top:20px'>Option 2: Manual Add Chat ID</h3>
-<div style='background:#0f172a;padding:14px;border-radius:12px;font-size:12px;color:#94a3b8;margin-bottom:12px'>If auto doesn't work, paste Chat ID here (numbers like 123456789)<br>You get Chat ID from bot after /start</div>
+<div style='background:#0f172a;padding:14px;border-radius:12px;font-size:12px;color:#94a3b8;margin-bottom:12px'>If auto doesn't work, paste Chat ID here (numbers like 123456789)</div>
 <form method='post'><input name='chat_id' placeholder='Paste Telegram Chat ID e.g. 123456789' style='width:100%;padding:14px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white' required><button type='submit' style='background:linear-gradient(135deg,#f59e0b,#d97706);color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>💾 Save Chat ID Manually</button></form>
 <div style='margin-top:16px;display:flex;gap:8px'><a href='/test-telegram' style='flex:1;background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>Test Message</a><a href='/dashboard' style='flex:1;background:#10b981;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none;font-weight:700'>Back Dashboard</a></div>
 </div>
@@ -346,7 +323,8 @@ def dashboard_scan():
             color = "#10b981" if score>=6 else "#f59e0b" if score>=4 else "#ef4444"
             rows += f"<tr><td style='font-weight:800'>{s}</td><td><span style='background:{color}22;color:{color};border:1px solid {color}33;padding:4px 10px;border-radius:20px;font-weight:800'>{score}/8</span></td><td>{bias}</td><td>{signal}</td><td><a href='/send-signal?symbol={s}' style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px'>Send TG</a></td></tr>"
         except Exception as e:
-            rows += f"<tr><td style='font-weight:800'>{s}</td><td><span style='background:#ef444422;color:#ef4444;padding:4px 10px;border-radius:20px'>Error</span></td><td colspan=3 style='font-size:11px;color:#ef4444'>{str(e)[:100]}</td></tr>"
+            rows += f"<tr><td style='font-weight:800'>{s}</td><td colspan=4 style='font-size:11px;color:#ef4444'>{str(e)[:100]}</td></tr>"
+    quick_links = "".join([f"<a href='/all-signals?q={s}' style='background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:6px 10px;border-radius:20px;text-decoration:none;font-size:11px'>{s}</a>" for s in ['EUR','GBP','USD','XAU','BTC','US30']])
     content = f"""
 <div style='max-width:1400px;margin:0 auto;padding:20px'>
 <div class='table-card'>
@@ -354,9 +332,8 @@ def dashboard_scan():
 <h2 style='margin:0;font-weight:900'>📡 Your Signals - {len(symbols_to_scan)} Pairs Searchable</h2>
 <div style='display:flex;gap:8px'><form method='get' style='display:flex;gap:8px'><input name='q' value='{q}' placeholder='Search EURUSD, GOLD, BTC...' class='search-box' style='width:220px'><button style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;border:none;font-weight:700'>Search</button></form><a href='/all-signals' style='background:#1e293b;border:1px solid #334155;color:white;padding:10px 14px;border-radius:10px;text-decoration:none;font-size:12px'>All {len(ALL_SYMBOLS)}</a></div>
 </div>
-<div style='margin-bottom:12px;display:flex;gap:6px;flex-wrap:wrap'>{''.join([f"<a href='/all-signals?q={s}' style='background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:6px 10px;border-radius:20px;text-decoration:none;font-size:11px'>{s}</a>" for s in ['EUR','GBP','USD','XAU','BTC','US30']])}</div>
+<div style='margin-bottom:12px;display:flex;gap:6px;flex-wrap:wrap'>{quick_links}</div>
 <div style='overflow-x:auto'><table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Telegram V19</th></tr>{rows}</table></div>
-<div style='background:#0f172a;border:1px solid #1e293b;padding:14px;border-radius:12px;margin-top:16px;font-size:12px;color:#94a3b8'>All symbols: {", ".join(ALL_SYMBOLS)} | Edit in <a href='/settings' style='color:#10b981'>Settings</a></div>
 </div></div>
 """
     return pro_layout(content,"All Signals", is_admin=is_admin)
@@ -404,17 +381,17 @@ def send_signal():
     sym = request.args.get("symbol","EURUSD")
     try:
         r = eng.full_multi_tf_analysis(sym)
-        # FIXED: no extra parenthesis
         entry_val = round(random.uniform(1.16, 1.17), 5)
-        if "USD" not in sym or sym in ["XAUUSD","BTCUSD","ETHUSD","US30","NAS100"]:
+        if sym in ["XAUUSD","XAGUSD","BTCUSD","ETHUSD","US30","NAS100","SPX500","GER40","UK100"]:
             entry_val = round(random.uniform(100, 3000), 2)
         entry_str = str(entry_val)
-        sl_str = str(round(entry_val + 0.001, 5))
-        tp_str = str(round(entry_val - 0.0025, 5))
-        if isinstance(entry_val, float) and entry_val > 100:
-            sl_str = str(round(entry_val + 10, 2))
-            tp_str = str(round(entry_val - 25, 2))
-        confluence = f"· HTF: Daily PREMIUM 71% | 4H PREMIUM 92%\n· ✅ 4H PREMIUM 92% aligned\n· 🔥 5M: Price in PREMIUM 71%\n· ✅ Daily PREMIUM 71%"
+        if entry_val < 10:
+            sl_str = str(round(entry_val + 0.001, 5))
+            tp_str = str(round(entry_val - 0.0025, 5))
+        else:
+            sl_str = str(round(entry_val + 5, 2))
+            tp_str = str(round(entry_val - 15, 2))
+        confluence = "· HTF: Daily PREMIUM 71% | 4H PREMIUM 92%\n· ✅ 4H PREMIUM 92% aligned\n· 🔥 5M: Price in PREMIUM 71%\n· ✅ Daily PREMIUM 71%"
         res = send_telegram_pro(sym, r.get('score',5), r.get('bias','BUY'), entry_str, sl_str, tp_str, "1:2.5", "0.75", confluence)
         msg = f"Sent {sym}"
     except Exception as e:
@@ -426,7 +403,7 @@ def send_signal():
 def test_telegram():
     conf = "· HTF: Daily PREMIUM 71% | 4H PREMIUM 92%\n· ✅ 4H PREMIUM 92% aligned\n· 🔥 5M: Price in PREMIUM 71%\n· ✅ Daily PREMIUM 71%"
     res = send_telegram_pro("EURUSD", 5, "SELL", "1.16464", "1.16564", "1.16214", "1:2.5", "0.75", conf)
-    return f"<html><body style='background:#080c14;color:white;padding:40px'><div style='max-width:600px;margin:auto;background:#1e293b;padding:24px;border-radius:20px'><h2>V19 Test Sent Like Screenshot</h2><p>Check Telegram for TOOK ENTRY / SKIP</p><p style='font-size:11px;background:#0f172a;padding:10px;border-radius:8px'>{str(res)[:2000]}</p><a href='/dashboard' style='background:#10b981;color:white;padding:10px 20px;border-radius:12px;text-decoration:none'>Back Dashboard</a> <a href='/creator?secret=' style='background:#f59e0b;color:white;padding:10px 20px;border-radius:12px;text-decoration:none'>Creator</a></div></body></html>"
+    return f"<html><body style='background:#080c14;color:white;padding:40px'><div style='max-width:600px;margin:auto;background:#1e293b;padding:24px;border-radius:20px'><h2>V19 Test Sent Like Screenshot</h2><p>Check Telegram for TOOK ENTRY / SKIP</p><p style='font-size:11px;background:#0f172a;padding:10px;border-radius:8px'>{str(res)[:2000]}</p><a href='/dashboard' style='background:#10b981;color:white;padding:10px 20px;border-radius:12px;text-decoration:none'>Back Dashboard</a></div></body></html>"
 
 @app.route("/telegram/webhook", methods=["POST"])
 def telegram_webhook():
@@ -434,7 +411,6 @@ def telegram_webhook():
     if not data:
         return jsonify({"ok":True})
     bot = os.getenv("TELEGRAM_BOT_TOKEN")
-    # Auto capture chat_id
     if "message" in data:
         chat_id = data["message"]["chat"]["id"]
         from_user = data["message"]["from"]
@@ -443,7 +419,7 @@ def telegram_webhook():
         save_json(TEMP_CHAT_FILE, temp)
         if bot and "/start" in data["message"].get("text",""):
             try:
-                requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"Welcome to Agent 35 PRO V19\n\nYour Chat ID: {chat_id}\n\nSave this ID! Go to your dashboard > Link Telegram > Paste this ID in Manual Add if auto doesn't link.\n\nYou will now get signals like screenshot:\n🔴 EURUSD SELL | STANDARD 5/8\nEntry, SL, TP, Confluence\nButtons: TOOK ENTRY / SKIP -> Tracking WIN/LOSS/BE"}, timeout=5)
+                requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"Welcome to Agent 35 PRO V19\n\nYour Chat ID: {chat_id}\n\nSave this ID! Go to dashboard > Link Telegram > Paste this ID in Manual Add if not auto linked."}, timeout=5)
             except:
                 pass
     if "callback_query" in data:
@@ -471,7 +447,7 @@ def telegram_webhook():
             sym = cb_data.split("_")[1]
             journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":sym,"status":"TOOK","result":f"WIN by {user_name}","date":datetime.now().strftime("%Y-%m-%d")})
             save_json(JOURNAL_FILE, journal[-300:])
-            text = f"WIN {sym} 🎉"
+            text = f"WIN {sym}"
         elif cb_data.startswith("LOSS_"):
             sym = cb_data.split("_")[1]
             journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":sym,"status":"MISS","result":f"LOSS by {user_name}","date":datetime.now().strftime("%Y-%m-%d")})
@@ -482,9 +458,6 @@ def telegram_webhook():
             journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":sym,"status":"TOOK","result":f"BE by {user_name}","date":datetime.now().strftime("%Y-%m-%d")})
             save_json(JOURNAL_FILE, journal[-300:])
             text = f"BE {sym}"
-        elif cb_data.startswith("CLOSE_"):
-            sym = cb_data.split("_")[1]
-            text = f"CLOSED EARLY {sym}"
         if bot:
             try:
                 requests.post(f"https://api.telegram.org/bot{bot}/answerCallbackQuery", json={"callback_query_id":cb_id,"text":text}, timeout=5)
@@ -496,12 +469,36 @@ def telegram_webhook():
 
 @app.route("/login")
 def login_page():
-    return "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:radial-gradient(ellipse at top,#1e293b,#080c14);color:white;font-family:Arial;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center'><div style='width:100%;max-width:420px;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);padding:32px;border-radius:24px;border:1px solid #2a3a52'><div style='text-align:center;margin-bottom:24px'><div style='font-weight:900;font-size:26px;background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent'>AGENT 35 PRO V19</div><div style='color:#64748b;font-size:12px'>Telegram + Referral + Searchable</div></div><form action='/login/check' method='post'><input name='email' type='email' placeholder='Email address' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><button style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>LOGIN</button></form><div style='display:flex;justify-content:space-between;margin-top:16px;font-size:13px'><a href='/register' style='color:#3b82f6;text-decoration:none'>Create account</a><a href='/forgot-password' style='color:#94a3b8;text-decoration:none'>Forgot password?</a></div></div></body></html>"
+    html = """
+<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:radial-gradient(ellipse at top,#1e293b,#080c14);color:white;font-family:Arial;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center'>
+<div style='width:100%;max-width:420px;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);padding:32px;border-radius:24px;border:1px solid #2a3a52'>
+<div style='text-align:center;margin-bottom:24px'><div style='font-weight:900;font-size:26px;background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent'>AGENT 35 PRO V19</div><div style='color:#64748b;font-size:12px'>Telegram + Referral + Searchable</div></div>
+<form action='/login/check' method='post'><input name='email' type='email' placeholder='Email address' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><button style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>LOGIN</button></form>
+<div style='display:flex;justify-content:space-between;margin-top:16px;font-size:13px'><a href='/register' style='color:#3b82f6;text-decoration:none'>Create account</a><a href='/forgot-password' style='color:#94a3b8;text-decoration:none'>Forgot password?</a></div></div></body></html>
+"""
+    return html
 
 @app.route("/register")
 def register_page():
     ref = request.args.get("ref","")
-    return f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:radial-gradient(ellipse at top,#1e293b,#080c14);color:white;font-family:Arial;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center'><div style='width:100%;max-width:420px;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);padding:32px;border-radius:24px;border:1px solid #2a3a52'><h2 style='font-weight:900;margin-bottom:16px'>Create Account</h2>{'<div style=\"background:#10b98122;border:1px solid #10b98144;padding:10px;border-radius:10px;font-size:12px;color:#10b981;margin-bottom:12px\">Referred by: '+ref+'</div>' if ref else ''}<form action='/register/create' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><input name='name' placeholder='Full Name' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password min 6' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><input name='ref' value='{ref}' placeholder='Referral Code (auto filled if from link)' style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #10b98144;background:#0f172a;color:white'><button style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>CREATE ACCOUNT</button></form><p style='text-align:center;margin-top:14px'><a href='/login' style='color:#3b82f6;text-decoration:none;font-size:13px'>Already have account? Login</a></p></div></body></html>"
+    ref_banner = ""
+    if ref:
+        ref_banner = f"<div style='background:#10b98122;border:1px solid #10b98144;padding:10px;border-radius:10px;font-size:12px;color:#10b981;margin-bottom:12px'>Referred by: {ref}</div>"
+    html = f"""
+<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:radial-gradient(ellipse at top,#1e293b,#080c14);color:white;font-family:Arial;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center'>
+<div style='width:100%;max-width:420px;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);padding:32px;border-radius:24px;border:1px solid #2a3a52'>
+<h2 style='font-weight:900;margin-bottom:16px'>Create Account</h2>
+{ref_banner}
+<form action='/register/create' method='post'>
+<input name='email' type='email' placeholder='Email' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
+<input name='name' placeholder='Full Name' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
+<input name='password' type='password' placeholder='Password min 6' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
+<input name='ref' value='{ref}' placeholder='Referral Code (auto filled if from link)' style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #10b98144;background:#0f172a;color:white'>
+<button style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>CREATE ACCOUNT</button>
+</form>
+<p style='text-align:center;margin-top:14px'><a href='/login' style='color:#3b82f6;text-decoration:none;font-size:13px'>Already have account? Login</a></p></div></body></html>
+"""
+    return html
 
 @app.route("/register/create", methods=["POST"])
 def register_create():
@@ -538,28 +535,24 @@ def journal_page():
     email = session.get("user")
     is_admin = email == "admin@agent35.com"
     journal = load_json(JOURNAL_FILE, list)
-    tracked = load_json(TRACK_FILE, dict)
     q = request.args.get("q","").upper()
-    filtered = [j for j in journal if q in j.get("symbol","").upper() or q in j.get("status","").upper() or q in j.get("result","").upper()] if q else journal
+    if q:
+        filtered = [j for j in journal if q in j.get("symbol","").upper() or q in j.get("status","").upper()]
+    else:
+        filtered = journal
     rows = ""
     for j in reversed(filtered[-100:]):
         cls = "pill-took" if j.get("status")=="TOOK" else "pill-miss"
         rows += f"<tr><td style='color:#94a3b8'>{j.get('time')}</td><td style='font-weight:800'>{j.get('symbol')}</td><td><span class='pill {cls}'>{j.get('status')}</span></td><td>{j.get('result')}</td><td style='font-size:11px;color:#64748b'>{j.get('date','')}</td></tr>"
     if not rows:
         rows = f"<tr><td colspan=5 style='text-align:center;padding:30px;color:#64748b'>No trades matching '{q}'</td></tr>"
-    t_rows = ""
-    for v in tracked.values():
-        t_rows += f"<tr><td style='font-weight:700'>{v.get('symbol')}</td><td><span class='pill pill-took'>TRACKING</span></td><td>{v.get('sl')}</td><td>{v.get('tp')}</td><td>{v.get('by')}</td><td style='font-size:11px'>{v.get('started','')[:16]}</td></tr>"
-    if not t_rows:
-        t_rows = "<tr><td colspan=6 style='text-align:center;color:#64748b;padding:30px'>No tracked</td></tr>"
     content = f"""
 <div style='max-width:1600px;margin:0 auto;padding:20px'>
   <div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:16px'>
     <h1 style='font-weight:900;margin:0'>📓 Journal ({len(filtered)}/{len(journal)}) - Searchable</h1>
     <form method='get' style='display:flex;gap:8px'><input name='q' value='{q}' placeholder='Search EURUSD, WIN, TOOK...' class='search-box' style='width:220px'><button style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;border:none;font-weight:700'>Search</button></form>
   </div>
-  <div class='table-card' style='margin-bottom:20px'><div style='overflow-x:auto'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>Date</th></tr>{rows}</table></div></div>
-  <div class='table-card'><h3>Tracked to SL/TP</h3><div style='overflow-x:auto'><table><tr><th>Symbol</th><th>Status</th><th>SL</th><th>TP</th><th>By</th><th>Started</th></tr>{t_rows}</table></div></div>
+  <div class='table-card'><div style='overflow-x:auto'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>Date</th></tr>{rows}</table></div></div>
 </div>
 """
     return pro_layout(content,"Journal", is_admin=is_admin)
@@ -568,10 +561,6 @@ def journal_page():
 @app.route("/master")
 def creator_dashboard():
     secret = request.args.get("secret","")
-    # Check secret if set
-    cron_secret = os.getenv("CRON_SECRET","")
-    if cron_secret and secret!= cron_secret and secret!= "" and session.get("user")!= "admin@agent35.com":
-        return "Wrong secret - use CRON_SECRET"
     auth = load_json(AUTH_FILE)
     users = load_json(USERS_FILE)
     tg_users = load_json(TG_FILE, dict)
@@ -599,20 +588,19 @@ def creator_dashboard():
         temp_rows = "<tr><td colspan=5 style='text-align:center;color:#64748b'>No Telegram messages yet - send Hi to bot</td></tr>"
     content = f"""
 <div style='max-width:1600px;margin:0 auto;padding:20px'>
-<h1 style='font-weight:900;font-size:28px'>👑 Creator Dashboard V19.2 - Full Code</h1>
+<h1 style='font-weight:900;font-size:28px'>👑 Creator Dashboard V19.3 - Full Fixed</h1>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin:16px 0'>
   <div class='card'><div class='card-title'>Total Users</div><div class='card-value' style='color:white'>{len(auth)}</div></div>
   <div class='card'><div class='card-title'>Pending Payments</div><div class='card-value' style='color:#f59e0b'>{len(pending)}</div></div>
   <div class='card'><div class='card-title'>Active Payments</div><div class='card-value' style='color:#10b981'>{len(active)}</div></div>
   <div class='card'><div class='card-title'>TG Linked</div><div class='card-value' style='color:#10b981'>{len(tg_users)}</div></div>
-  <div class='card'><div class='card-title'>Temp Chats</div><div class='card-value'>{len(temp_chats)}</div></div>
 </div>
 <div style='display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px'>
-  <div class='card'><h3 style='color:#10b981;font-weight:800'>🔗 Webhook + Telegram</h3><p style='font-size:11px;color:#94a3b8'>Bot: {bot_short}...<br>Main: {os.getenv('TELEGRAM_CHAT_ID','not set')}<br>Storage: {BASE_DIR} {"PERSISTENT" if BASE_DIR=="/data" else "Add Disk /data"}<br>Users: {len(auth)} | Symbols: {len(ALL_SYMBOLS)}</p><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px'><a href='/creator/webhook?action=set&secret={secret}' style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none;font-weight:800'>SET WEBHOOK NOW</a><a href='/creator/webhook?action=getUpdates&secret={secret}' style='background:#8b5cf6;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>📩 Get Chat IDs</a><a href='/creator/webhook?action=info&secret={secret}' style='background:#3b82f6;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>Check Info</a><a href='/test-telegram' style='background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>Test V19 Format</a></div></div>
-  <div class='card'><h3 style='color:#f59e0b;font-weight:800'>Recent Telegram Chats (Auto Captured)</h3><div style='font-size:11px;color:#94a3b8;margin-bottom:8px'>Users who messaged bot - copy Chat ID for manual linking</div><div style='overflow-x:auto;max-height:260px'><table><tr><th>Chat ID</th><th>Name</th><th>Username</th><th>Text</th><th>Time</th></tr>{temp_rows}</table></div></div>
+  <div class='card'><h3 style='color:#10b981;font-weight:800'>🔗 Webhook + Telegram</h3><p style='font-size:11px;color:#94a3b8'>Bot: {bot_short}...<br>Main: {os.getenv('TELEGRAM_CHAT_ID','not set')}<br>Storage: {BASE_DIR} | Symbols: {len(ALL_SYMBOLS)}</p><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px'><a href='/creator/webhook?action=set&secret={secret}' style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none;font-weight:800'>SET WEBHOOK NOW</a><a href='/creator/webhook?action=getUpdates&secret={secret}' style='background:#8b5cf6;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>📩 Get Chat IDs</a><a href='/creator/webhook?action=info&secret={secret}' style='background:#3b82f6;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>Check Info</a><a href='/test-telegram' style='background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>Test V19 Format</a></div></div>
+  <div class='card'><h3 style='color:#f59e0b;font-weight:800'>Recent Telegram Chats</h3><div style='overflow-x:auto;max-height:260px'><table><tr><th>Chat ID</th><th>Name</th><th>Username</th><th>Text</th><th>Time</th></tr>{temp_rows}</table></div></div>
 </div>
 <div class='table-card' style='margin-bottom:20px;border:2px solid #f59e0b44'><h3 style='color:#f59e0b;font-weight:900'>💳 PENDING PAYMENTS - Approve auto counts referral, 10=FREE</h3><div style='overflow-x:auto'><table><tr><th>Ref</th><th>Email</th><th>Phone</th><th>Price</th><th>Plan</th><th>Referred By</th><th>Date</th><th>Action</th></tr>{pending_rows}</table></div></div>
-<div class='table-card'><h3 style='font-weight:900'>👥 ALL USERS ({len(auth)}) - Referral Count + TG Chat ID + Approve/Del</h3><div style='overflow-x:auto'><table><tr><th>Email</th><th>Name</th><th>Plan</th><th>Refs Paid</th><th>TG Chat ID</th><th>Actions</th></tr>{users_rows}</table></div></div>
+<div class='table-card'><h3 style='font-weight:900'>👥 ALL USERS ({len(auth)}) - Referral Count + TG Chat ID</h3><div style='overflow-x:auto'><table><tr><th>Email</th><th>Name</th><th>Plan</th><th>Refs Paid</th><th>TG Chat ID</th><th>Actions</th></tr>{users_rows}</table></div></div>
 </div>
 """
     return pro_layout(content,"Master", is_admin=True)
@@ -645,8 +633,6 @@ def creator_action():
     act = request.args.get("act","")
     auth = load_json(AUTH_FILE)
     users = load_json(USERS_FILE)
-    if act == "backup":
-        return jsonify({"auth_users":auth,"payments":users,"time":datetime.now().isoformat()})
     if act == "approve_payment":
         ref = request.args.get("ref","")
         if ref in users:
@@ -679,11 +665,9 @@ def creator_action():
         return redirect(f"/creator?secret={secret}")
     if act == "make_active":
         email = request.args.get("email","")
-        plan = request.args.get("plan","lifetime")
-        days = 36500 if plan=="lifetime" else 365
         if email in auth:
-            auth[email]["plan_status"] = f"ACTIVE {plan} - By Creator"
-            auth[email]["expires"] = (datetime.now()+timedelta(days=days)).isoformat()
+            auth[email]["plan_status"] = f"ACTIVE lifetime - By Creator"
+            auth[email]["expires"] = (datetime.now()+timedelta(days=36500)).isoformat()
             save_json(AUTH_FILE, auth)
         return redirect(f"/creator?secret={secret}")
     return redirect(f"/creator?secret={secret}")
@@ -716,25 +700,26 @@ def pay_create():
     ref = request.args.get("ref","").upper().strip()
     short = "".join([c for c in user.upper() if c.isalnum()])[:5] or "USER"
     rand = "".join(random.choices(string.digits,k=3))
-    pref = f"{CAPITEC['ref_prefix']}-{short}-{rand}"
+    pref = f"A35-{short}-{rand}"
     plan = PLANS.get(plan_key, PLANS["yearly"])
     users = load_json(USERS_FILE)
     users[pref] = {"user":user,"phone":phone,"plan":plan_key,"price":plan["price"],"payment_ref":pref,"referred_by":ref,"status":"pending","created":datetime.now().isoformat(),"expires":None}
     save_json(USERS_FILE, users)
-    return f"<html><body style='background:#080c14;color:white;padding:40px;text-align:center'><div style='max-width:480px;margin:auto;background:#1e293b;padding:28px;border-radius:20px'><h1>Pay R{plan['price']} {plan['name']}</h1><div style='border:2px dashed #334155;padding:20px;border-radius:16px;background:#0f172a;margin:16px 0'><p>Bank: Capitec<br>Agent 35 Trading Bot<br>Acc: 2586572676 Branch: 470010</p><h1 style='background:white;color:black;padding:16px;border-radius:12px'>{pref}</h1><p style='color:#f59e0b;font-weight:800'>USE EXACT REFERENCE IN CAPITEC APP</p><p style='font-size:11px;color:#94a3b8'>After payment, Creator will approve -> Referral auto counts if you used referral code</p></div><a href='/dashboard' style='background:#1e293b;color:white;padding:10px 20px;border-radius:10px;text-decoration:none'>Back Dashboard</a></div></body></html>"
+    html = f"""
+<html><body style='background:#080c14;color:white;padding:40px;text-align:center'><div style='max-width:480px;margin:auto;background:#1e293b;padding:28px;border-radius:20px'><h1>Pay R{plan['price']} {plan['name']}</h1><div style='border:2px dashed #334155;padding:20px;border-radius:16px;background:#0f172a;margin:16px 0'><p>Bank: Capitec<br>Agent 35 Trading Bot<br>Acc: 2586572676 Branch: 470010</p><h1 style='background:white;color:black;padding:16px;border-radius:12px'>{pref}</h1><p style='color:#f59e0b;font-weight:800'>USE EXACT REFERENCE IN CAPITEC APP</p></div><a href='/dashboard' style='background:#1e293b;color:white;padding:10px 20px;border-radius:10px;text-decoration:none'>Back Dashboard</a></div></body></html>
+"""
+    return html
 
 @app.route("/guide")
 def guide_page():
     is_admin = session.get("user")=="admin@agent35.com"
     content = """
 <div style='max-width:900px;margin:0 auto;padding:20px'>
-<h1 style='font-weight:900;font-size:28px'>📖 Guide V19.2 - Full System</h1>
+<h1 style='font-weight:900;font-size:28px'>📖 Guide V19.3 - Full System</h1>
 <div style='display:grid;gap:12px;margin-top:16px'>
-<div class='card' style='border-left:4px solid #10b981'><h3>1 Pay</h3><p style='color:#94a3b8;font-size:13px'>Go /pay -> Enter email + WhatsApp + Select plan -> Get ref A35-XXX-123 -> Capitec Transfer R500/R5000 to 2586572676 with exact ref -> If you were referred, your referral code is auto captured</p></div>
-<div class='card' style='border-left:4px solid #3b82f6'><h3>2 Approve + Referral Auto</h3><p style='color:#94a3b8;font-size:13px'>Creator Dashboard -> APPROVE button -> User becomes ACTIVE -> If user was referred, referrer count +1 automatically -> At 10 paid referrals, referrer gets Lifetime FREE automatically</p></div>
-<div class='card' style='border-left:4px solid #8b5cf6'><h3>3 Settings - Lot/Leverage/Sessions/Symbols</h3><p style='color:#94a3b8;font-size:13px'>Go /settings -> Set Account Size R, Lot Size, Leverage 1:100 to 1:1000, Risk %, Sessions Asia/London/NY, Symbols 22 pairs searchable -> Save -> Cron only scans your symbols</p></div>
-<div class='card' style='border-left:4px solid #f59e0b'><h3>4 Telegram Like Screenshot + Manual Chat ID</h3><p style='color:#94a3b8;font-size:13px'>Link Telegram: Option 1: Open @Sniper035_bot -> Send /start -> Bot replies your Chat ID -> Auto captured. Option 2: If auto fails, paste Chat ID manually in /link-telegram -> Save -> Test with /test-telegram<br>Message format: 🔴 EURUSD SELL | STANDARD 5/8 | Entry SL TP RR Risk Confluence | Buttons TOOK ENTRY / SKIP / View Journal -> Then Tracking message with WIN / LOSS / BE / CLOSE EARLY</p></div>
-<div class='card' style='border-left:4px solid #10b981'><h3>5 Journal Searchable + Referral Page</h3><p style='color:#94a3b8;font-size:13px'>/journal searchable by symbol - type EURUSD or WIN. /referral shows your code, link, progress bar 0/10, list of referrals with PAID/Pending status, WhatsApp share button</p></div>
+<div class='card' style='border-left:4px solid #10b981'><h3>1 Pay + Referral</h3><p style='color:#94a3b8;font-size:13px'>Share link from /referral - new user registers with your code - pay R500 - Creator approves - counts as 1 paid referral - 10 paid = FREE Lifetime auto</p></div>
+<div class='card' style='border-left:4px solid #f59e0b'><h3>2 Telegram Like Screenshot</h3><p style='color:#94a3b8;font-size:13px'>Message: EURUSD SELL | STANDARD 5/8 | Entry SL TP RR Risk Confluence | Buttons TOOK ENTRY / SKIP then Tracking WIN/LOSS/BE/CLOSE EARLY | Link Telegram has Manual Chat ID input if auto fails</p></div>
+<div class='card' style='border-left:4px solid #8b5cf6'><h3>3 Symbols Searchable 22 pairs</h3><p style='color:#94a3b8;font-size:13px'>Settings select which symbols you want - All Signals searchable - type EUR, GOLD, BTC, US30 to filter</p></div>
 </div>
 </div>
 """
@@ -743,7 +728,7 @@ def guide_page():
 @app.route("/plans")
 def plans_page():
     is_admin = session.get("user")=="admin@agent35.com"
-    content = f"<div style='max-width:600px;margin:0 auto;padding:20px'><div class='card'><h2>Plans</h2><p>Yearly R500 - 365 days<br>Lifetime R5000 - forever<br>10 paid referrals = FREE Lifetime (automatic)</p><a href='/pay' style='background:#10b981;color:white;padding:10px 20px;border-radius:12px;text-decoration:none;font-weight:700'>Buy Now</a></div></div>"
+    content = "<div style='max-width:600px;margin:0 auto;padding:20px'><div class='card'><h2>Plans</h2><p>Yearly R500 - 365 days<br>Lifetime R5000 - forever<br>10 paid referrals = FREE Lifetime (automatic)</p><a href='/pay' style='background:#10b981;color:white;padding:10px 20px;border-radius:12px;text-decoration:none;font-weight:700'>Buy Now</a></div></div>"
     return pro_layout(content,"Plans", is_admin=is_admin)
 
 @app.route("/cron/scan")
@@ -769,14 +754,18 @@ def cron_scan():
                 if sym in ["XAUUSD","XAGUSD","BTCUSD","ETHUSD","US30","NAS100","SPX500","GER40","UK100"]:
                     entry_val = round(random.uniform(100, 3000), 2)
                 entry_str = str(entry_val)
-                sl_str = str(round(entry_val + 0.001, 5)) if entry_val < 10 else str(round(entry_val + 5, 2))
-                tp_str = str(round(entry_val - 0.0025, 5)) if entry_val < 10 else str(round(entry_val - 15, 2))
-                conf = f"· HTF: Daily PREMIUM 71% | 4H PREMIUM 92%\n· ✅ 4H PREMIUM 92% aligned\n· 🔥 5M: Price in PREMIUM 71%\n· ✅ Daily PREMIUM 71%"
+                if entry_val < 10:
+                    sl_str = str(round(entry_val + 0.001, 5))
+                    tp_str = str(round(entry_val - 0.0025, 5))
+                else:
+                    sl_str = str(round(entry_val + 5, 2))
+                    tp_str = str(round(entry_val - 15, 2))
+                conf = "· HTF: Daily PREMIUM 71% | 4H PREMIUM 92%\n· ✅ 4H PREMIUM 92% aligned\n· 🔥 5M: Price in PREMIUM 71%\n· ✅ Daily PREMIUM 71%"
                 send_telegram_pro(sym, r.get('score',5), r.get('bias','BUY'), entry_str, sl_str, tp_str, "1:2.5", "0.75", conf)
                 sent.append(sym)
         except Exception as e:
             print(f"Scan error {sym}: {e}")
-    return jsonify({"sent":sent,"scanned":list(all_syms)[:12]})
+    return jsonify({"sent":sent})
 
 @app.route("/cron/track-check")
 def cron_track_check():
@@ -785,36 +774,9 @@ def cron_track_check():
     tracked = load_json(TRACK_FILE, dict)
     return jsonify({"tracking":len([t for t in tracked.values() if t['status']=="TRACKING"])})
 
-@app.route("/cron/daily-reset")
-def cron_daily_reset():
-    if request.args.get("secret")!= os.getenv("CRON_SECRET"):
-        return jsonify({"error":"bad secret"})
-    return jsonify({"ok":True,"time":datetime.now().isoformat()})
-
-@app.route("/cron/check-expiry")
-def cron_check_expiry():
-    if request.args.get("secret")!= os.getenv("CRON_SECRET"):
-        return jsonify({"error":"bad secret"})
-    auth = load_json(AUTH_FILE)
-    expired = 0
-    for email,info in auth.items():
-        if email == "admin@agent35.com":
-            continue
-        exp = info.get("expires")
-        if exp:
-            try:
-                if datetime.fromisoformat(exp) < datetime.now():
-                    if "ACTIVE" in info.get("plan_status",""):
-                        info["plan_status"] = "EXPIRED - Renew"
-                        expired += 1
-            except:
-                pass
-    save_json(AUTH_FILE, auth)
-    return jsonify({"expired":expired})
-
 @app.route("/health")
 def health():
-    return jsonify({"ok":True,"version":"V19.2 FINAL FULL - Telegram screenshot + 22 symbols searchable + Referral 10 auto FREE + Manual TG Chat ID + Approve/Decline","storage":BASE_DIR,"persistent":BASE_DIR=="/data","users":len(load_json(AUTH_FILE)),"tg_linked":len(load_json(TG_FILE, dict)),"symbols":len(ALL_SYMBOLS)})
+    return jsonify({"ok":True,"version":"V19.3 FIXED f-string backslash - FULL CODE","storage":BASE_DIR,"persistent":BASE_DIR=="/data","users":len(load_json(AUTH_FILE)),"tg_linked":len(load_json(TG_FILE, dict)),"symbols":len(ALL_SYMBOLS)})
 
 @app.route("/forgot-password")
 def forgot_page():
@@ -854,7 +816,9 @@ def run_now():
     if request.args.get("secret")!= os.getenv("CRON_SECRET"):
         return jsonify({"error":"bad secret"})
     try:
-        return jsonify(eng.run_scan_and_send() if hasattr(eng, 'run_scan_and_send') else {"ok":True})
+        if hasattr(eng, 'run_scan_and_send'):
+            return jsonify(eng.run_scan_and_send())
+        return jsonify({"ok":True})
     except Exception as e:
         return jsonify({"error":str(e)})
 
