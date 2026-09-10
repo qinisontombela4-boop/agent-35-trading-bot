@@ -29,8 +29,7 @@ def load_json(p, default_type=dict):
         return {} if default_type==dict else []
 
 def save_json(p, data):
-    with open(p,"w") as f:
-        json.dump(f, data, indent=2)
+    with open(p,"w") as f: json.dump(data, f, indent=2)
 
 def hash_pwd(p):
     return hashlib.sha256(p.encode()).hexdigest()
