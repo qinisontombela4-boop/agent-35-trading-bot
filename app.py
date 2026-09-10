@@ -441,31 +441,16 @@ def quick_symbols():
         return layout(f"<div class='paused-banner'>Signals Paused</div>", session['email'])
     cur.execute("UPDATE agent35_users SET symbols=%s WHERE email=%s",(request.form['symbols'][:100], session['email'])); conn.commit(); cur.close(); conn.close(); return redirect('/dashboard')
 
-@app.route('/scan')
+@app.route("/scan")
 def scan():
-    if 'email' not in session: return redirect('/')
-    conn=get_conn(); cur=conn.cursor(); cur.execute("SELECT * FROM agent35_users WHERE email=%s",(session['email'],)); user=cur.fetchone()
-    if not is_subscription_active(user):
-        cur.close(); conn.close()
-        return layout(f"<div class='paused-banner'>SIGNALS PAUSED - Ref: {user.get('payment_ref','Not set')}<br><a href='/payment' style='color:#fff'>Pay Now</a></div>", session['email'])
-    symbols=(user['symbols'] or "EURUSD").split(",")[:5]; results=[]; use_news = user.get('news_filter', True)
-    for sym in symbols:
-        sym=sym.strip().upper()
-        if not sym: continue
-        try: res=engine.full_multi_tf_analysis(sym, use_news_filter=use_news)
-        except Exception as e: res={"signal":False,"symbol":sym,"reason":f"Error {e}"}
-        res['symbol']=sym; results.append(res)
-        if res.get('signal') and res.get('score',0) >= 4 and not res.get('news_block'):
-            cur.execute("SELECT id FROM agent35_trades WHERE user_email=%s AND symbol=%s AND status IN ('sent','took') AND archived=FALSE AND created_at > NOW() - INTERVAL '5 minutes' LIMIT 1", (session['email'], sym))
-            if cur.fetchone(): continue
-            cur.execute("INSERT INTO agent35_trades (user_email,symbol,direction,entry,sl,tp,original_entry,original_sl,timeframe_bias,confluence,status,be_done,lock_done,archived) VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'sent',FALSE,FALSE,FALSE) RETURNING id",(session['email'],res['symbol'],res['direction'],res['entry'],res['sl'],res['tp'],res['entry'],res['sl'],res['bias'],str(res.get('confluence',''))))
-            new_row=cur.fetchone(); tid=new_row['id'] if new_row else 0; conn.commit()
-            if user['telegram_id']:
-                msg=build_signal_msg(res, user); send_telegram(user['telegram_id'], msg, trade_id=tid, stage="signal")
-    conn.commit(); cur.close(); conn.close()
-    html="".join([f"<div class='card' style='border-left:4px solid #10b981'><b>{r['symbol']} {r.get('direction','')} {r.get('score',0)}/8</b><br>Entry {format_price(r['symbol'], r.get('entry',''))} SL {format_price(r['symbol'], r.get('sl',''))} TP {format_price(r['symbol'], r.get('tp',''))}</div>" if r.get('signal') else f"<div class='card' style='opacity:0.6'><b>{r['symbol']} - No setup</b></div>" for r in results])
-    return layout(f"<h2>Scan Results V12.6.1 FIXED DECIMALS</h2>{html}<br><a class='btn' href='/journal'>Journal</a>", session['email'])
-
+    symbol = request.args.get("symbol", "EURUSD")
+    try:
+        result = full_multi_tf_analysis(symbol)
+        # ALWAYS show full details
+        return jsonify(result)
+    except Exception as e:
+        return jsonify({"signal": False, "symbol": symbol, "error": str(e), "score": 0, "reason": str(e)})
+        
 @app.route('/settings', methods=['GET','POST'])
 def settings():
     if 'email' not in session: return redirect('/')
