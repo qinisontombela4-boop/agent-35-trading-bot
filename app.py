@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 import trading_engine as engine
 import traceback
 from collections import defaultdict
+from trading_engine import full_multi_tf_analysis
 
 app = Flask(__name__)
 app.secret_key = os.environ.get('SECRET_KEY', 'agent35-secret-2025')
@@ -445,11 +446,22 @@ def quick_symbols():
 def scan():
     symbol = request.args.get("symbol", "EURUSD")
     try:
-        result = full_multi_tf_analysis(symbol)
-        # ALWAYS show full details
+        import trading_engine as eng
+        # try all possible names
+        if hasattr(eng, 'full_multi_tf_analysis'):
+            result = eng.full_multi_tf_analysis(symbol)
+        elif hasattr(eng, 'analyze_symbol'):
+            result = eng.analyze_symbol(symbol)
+        elif hasattr(eng, 'get_signal'):
+            result = eng.get_signal(symbol)
+        else:
+            # list functions
+            funcs = [x for x in dir(eng) if not x.startswith('_')]
+            return jsonify({"error": f"no analysis func found", "available": funcs})
         return jsonify(result)
     except Exception as e:
-        return jsonify({"signal": False, "symbol": symbol, "error": str(e), "score": 0, "reason": str(e)})
+        import traceback
+        return jsonify({"signal": False, "symbol": symbol, "error": str(e), "reason": traceback.format_exc(), "score": 0})
         
 @app.route('/settings', methods=['GET','POST'])
 def settings():
