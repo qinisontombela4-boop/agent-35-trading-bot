@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 load_dotenv()
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET", "agent35-v20-currency-method")
+app.secret_key = os.getenv("FLASK_SECRET", "agent35-v20-1-fixed")
 import trading_engine as eng
 
 BASE_DIR = "/data" if os.path.exists("/data") else "."
@@ -22,9 +22,7 @@ TEMP_CHAT_FILE = os.path.join(BASE_DIR, "temp_chats.json")
 
 PLANS = {"yearly":{"name":"Yearly","price":500,"days":365},"lifetime":{"name":"Lifetime","price":5000,"days":36500}}
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","EURCHF","GBPCHF","EURAUD","GBPAUD","EURCAD","GBPCAD","XAUUSD","XAGUSD","US30","NAS100","SPX500","GER40","UK100","FRA40","BTCUSD","ETHUSD","SOLUSD","BNBUSD"]
-
 CURRENCY_MAP = {"ZAR":{"symbol":"R","name":"Rand"},"USD":{"symbol":"$","name":"Dollar"},"EUR":{"symbol":"€","name":"Euro"},"GBP":{"symbol":"£","name":"Pound"}}
-
 METHODS = {
     "method1_premium_sweep":{"name":"V19.9 Premium + Sweep + Engulfing","desc":"Swing SMC - High Win Rate 65%+, 2-5 signals/day, Best for Gold/Forex H1/M5, RR 1:2.5","rr_default":2.5},
     "method2_ema_rsi":{"name":"EMA 5/20 + RSI Pullback","desc":"Trend continuation - More signals 5-10/day, BUY EMA5>EMA20 + RSI 40-55 pullback, Best for Forex trend","rr_default":2.0},
@@ -207,7 +205,7 @@ def send_telegram_pro(symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, 
     return results
 
 def pro_layout(content, active="Dashboard", is_admin=False):
-    utc=datetime.utcnow().strftime("%H:%M:%S"); sast=(datetime.utcnow()+timedelta(hours=2)).strftime("%H:%M:%S")
+    sast=(datetime.utcnow()+timedelta(hours=2)).strftime("%H:%M:%S")
     user=session.get("user","Guest")
     tabs=[("Dashboard","📊"),("Journal","📓"),("All Signals","📡"),("Settings","⚙️"),("Referral","👥"),("Plans","💳"),("Guide","📖")]
     if is_admin: tabs.append(("Master","👑"))
@@ -216,8 +214,8 @@ def pro_layout(content, active="Dashboard", is_admin=False):
         url=f"/{t.lower().replace(' ','-')}"
         if active==t: nav_html+=f"<a href='{url}' style='padding:8px 12px;border-radius:10px;text-decoration:none;color:white;font-weight:700;font-size:11px;background:#10b981;margin-right:5px'>{icon} {t}</a>"
         else: nav_html+=f"<a href='{url}' style='padding:8px 12px;border-radius:10px;text-decoration:none;color:#94a3b8;font-weight:600;font-size:11px;background:#1e293b;margin-right:5px'>{icon} {t}</a>"
-    html_start=f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0'><title>AGENT 35 PRO V20</title><style>body{{background:#080c14;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;margin:0;padding:0}}.topbar{{background:#0f172a;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100;flex-wrap:wrap;gap:8px}}.logo{{font-weight:900;font-size:15px;color:#10b981}}.badge{{background:#10b981;padding:4px 10px;border-radius:20px;font-weight:700;font-size:10px;color:white}}.badge-warn{{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:4px 10px;border-radius:20px;font-size:10px}}.navbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:10px 12px;display:flex;gap:5px;overflow-x:auto;position:sticky;top:56px;z-index:90;-webkit-overflow-scrolling:touch}}.main{{padding:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;max-width:1600px;margin:0 auto}}.card{{background:#1e293b;border-radius:14px;padding:14px;border:1px solid #2a3a52;min-width:0}}.card-title{{color:#94a3b8;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px}}.card-value{{font-size:20px;font-weight:900;word-break:break-word}}.btn-primary{{background:#10b981;color:white;padding:12px;border-radius:10px;font-weight:800;border:none;width:100%;cursor:pointer;font-size:13px}}.btn-secondary{{background:#1e293b;border:1px solid #334155;color:white;padding:9px;border-radius:9px;text-align:center;display:block;text-decoration:none;margin-top:6px;font-size:11px}}.table-card{{grid-column:1 / -1;background:#1e293b;border-radius:14px;padding:14px;border:1px solid #2a3a52;overflow-x:auto}} table{{width:100%;border-collapse:collapse;min-width:480px}} th{{color:#64748b;text-align:left;padding:8px 6px;font-size:8px;text-transform:uppercase;border-bottom:1px solid #334155;white-space:nowrap}} td{{padding:8px 6px;border-bottom:1px solid #1e293b;font-size:10px;white-space:nowrap}}.pill{{padding:3px 8px;border-radius:20px;font-size:9px;font-weight:700;display:inline-block}}.pill-took{{background:#10b98122;color:#10b981}}.pill-win{{background:#10b98122;color:#10b981}}.pill-loss{{background:#ef444422;color:#ef4444}}.search-box{{background:#0f172a;border:1px solid #334155;color:white;padding:9px 12px;border-radius:9px;width:100%;font-size:13px}} @media(max-width:768px){{.main{{grid-template-columns:1fr; padding:8px}}.card-value{{font-size:18px}}}} </style></head><body>"
-    topbar=f"<div class='topbar'><div class='logo'>AGENT 35 PRO V20 • Currency + Methods</div><div style='display:flex;gap:5px;align-items:center;flex-wrap:wrap'><span class='badge'>LIVE</span><span class='badge-warn'>{sast} SAST</span><span class='badge-warn' style='color:#10b981'>{user[:16]}</span></div></div>"
+    html_start=f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0'><title>AGENT 35 PRO V20.1</title><style>body{{background:#080c14;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,Arial,sans-serif;margin:0;padding:0}}.topbar{{background:#0f172a;padding:12px 16px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100;flex-wrap:wrap;gap:8px}}.logo{{font-weight:900;font-size:15px;color:#10b981}}.badge{{background:#10b981;padding:4px 10px;border-radius:20px;font-weight:700;font-size:10px;color:white}}.badge-warn{{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:4px 10px;border-radius:20px;font-size:10px}}.navbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:10px 12px;display:flex;gap:5px;overflow-x:auto;position:sticky;top:56px;z-index:90;-webkit-overflow-scrolling:touch}}.main{{padding:10px;display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;max-width:1600px;margin:0 auto}}.card{{background:#1e293b;border-radius:14px;padding:14px;border:1px solid #2a3a52;min-width:0}}.card-title{{color:#94a3b8;font-size:9px;font-weight:700;text-transform:uppercase;letter-spacing:0.5px}}.card-value{{font-size:20px;font-weight:900;word-break:break-word}}.btn-primary{{background:#10b981;color:white;padding:12px;border-radius:10px;font-weight:800;border:none;width:100%;cursor:pointer;font-size:13px}}.btn-secondary{{background:#1e293b;border:1px solid #334155;color:white;padding:9px;border-radius:9px;text-align:center;display:block;text-decoration:none;margin-top:6px;font-size:11px}}.table-card{{grid-column:1 / -1;background:#1e293b;border-radius:14px;padding:14px;border:1px solid #2a3a52;overflow-x:auto}} table{{width:100%;border-collapse:collapse;min-width:480px}} th{{color:#64748b;text-align:left;padding:8px 6px;font-size:8px;text-transform:uppercase;border-bottom:1px solid #334155;white-space:nowrap}} td{{padding:8px 6px;border-bottom:1px solid #1e293b;font-size:10px;white-space:nowrap}}.pill{{padding:3px 8px;border-radius:20px;font-size:9px;font-weight:700;display:inline-block}}.pill-took{{background:#10b98122;color:#10b981}}.pill-win{{background:#10b98122;color:#10b981}}.pill-loss{{background:#ef444422;color:#ef4444}}.search-box{{background:#0f172a;border:1px solid #334155;color:white;padding:9px 12px;border-radius:9px;width:100%;font-size:13px}} @media(max-width:768px){{.main{{grid-template-columns:1fr; padding:8px}}.card-value{{font-size:18px}}}} </style></head><body>"
+    topbar=f"<div class='topbar'><div class='logo'>AGENT 35 PRO V20.1 FIXED</div><div style='display:flex;gap:5px;align-items:center;flex-wrap:wrap'><span class='badge'>LIVE</span><span class='badge-warn'>{sast} SAST</span><span class='badge-warn' style='color:#10b981'>{user[:16]}</span></div></div>"
     navbar=f"<div class='navbar'>{nav_html}</div>"
     return html_start+topbar+navbar+content+"</body></html>"
 
@@ -241,18 +239,18 @@ def dashboard():
         cls="pill-took" if t.get("status")=="TOOK" else "pill-win" if "WIN" in t.get("result","") else "pill-loss"
         pnl=t.get("pnl",0)
         rows+=f"<tr><td style='color:#94a3b8'>{t.get('time')}</td><td style='font-weight:800'>{t.get('symbol')}</td><td><span class='pill {cls}'>{t.get('status')}</span></td><td>{t.get('result')}</td><td>{curr_sym}{pnl}</td></tr>"
-    tg_status="Linked ✅" if email in tg_users else "Not linked ❌"
+    tg_status="Linked" if email in tg_users else "Not linked"
     sym_spans="".join([f"<span style='background:#0f172a;border:1px solid #334155;padding:3px 7px;border-radius:20px;font-size:8px;margin:2px;display:inline-block'>{s}</span>" for s in user_settings.get('symbols',[])[:10]])
-    admin_link="<a href='/creator?secret=' class='btn-secondary' style='background:#f59e0b;color:white;font-weight:700'>👑 Creator</a>" if is_admin else ""
+    admin_link="<a href='/creator?secret=' class='btn-secondary' style='background:#f59e0b;color:white;font-weight:700'>Creator</a>" if is_admin else ""
     content=f"""
 <div class='main'>
 <div class='card'><div class='card-title'>Total PnL ({user_settings.get('currency','ZAR')})</div><div class='card-value' style='color:{"#10b981" if stats['total_pnl']>=0 else "#ef4444"}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0f172a;border-radius:8px;padding:6px;margin-top:6px;font-size:9px;color:#94a3b8;display:grid;grid-template-columns:1fr 1fr;gap:5px'><div>Today: {curr_sym}{stats['daily']:.2f}</div><div>Week: {curr_sym}{stats['weekly']:.2f}</div><div>Month: {curr_sym}{stats['monthly']:.2f}</div><div>Year: {curr_sym}{stats['yearly']:.2f}</div></div><div style='font-size:9px;color:#10b981;margin-top:6px'>Method: {method_name}</div></div>
-<div class='card'><div class='card-title'>Signals & Win Rate</div><div class='card-value'>{stats['total_trades']} Trades • {stats['win_rate']}% WR</div><div style='font-size:9px;color:#94a3b8;margin-top:4px'>Wins: {stats['wins']} | Losses: {stats['losses']} | BE: {stats['be']}<br>TG: {tg_status} | Refs: {ref_count}/10<br>Spread: {user_settings.get('spread_forex')} pips | {method_name}</div></div>
-<div class='card'><div class='card-title'>Account • {user_settings.get('currency','ZAR')} + Spread + RR</div><div class='card-value'>{curr_sym}{user_settings.get('account_size',142)}</div><div style='font-size:9px;color:#94a3b8'>Lot {user_settings.get('lot_size',0.01)} Lev {user_settings.get('leverage','1:500')}<br>Risk {user_settings.get('risk_percent',1)}% RR 1:{user_settings.get('rr_ratio',2.5)}<br>Currency: {user_settings.get('currency','ZAR')} {curr_sym} | Method: {method_key[:12]}<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Change Currency & Method</a></div></div>
+<div class='card'><div class='card-title'>Signals & Win Rate</div><div class='card-value'>{stats['total_trades']} Trades {stats['win_rate']}% WR</div><div style='font-size:9px;color:#94a3b8;margin-top:4px'>Wins: {stats['wins']} Losses: {stats['losses']} BE: {stats['be']}<br>TG: {tg_status} Refs: {ref_count}/10<br>Spread: {user_settings.get('spread_forex')} pips | {method_name}</div></div>
+<div class='card'><div class='card-title'>Account {user_settings.get('currency','ZAR')}</div><div class='card-value'>{curr_sym}{user_settings.get('account_size',142)}</div><div style='font-size:9px;color:#94a3b8'>Lot {user_settings.get('lot_size',0.01)} Lev {user_settings.get('leverage','1:500')}<br>Risk {user_settings.get('risk_percent',1)}% RR 1:{user_settings.get('rr_ratio',2.5)}<br>Currency: {user_settings.get('currency','ZAR')} {curr_sym}<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Change Currency & Method</a></div></div>
 <div class='card'><div class='card-title'>Watchlist</div><div style='margin:6px 0'>{sym_spans}</div><div style='font-size:9px;color:#94a3b8'>Last: {str(system.get('last_scan','Never'))[:16]}<br>Cooldown 4h same bias, 1h any</div></div>
-<div class='card' style='border:1px solid #10b98133'><a href='/dashboard-scan'><button class='btn-primary'>⚡ SCAN NOW ({method_name})</button></a><a href='/test-telegram' class='btn-secondary'>🧪 Test</a><a href='/link-telegram' class='btn-secondary'>🔗 Link TG</a><a href='/export-journal' class='btn-secondary'>📥 Export CSV</a>{admin_link}</div>
+<div class='card' style='border:1px solid #10b98133'><a href='/dashboard-scan'><button class='btn-primary'>SCAN NOW ({method_name})</button></a><a href='/test-telegram' class='btn-secondary'>Test</a><a href='/link-telegram' class='btn-secondary'>Link TG</a><a href='/export-journal' class='btn-secondary'>Export CSV</a>{admin_link}</div>
 </div>
-<div style='max-width:1600px;margin:0 auto;padding:0 10px 10px'><div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap'><h3 style='margin:0;font-size:13px'>Recent • {curr_sym}{stats['daily']:.2f} Today • {method_name}</h3><span style='font-size:9px;color:#94a3b8'>{stats['wins']}W / {stats['losses']}L / {stats['win_rate']}%</span></div><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>PnL</th></tr>{rows}</table></div></div>
+<div style='max-width:1600px;margin:0 auto;padding:0 10px 10px'><div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap'><h3 style='margin:0;font-size:13px'>Recent {curr_sym}{stats['daily']:.2f} Today {method_name}</h3><span style='font-size:9px;color:#94a3b8'>{stats['wins']}W / {stats['losses']}L / {stats['win_rate']}%</span></div><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>PnL</th></tr>{rows}</table></div></div>
 """
     return pro_layout(content,"Dashboard", is_admin=is_admin)
 
@@ -278,8 +276,6 @@ def settings_page():
             "sessions":request.form.getlist("sessions") or ["London"],
             "symbols":request.form.getlist("symbols") or ALL_SYMBOLS[:10]
         }
-        rr_def=METHODS.get(new_settings["trading_method"], METHODS["method1_premium_sweep"])["rr_default"]
-        if "rr_ratio" not in request.form: new_settings["rr_ratio"]=rr_def
         save_user_settings(email,new_settings)
         return redirect("/settings")
     s=get_user_settings(email)
@@ -288,23 +284,25 @@ def settings_page():
     rr=s.get('rr_ratio',2.5); trade_checked="checked" if s.get('trade_news',True) else ""
     curr=s.get('currency','ZAR'); method=s.get('trading_method','method1_premium_sweep')
     currency_options="".join([f"<option value='{code}' {'selected' if curr==code else ''}>{code} - {info['symbol']} {info['name']}</option>" for code,info in CURRENCY_MAP.items()])
-    method_options="".join([f"<option value='{key}' {'selected' if method==key else ''}>{val['name']} - RR 1:{val['rr_default']} - {val['desc'][:60]}</option>" for key,val in METHODS.items()])
+    method_options="".join([f"<option value='{key}' {'selected' if method==key else ''}>{val['name']} - RR 1:{val['rr_default']}</option>" for key,val in METHODS.items()])
+    curr_info=CURRENCY_MAP.get(curr, CURRENCY_MAP['ZAR'])
+    method_info=METHODS.get(method, METHODS['method1_premium_sweep'])
     content=f"""
 <div style='max-width:1000px;margin:0 auto;padding:10px'>
-<h1 style='font-size:16px'>⚙️ Settings • Currency + Trading Method + Spread + RR</h1>
+<h1 style='font-size:16px'>Settings Currency + Method + Spread + RR</h1>
 <form method='post'>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px'>
-<div class='card' style='border:2px solid #10b981'><div class='card-title'>💰 Currency Selector - FIRST</div><select name='currency' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0f172a;color:white;border:1px solid #10b981'>{currency_options}</select><div style='font-size:9px;color:#94a3b8;margin-top:4px'>ZAR=R, USD=$, EUR=€, GBP=£ - Affects all PnL display</div></div>
-<div class='card' style='border:2px solid #f59e0b'><div class='card-title'>📊 Trading Method Selector</div><select name='trading_method' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0f172a;color:white;border:1px solid #f59e0b'>{method_options}</select><div style='font-size:9px;color:#94a3b8;margin-top:4px'>Current: {METHODS.get(method, METHODS['method1_premium_sweep'])['desc']}</div></div>
+<div class='card' style='border:2px solid #10b981'><div class='card-title'>Currency Selector FIRST</div><select name='currency' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0f172a;color:white;border:1px solid #10b981'>{currency_options}</select><div style='font-size:9px;color:#94a3b8;margin-top:4px'>ZAR=R, USD=$, EUR=€, GBP=£</div></div>
+<div class='card' style='border:2px solid #f59e0b'><div class='card-title'>Trading Method Selector</div><select name='trading_method' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0f172a;color:white;border:1px solid #f59e0b'>{method_options}</select><div style='font-size:9px;color:#94a3b8;margin-top:4px'>{method_info['desc']}</div></div>
 </div>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:8px'>
-<div class='card'><div class='card-title'>Account Size ({CURRENCY_MAP.get(curr, CURRENCY_MAP['ZAR'])['symbol']})</div><input name='account_size' type='number' step='0.01' value='{s.get('account_size',142)}' style='width:100%;padding:10px;margin-top:6px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'></div>
+<div class='card'><div class='card-title'>Account Size ({curr_info['symbol']})</div><input name='account_size' type='number' step='0.01' value='{s.get('account_size',142)}' style='width:100%;padding:10px;margin-top:6px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'></div>
 <div class='card'><div class='card-title'>Lot Size</div><input name='lot_size' type='number' step='0.01' value='{s.get('lot_size',0.01)}' style='width:100%;padding:10px;margin-top:6px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'></div>
 <div class='card'><div class='card-title'>Leverage</div><select name='leverage' style='width:100%;padding:10px;margin-top:6px;border-radius:8px;background:#0f172a;color:white;border:1px solid #334155'><option value='1:100' {'selected' if s.get('leverage')=='1:100' else ''}>1:100</option><option value='1:200' {'selected' if s.get('leverage')=='1:200' else ''}>1:200</option><option value='1:500' {'selected' if s.get('leverage')=='1:500' else ''}>1:500</option><option value='1:1000' {'selected' if s.get('leverage')=='1:1000' else ''}>1:1000</option></select></div>
 <div class='card'><div class='card-title'>Risk %</div><input name='risk_percent' type='number' step='0.1' value='{s.get('risk_percent',1)}' style='width:100%;padding:10px;margin-top:6px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'></div>
 </div>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:8px;margin-top:8px'>
-<div class='card'><div class='card-title'>RR Ratio - Changeable</div><select name='rr_ratio' style='width:100%;padding:10px;margin-top:6px;border-radius:8px;background:#0f172a;color:white;border:1px solid #334155'><option value='1.5' {'selected' if str(rr)=='1.5' else ''}>1:1.5 Scalp</option><option value='2' {'selected' if str(rr)=='2' else ''}>1:2</option><option value='2.5' {'selected' if str(rr)=='2.5' else ''}>1:2.5 Recommended</option><option value='3' {'selected' if str(rr)=='3' else ''}>1:3 SMC</option><option value='4' {'selected' if str(rr)=='4' else ''}>1:4 Runner</option></select></div>
+<div class='card'><div class='card-title'>RR Ratio</div><select name='rr_ratio' style='width:100%;padding:10px;margin-top:6px;border-radius:8px;background:#0f172a;color:white;border:1px solid #334155'><option value='1.5' {'selected' if str(rr)=='1.5' else ''}>1:1.5 Scalp</option><option value='2' {'selected' if str(rr)=='2' else ''}>1:2</option><option value='2.5' {'selected' if str(rr)=='2.5' else ''}>1:2.5 Recommended</option><option value='3' {'selected' if str(rr)=='3' else ''}>1:3 SMC</option><option value='4' {'selected' if str(rr)=='4' else ''}>1:4 Runner</option></select></div>
 <div class='card'><div class='card-title'>Trade News?</div><label style='display:flex;gap:6px;align-items:center;background:#0f172a;padding:10px;border-radius:8px;margin-top:6px'><input type='checkbox' name='trade_news' value='yes' {trade_checked}><span style='font-size:11px'>Trade NFP/CPI/FOMC</span></label></div>
 </div>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;margin-top:8px'>
@@ -315,15 +313,11 @@ def settings_page():
 </div>
 <div class='card' style='margin-top:8px'><div class='card-title'>Sessions</div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(90px,1fr));gap:6px;margin-top:6px'>{sessions_html}</div></div>
 <div class='card' style='margin-top:8px'><div class='card-title'>Symbols 31 Total</div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(80px,1fr));gap:5px;max-height:350px;overflow-y:auto;margin-top:6px'>{symbols_html}</div></div>
-<button type='submit' class='btn-primary' style='margin-top:14px'>💾 SAVE - Currency {curr} + Method + Spread</button>
+<button type='submit' class='btn-primary' style='margin-top:14px'>SAVE Currency {curr} + Method</button>
 </form>
 </div>
 """
     return pro_layout(content,"Settings", is_admin=is_admin)
-
-#... (keep all other routes same as V19.9 but with currency_symbol)
-# For brevity, reusing previous routes with currency added - paste remaining routes from V19.9 here
-# Dashboard-scan, send-signal, test-telegram, webhook, login, register, journal, export, link-telegram, plans, guide, creator, pay, referral, cron, health
 
 @app.route("/all-signals")
 @app.route("/dashboard-scan")
@@ -332,8 +326,6 @@ def dashboard_scan():
     email=session.get("user"); is_admin=email=="admin@agent35.com"
     user_settings=get_user_settings(email)
     symbols_to_scan=user_settings.get("symbols", ALL_SYMBOLS[:12])
-    q=request.args.get("q","").upper()
-    if q: symbols_to_scan=[s for s in ALL_SYMBOLS if q in s]
     method_key=user_settings.get("trading_method","method1_premium_sweep")
     method_name=METHODS.get(method_key, METHODS["method1_premium_sweep"])["name"]
     rows=""
@@ -341,14 +333,19 @@ def dashboard_scan():
         try:
             r=eng.full_multi_tf_analysis(s, user_settings)
             score=r.get('score',0); bias=r.get('bias','NEUTRAL'); entry=r.get('entry',0)
-            entry_display=f"{float(entry):.5f}" if entry and float(entry)<20 else f"{float(entry):.2f}" if entry else "0"
+            if entry and float(entry)<20: entry_display=f"{float(entry):.5f}"
+            elif entry: entry_display=f"{float(entry):.2f}"
+            else: entry_display="0"
             premium=r.get('premium_pct',50)
-            color="#10b981" if score>=7 else "#f59e0b" if score>=5 else "#ef4444"
-            signal_btn=f"<a href='/send-signal?symbol={s}' style='background:#10b981;color:white;padding:5px 10px;border-radius:6px;text-decoration:none;font-weight:700;font-size:10px'>Send TG</a>" if r.get('signal') else f"<span style='color:#64748b;font-size:9px'>{r.get('reason','')[:45]}</span>"
+            if score>=7: color="#10b981"
+            elif score>=5: color="#f59e0b"
+            else: color="#ef4444"
+            if r.get('signal'): signal_btn=f"<a href='/send-signal?symbol={s}' style='background:#10b981;color:white;padding:5px 10px;border-radius:6px;text-decoration:none;font-weight:700;font-size:10px'>Send TG</a>"
+            else: signal_btn=f"<span style='color:#64748b;font-size:9px'>{r.get('reason','')[:45]}</span>"
             rows+=f"<tr><td style='font-weight:800'>{s}<br><span style='font-size:8px;color:#10b981'>{entry_display} | {premium:.0f}%</span></td><td><span style='background:{color}22;color:{color};padding:3px 6px;border-radius:20px;font-weight:800;font-size:9px'>{score}/10</span></td><td style='font-size:9px'>{bias}</td><td style='font-size:9px'>{'STRONG' if r.get('signal') else 'Wait'}</td><td>{signal_btn}</td></tr>"
         except Exception as e:
             rows+=f"<tr><td>{s}</td><td colspan=4 style='color:#ef4444;font-size:9px'>{str(e)[:50]}</td></tr>"
-    content=f"<div style='max-width:1600px;margin:0 auto;padding:10px'><div class='table-card'><h2 style='font-size:12px'>Signals • Method: {method_name} • RR 1:{user_settings.get('rr_ratio',2.5)} • {len(symbols_to_scan)} Pairs</h2><div style='overflow-x:auto'><table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div></div>"
+    content=f"<div style='max-width:1600px;margin:0 auto;padding:10px'><div class='table-card'><h2 style='font-size:12px'>Signals Method: {method_name} RR 1:{user_settings.get('rr_ratio',2.5)} {len(symbols_to_scan)} Pairs</h2><div style='overflow-x:auto'><table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div></div>"
     return pro_layout(content,"All Signals", is_admin=is_admin)
 
 @app.route("/send-signal")
@@ -388,8 +385,6 @@ def test_telegram():
     res=send_telegram_pro("GBPUSD", r.get('score',8), r.get('bias','BEARISH'), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence','Test'), curr_sym, method_name)
     return f"<html><body style='background:#080c14;color:white;padding:20px'><div style='max-width:700px;margin:auto;background:#1e293b;padding:16px;border-radius:14px'><h2 style='font-size:13px'>Test {entry} SL {sl} TP {tp} {curr_sym} RR 1:{rr} {method_name}</h2><p style='font-size:10px;background:#0f172a;padding:8px;border-radius:6px'>{str(res)[:2000]}</p><a href='/dashboard' style='background:#10b981;color:white;padding:8px 16px;border-radius:8px;text-decoration:none'>Back</a></div></body></html>"
 
-# Include remaining routes: webhook, login, register, journal, export, link-telegram, plans, guide, creator, pay, referral, cron, health as in V19.9 but with currency
-
 @app.route("/telegram/webhook", methods=["POST"])
 def telegram_webhook():
     data=request.get_json()
@@ -401,7 +396,7 @@ def telegram_webhook():
         temp[str(chat_id)]={"first_name":from_user.get("first_name",""),"username":from_user.get("username",""),"time":datetime.now().isoformat(),"text":data["message"].get("text","")[:100]}
         save_json(TEMP_CHAT_FILE, temp)
         if bot and "/start" in data["message"].get("text",""):
-            try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"AGENT 35 V20\nChat ID: {chat_id}\nPaste in Dashboard > Link TG Manual\nCurrency + Methods ready"}, timeout=5)
+            try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"AGENT 35 V20.1 FIXED\nChat ID: {chat_id}\nPaste in Dashboard > Link TG Manual\nCurrency + 5 Methods ready"}, timeout=5)
             except: pass
     if "callback_query" in data:
         cb=data["callback_query"]; cb_data=cb.get("data",""); cb_id=cb.get("id"); chat_id=cb["message"]["chat"]["id"]; user_name=cb["from"].get("first_name","User")
@@ -426,12 +421,13 @@ def telegram_webhook():
     return jsonify({"ok":True})
 
 @app.route("/login")
-def login_page(): return "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:#080c14;color:white;font-family:Arial;padding:12px;min-height:100vh;display:flex;align-items:center;justify-content:center'><div style='width:100%;max-width:360px;background:#1e293b;padding:20px;border-radius:16px'><div style='text-align:center;margin-bottom:16px'><div style='font-weight:900;font-size:18px;color:#10b981'>AGENT 35 PRO V20</div><div style='font-size:9px;color:#94a3b8'>Currency + Methods</div></div><form action='/login/check' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:10px;margin:5px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:10px;margin:5px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><button style='background:#10b981;color:white;padding:10px;width:100%;border:none;border-radius:8px;font-weight:800;margin-top:8px'>LOGIN</button></form></div></body></html>"
+def login_page(): return "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:#080c14;color:white;font-family:Arial;padding:12px;min-height:100vh;display:flex;align-items:center;justify-content:center'><div style='width:100%;max-width:360px;background:#1e293b;padding:20px;border-radius:16px'><div style='text-align:center;margin-bottom:16px'><div style='font-weight:900;font-size:18px;color:#10b981'>AGENT 35 PRO V20.1</div><div style='font-size:9px;color:#94a3b8'>Currency + Methods FIXED</div></div><form action='/login/check' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:10px;margin:5px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:10px;margin:5px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><button style='background:#10b981;color:white;padding:10px;width:100%;border:none;border-radius:8px;font-weight:800;margin-top:8px'>LOGIN</button></form></div></body></html>"
 
 @app.route("/register")
 def register_page():
     ref=request.args.get("ref","")
-    ref_banner=f"<div style='background:#10b98122;border:1px solid #10b98144;padding:6px;border-radius:6px;font-size:10px;color:#10b981;margin-bottom:8px'>Referred by: {ref}</div>" if ref else ""
+    if ref: ref_banner=f"<div style='background:#10b98122;border:1px solid #10b98144;padding:6px;border-radius:6px;font-size:10px;color:#10b981;margin-bottom:8px'>Referred by: {ref}</div>"
+    else: ref_banner=""
     return f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:#080c14;color:white;font-family:Arial;padding:12px;min-height:100vh;display:flex;align-items:center;justify-content:center'><div style='width:100%;max-width:360px;background:#1e293b;padding:20px;border-radius:16px'><h2 style='font-size:16px'>Create Account</h2>{ref_banner}<form action='/register/create' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><input name='name' placeholder='Full Name' required style='width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><input name='ref' value='{ref}' placeholder='Referral Code' style='width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #10b98144;background:#0f172a;color:white'><button style='background:#10b981;color:white;padding:10px;width:100%;border:none;border-radius:8px;font-weight:800;margin-top:8px'>CREATE</button></form></div></body></html>"
 
 @app.route("/register/create", methods=["POST"])
@@ -458,7 +454,9 @@ def journal_page():
     email=session.get("user"); is_admin=email=="admin@agent35.com"; journal=load_json(JOURNAL_FILE, list)
     user_set=get_user_settings(email); curr_sym=get_currency_symbol(user_set.get("currency","ZAR"))
     stats=calculate_pnl_stats(journal)
-    q=request.args.get("q","").upper(); filtered=[j for j in journal if q in j.get("symbol","").upper()] if q else journal
+    q=request.args.get("q","").upper()
+    if q: filtered=[j for j in journal if q in j.get("symbol","").upper()]
+    else: filtered=journal
     period=request.args.get("period","all")
     now=datetime.now()
     if period=="today": filtered=[j for j in filtered if j.get("date")==now.strftime("%Y-%m-%d")]
@@ -468,7 +466,14 @@ def journal_page():
     elif period=="month": filtered=[j for j in filtered if j.get("date","").startswith(now.strftime("%Y-%m"))]
     elif period=="year": filtered=[j for j in filtered if j.get("date","").startswith(now.strftime("%Y"))]
     rows="".join([f"<tr><td>{j.get('time')}</td><td>{j.get('symbol')}</td><td>{j.get('status')}</td><td>{j.get('result')}</td><td>{curr_sym}{j.get('pnl',0)}</td><td>{j.get('date','')}</td></tr>" for j in reversed(filtered[-200:])])
-    content=f"<div style='max-width:1400px;margin:0 auto;padding:10px'><h1 style='font-size:16px'>Journal • {len(filtered)} Trades • {curr_sym}{calculate_pnl_stats(filtered)['total_pnl']:.2f} • {calculate_pnl_stats(filtered)['win_rate']}% WR • {user_set.get('currency','ZAR')}</h1><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;margin:10px 0'><div class='card'><div class='card-title'>Daily</div><div class='card-value' style='font-size:14px;color:{\"#10b981\" if stats['daily']>=0 else \"#ef4444\"}'>{curr_sym}{stats['daily']:.2f}</div></div><div class='card'><div class='card-title'>Weekly</div><div class='card-value' style='font-size:14px'>{curr_sym}{stats['weekly']:.2f}</div></div><div class='card'><div class='card-title'>Monthly</div><div class='card-value' style='font-size:14px'>{curr_sym}{stats['monthly']:.2f}</div></div><div class='card'><div class='card-title'>Yearly</div><div class='card-value' style='font-size:14px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div style='display:flex;gap:5px;flex-wrap:wrap;margin:10px 0'><a href='/journal?period=all' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{\"#10b981\" if period==\"all\" else \"#1e293b\"};color:white'>All</a><a href='/journal?period=today' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{\"#10b981\" if period==\"today\" else \"#1e293b\"};color:white'>Today</a><a href='/journal?period=week' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{\"#10b981\" if period==\"week\" else \"#1e293b\"};color:white'>Week</a><a href='/journal?period=month' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{\"#10b981\" if period==\"month\" else \"#1e293b\"};color:white'>Month</a><a href='/journal?period=year' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{\"#10b981\" if period==\"year\" else \"#1e293b\"};color:white'>Year</a><a href='/export-journal' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:#f59e0b;color:white'>Export</a></div><div class='table-card'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>PnL {curr_sym}</th><th>Date</th></tr>{rows}</table></div></div>"
+    filtered_stats=calculate_pnl_stats(filtered)
+    bg_all="#10b981" if period=="all" else "#1e293b"
+    bg_today="#10b981" if period=="today" else "#1e293b"
+    bg_week="#10b981" if period=="week" else "#1e293b"
+    bg_month="#10b981" if period=="month" else "#1e293b"
+    bg_year="#10b981" if period=="year" else "#1e293b"
+    daily_color="#10b981" if stats['daily']>=0 else "#ef4444"
+    content=f"<div style='max-width:1400px;margin:0 auto;padding:10px'><h1 style='font-size:16px'>Journal {len(filtered)} Trades {curr_sym}{filtered_stats['total_pnl']:.2f} {filtered_stats['win_rate']}% WR {user_set.get('currency','ZAR')}</h1><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(120px,1fr));gap:6px;margin:10px 0'><div class='card'><div class='card-title'>Daily</div><div class='card-value' style='font-size:14px;color:{daily_color}'>{curr_sym}{stats['daily']:.2f}</div></div><div class='card'><div class='card-title'>Weekly</div><div class='card-value' style='font-size:14px'>{curr_sym}{stats['weekly']:.2f}</div></div><div class='card'><div class='card-title'>Monthly</div><div class='card-value' style='font-size:14px'>{curr_sym}{stats['monthly']:.2f}</div></div><div class='card'><div class='card-title'>Yearly</div><div class='card-value' style='font-size:14px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div style='display:flex;gap:5px;flex-wrap:wrap;margin:10px 0'><a href='/journal?period=all' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{bg_all};color:white'>All</a><a href='/journal?period=today' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{bg_today};color:white'>Today</a><a href='/journal?period=week' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{bg_week};color:white'>Week</a><a href='/journal?period=month' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{bg_month};color:white'>Month</a><a href='/journal?period=year' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:{bg_year};color:white'>Year</a><a href='/export-journal' style='padding:6px 12px;border-radius:20px;text-decoration:none;font-size:10px;background:#f59e0b;color:white'>Export</a></div><div class='table-card'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>PnL {curr_sym}</th><th>Date</th></tr>{rows}</table></div></div>"
     return pro_layout(content,"Journal", is_admin=is_admin)
 
 @app.route("/export-journal")
@@ -490,7 +495,7 @@ def link_telegram():
             tg_users[email]={"chat_id":chat_id,"linked_at":datetime.now().isoformat(),"manual":True}
             save_json(TG_FILE, tg_users); return redirect("/dashboard")
     current=tg_users.get(email,{}).get("chat_id","Not linked")
-    content=f"<div style='max-width:600px;margin:0 auto;padding:10px'><div class='card'><h2 style='font-size:14px'>🔗 Link Telegram Manual</h2><div style='background:#0f172a;padding:8px;border-radius:8px;font-size:10px;margin:8px 0'>Current: {current}</div><a href='https://t.me/Sniper035_bot' target='_blank' style='background:#0088cc;color:white;padding:10px;border-radius:8px;text-align:center;display:block;text-decoration:none;font-weight:800;margin:8px 0'>Open @Sniper035_bot /start</a><form method='post'><input name='chat_id' placeholder='Paste Chat ID' style='width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white' required><button type='submit' style='background:#10b981;color:white;padding:10px;width:100%;border:none;border-radius:8px;font-weight:800;margin-top:6px'>Save</button></form></div></div>"
+    content=f"<div style='max-width:600px;margin:0 auto;padding:10px'><div class='card'><h2 style='font-size:14px'>Link Telegram Manual</h2><div style='background:#0f172a;padding:8px;border-radius:8px;font-size:10px;margin:8px 0'>Current: {current}</div><a href='https://t.me/Sniper035_bot' target='_blank' style='background:#0088cc;color:white;padding:10px;border-radius:8px;text-align:center;display:block;text-decoration:none;font-weight:800;margin:8px 0'>Open @Sniper035_bot /start</a><form method='post'><input name='chat_id' placeholder='Paste Chat ID' style='width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white' required><button type='submit' style='background:#10b981;color:white;padding:10px;width:100%;border:none;border-radius:8px;font-weight:800;margin-top:6px'>Save</button></form></div></div>"
     return pro_layout(content,"Settings", is_admin=is_admin)
 
 @app.route("/plans")
@@ -499,12 +504,12 @@ def plans_page():
     user_set=get_user_settings(session.get("user","admin@agent35.com")); curr_sym=get_currency_symbol(user_set.get("currency","ZAR"))
     content=f"""
 <div style='max-width:900px;margin:0 auto;padding:10px'>
-<h1 style='font-size:18px'>💳 Plans • {curr_sym} Currency Supported • Capitec 2586572676</h1>
+<h1 style='font-size:18px'>Plans {curr_sym} Currency Supported Capitec 2586572676</h1>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:10px;margin-top:10px'>
-<div class='card'><h3>📅 Yearly {curr_sym}500</h3><div style='font-size:24px;font-weight:900;color:#10b981'>{curr_sym}500/year</div><ul style='font-size:11px;color:#94a3b8;line-height:1.7;padding-left:14px;margin:10px 0'><li>31 Symbols + 5 Methods selectable</li><li>Currency ZAR/USD/EUR/GBP</li><li>Spread included SL/TP</li><li>Daily/Weekly/Monthly PnL {curr_sym}</li><li>Auto Track WIN/LOSS</li><li>Mobile Adaptive</li></ul><a href='/pay?plan=yearly' style='background:#10b981;color:white;padding:10px;border-radius:8px;text-align:center;display:block;text-decoration:none;font-weight:800'>Get Yearly</a></div>
-<div class='card' style='border:2px solid #f59e0b'><div style='background:#f59e0b;color:white;padding:3px 8px;border-radius:20px;font-size:9px;font-weight:800;display:inline-block'>POPULAR</div><h3>♾️ Lifetime {curr_sym}5000</h3><div style='font-size:24px;font-weight:900;color:#f59e0b'>{curr_sym}5000</div><ul style='font-size:11px;color:#94a3b8;line-height:1.7;padding-left:14px;margin:10px 0'><li>All Yearly + Lifetime updates</li><li>All 5 Methods + Future Methods Free</li><li>All Currencies Free</li><li>No Renewal Ever</li></ul><a href='/pay?plan=lifetime' style='background:#f59e0b;color:white;padding:10px;border-radius:8px;text-align:center;display:block;text-decoration:none;font-weight:800'>Get Lifetime</a></div>
+<div class='card'><h3>Yearly {curr_sym}500</h3><div style='font-size:24px;font-weight:900;color:#10b981'>{curr_sym}500/year</div><ul style='font-size:11px;color:#94a3b8;line-height:1.7;padding-left:14px;margin:10px 0'><li>31 Symbols + 5 Methods selectable</li><li>Currency ZAR/USD/EUR/GBP</li><li>Spread included SL/TP</li><li>Daily/Weekly/Monthly PnL {curr_sym}</li><li>Auto Track WIN/LOSS</li><li>Mobile Adaptive</li></ul><a href='/pay?plan=yearly' style='background:#10b981;color:white;padding:10px;border-radius:8px;text-align:center;display:block;text-decoration:none;font-weight:800'>Get Yearly</a></div>
+<div class='card' style='border:2px solid #f59e0b'><div style='background:#f59e0b;color:white;padding:3px 8px;border-radius:20px;font-size:9px;font-weight:800;display:inline-block'>POPULAR</div><h3>Lifetime {curr_sym}5000</h3><div style='font-size:24px;font-weight:900;color:#f59e0b'>{curr_sym}5000</div><ul style='font-size:11px;color:#94a3b8;line-height:1.7;padding-left:14px;margin:10px 0'><li>All Yearly + Lifetime updates</li><li>All 5 Methods + Future Methods Free</li><li>All Currencies Free</li><li>No Renewal Ever</li></ul><a href='/pay?plan=lifetime' style='background:#f59e0b;color:white;padding:10px;border-radius:8px;text-align:center;display:block;text-decoration:none;font-weight:800'>Get Lifetime</a></div>
 </div>
-<div class='card' style='margin-top:10px'><h3>🏦 Capitec 2586572676</h3><div style='background:#0f172a;padding:10px;border-radius:8px;font-size:11px'>Bank: Capitec | Acc: 2586572676 | Ref: A35-XXXX | Currency: You can pay in {curr_sym} equivalent</div></div>
+<div class='card' style='margin-top:10px'><h3>Capitec 2586572676</h3><div style='background:#0f172a;padding:10px;border-radius:8px;font-size:11px'>Bank: Capitec Acc: 2586572676 Ref: A35-XXXX Currency: You can pay in {curr_sym} equivalent</div></div>
 </div>
 """
     return pro_layout(content,"Plans", is_admin=is_admin)
@@ -514,12 +519,12 @@ def guide_page():
     is_admin=session.get("user")=="admin@agent35.com"
     content="""
 <div style='max-width:800px;margin:0 auto;padding:10px'>
-<h1 style='font-size:16px'>📖 Guide V20 - Currency + Methods</h1>
+<h1 style='font-size:16px'>Guide V20.1 - Currency + Methods FIXED</h1>
 <div style='display:grid;gap:8px;margin-top:10px'>
-<div class='card' style='border-left:3px solid #10b981'><h3 style='font-size:12px'>1. Currency FIRST</h3><p style='font-size:10px;color:#94a3b8'>Settings → Currency Selector → ZAR=R, USD=$, EUR=€, GBP=£. All PnL, Dashboard, Telegram will show in that currency. If you have R142 account choose ZAR, $100 choose USD.</p></div>
-<div class='card' style='border-left:3px solid #f59e0b'><h3 style='font-size:12px'>2. Trading Method</h3><p style='font-size:10px;color:#94a3b8'>Settings → Trading Method: Method1 Premium/Sweep (safe, 65% WR), Method2 EMA+RSI (more signals), Method3 Breakout (US30), Method4 Scalp M5 (R142 small account, 1:1.5 RR, 10-20/day), Method5 SMC OB+BOS (advanced 70% WR). Each method has different RR default.</p></div>
+<div class='card' style='border-left:3px solid #10b981'><h3 style='font-size:12px'>1. Currency FIRST</h3><p style='font-size:10px;color:#94a3b8'>Settings Currency Selector ZAR=R, USD=$, EUR=€, GBP=£. All PnL, Dashboard, Telegram will show in that currency.</p></div>
+<div class='card' style='border-left:3px solid #f59e0b'><h3 style='font-size:12px'>2. Trading Method</h3><p style='font-size:10px;color:#94a3b8'>Method1 Premium/Sweep safe 65% WR, Method2 EMA+RSI more signals, Method3 Breakout US30, Method4 Scalp M5 R142 small account 1:1.5 RR 10-20/day, Method5 SMC OB+BOS advanced 70% WR.</p></div>
 <div class='card' style='border-left:3px solid #10b981'><h3 style='font-size:12px'>3. Spread + RR + Risk</h3><p style='font-size:10px;color:#94a3b8'>Enter broker spread: Forex 0.7 pips, Gold 0.35$. Bot adds spread to SL, subtracts from TP. RR changeable 1:1.5 to 1:4. Risk % 1% recommended.</p></div>
-<div class='card' style='border-left:3px solid #3b82f6'><h3 style='font-size:12px'>4. First Signal</h3><p style='font-size:10px;color:#94a3b8'>Scan Now → All Signals shows entry + method. Telegram sends with currency symbol + method name. TOOK ENTRY → Journal logs with currency. Auto track hits SL/TP → WIN/LOSS auto + PnL in your currency.</p></div>
+<div class='card' style='border-left:3px solid #3b82f6'><h3 style='font-size:12px'>4. First Signal</h3><p style='font-size:10px;color:#94a3b8'>Scan Now All Signals shows entry + method. Telegram sends with currency symbol + method name. TOOK ENTRY Journal logs with currency. Auto track hits SL/TP WIN/LOSS auto + PnL in your currency.</p></div>
 </div>
 </div>
 """
@@ -530,7 +535,7 @@ def creator_dashboard():
     secret=request.args.get("secret",""); users=load_json(USERS_FILE)
     pending={k:v for k,v in users.items() if v.get("status")=="pending"}
     pending_rows="".join([f"<tr><td style='font-size:9px'>{ref}</td><td style='font-size:9px'>{pay.get('user','')[:20]}</td><td>R{pay.get('price','')}</td><td><a href='/creator/action?act=approve_payment&ref={ref}&secret={secret}' style='background:#10b981;color:white;padding:5px 8px;border-radius:5px;text-decoration:none;font-size:9px'>APPROVE</a></td></tr>" for ref,pay in pending.items()]) or "<tr><td colspan=4 style='text-align:center;color:#64748b'>No pending</td></tr>"
-    content=f"<div style='max-width:1600px;margin:0 auto;padding:10px'><h1 style='font-size:16px'>Creator V20 Currency+Methods</h1><div class='table-card'><h3 style='font-size:12px'>PENDING ({len(pending)})</h3><table><tr><th>Ref</th><th>Email</th><th>Price</th><th>Action</th></tr>{pending_rows}</table></div></div>"
+    content=f"<div style='max-width:1600px;margin:0 auto;padding:10px'><h1 style='font-size:16px'>Creator V20.1 FIXED</h1><div class='table-card'><h3 style='font-size:12px'>PENDING ({len(pending)})</h3><table><tr><th>Ref</th><th>Email</th><th>Price</th><th>Action</th></tr>{pending_rows}</table></div></div>"
     return pro_layout(content,"Master", is_admin=True)
 
 @app.route("/creator/action")
@@ -552,7 +557,7 @@ def pay_page():
     plan=request.args.get("plan","yearly")
     ref=request.args.get("ref",""); email=session.get("user","")
     price=PLANS.get(plan,PLANS["yearly"])["price"]
-    content=f"<div style='max-width:500px;margin:0 auto;padding:10px'><div class='card'><h2 style='font-size:14px'>Buy {plan.upper()} R{price}</h2><form action='/pay/create' method='get'><input type='hidden' name='ref' value='{ref}'><input name='user' value='{email}' placeholder='Email' required style='width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><input name='phone' placeholder='WhatsApp' required style='width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><select name='plan' style='width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><option value='yearly' {'selected' if plan=='yearly' else ''}>Yearly R500</option><option value='lifetime' {'selected' if plan=='lifetime' else ''}>Lifetime R5000</option></select><button style='background:#10b981;color:white;padding:10px;width:100%;border:none;border-radius:8px;margin-top:8px;font-weight:800'>GET REF - Capitec 2586572676</button></form></div></div>"
+    content=f"<div style='max-width:500px;margin:0 auto;padding:10px'><div class='card'><h2 style='font-size:14px'>Buy {plan.upper()} R{price}</h2><form action='/pay/create' method='get'><input type='hidden' name='ref' value='{ref}'><input name='user' value='{email}' placeholder='Email' required style='width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><input name='phone' placeholder='WhatsApp' required style='width:100%;padding:10px;margin:4px 0;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><select name='plan' style='width:100%;padding:10px;border-radius:8px;border:1px solid #334155;background:#0f172a;color:white'><option value='yearly' {'selected' if plan=='yearly' else ''}>Yearly R500</option><option value='lifetime' {'selected' if plan=='lifetime' else ''}>Lifetime R5000</option></select><button style='background:#10b981;color:white;padding:10px;width:100%;border:none;border-radius:8px;margin-top:8px;font-weight:800'>GET REF Capitec 2586572676</button></form></div></div>"
     return pro_layout(content,"Plans", is_admin=session.get("user")=="admin@agent35.com")
 
 @app.route("/pay/create")
@@ -575,10 +580,13 @@ def referral_page():
         if info.get("referred_by","").upper()==my_code.upper():
             status="PAID" if "ACTIVE" in info.get("plan_status","") else "Pending"
             my_refs.append({"email":e,"status":status,"plan":info.get("plan_status","")})
-    paid_count=len([r for r in my_refs if "PAID" in r["status"]]); progress=int((paid_count/10)*100) if paid_count<=10 else 100
+    paid_count=len([r for r in my_refs if "PAID" in r["status"]])
+    if paid_count<=10: progress=int((paid_count/10)*100)
+    else: progress=100
     refs_html="".join([f"<tr><td style='font-size:9px'>{r['email'][:22]}</td><td style='font-size:9px'>{r['status']}</td><td style='font-size:9px'>{r['plan'][:18]}</td></tr>" for r in my_refs]) or "<tr><td colspan=3 style='text-align:center;color:#64748b;font-size:10px'>No refs</td></tr>"
     link=f"https://agent-35-trading-bot.onrender.com/register?ref={my_code}"
-    free_banner="<div style='background:#10b981;color:white;padding:8px;border-radius:8px;text-align:center;font-weight:800;margin-top:8px;font-size:11px'>FREE LIFETIME UNLOCKED!</div>" if paid_count>=10 else ""
+    if paid_count>=10: free_banner="<div style='background:#10b981;color:white;padding:8px;border-radius:8px;text-align:center;font-weight:800;margin-top:8px;font-size:11px'>FREE LIFETIME UNLOCKED!</div>"
+    else: free_banner=""
     content=f"<div style='max-width:900px;margin:0 auto;padding:10px'><h1 style='font-size:16px'>Referral 10=Free</h1><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:8px'><div class='card'><div class='card-title'>Code</div><div style='background:white;color:black;padding:10px;border-radius:8px;font-weight:900;font-size:18px;text-align:center;margin:8px 0'>{my_code}</div><div style='background:#0f172a;padding:6px;border-radius:6px;font-size:8px;word-break:break-all'>{link}</div></div><div class='card'><div class='card-title'>Progress {paid_count}/10</div><div style='background:#0f172a;border-radius:20px;height:10px;overflow:hidden;margin:8px 0'><div style='background:#10b981;width:{progress}%;height:100%'></div></div>{free_banner}</div></div><div class='table-card' style='margin-top:10px'><h3 style='font-size:12px'>Refs ({len(my_refs)})</h3><table><tr><th>Email</th><th>Status</th><th>Plan</th></tr>{refs_html}</table></div></div>"
     return pro_layout(content,"Referral", is_admin=is_admin)
 
@@ -657,7 +665,7 @@ def cron_scan():
 def health():
     test=eng.full_multi_tf_analysis("GBPUSD", {"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"currency":"ZAR","trading_method":"method1_premium_sweep"})
     tracked=load_json(TRACK_FILE, dict); journal=load_json(JOURNAL_FILE, list); stats=calculate_pnl_stats(journal)
-    return jsonify({"ok":True,"version":"V20 Currency+5 Methods","entry":test.get('entry'),"score":test.get('score'),"bias":test.get('bias'),"method":test.get('method'),"tracked":len(tracked),"stats":stats})
+    return jsonify({"ok":True,"version":"V20.1 FIXED Currency+5 Methods","entry":test.get('entry'),"score":test.get('score'),"bias":test.get('bias'),"method":test.get('method'),"tracked":len(tracked),"stats":stats})
 
 if __name__=="__main__":
     app.run(host="0.0.0.0", port=10000)
