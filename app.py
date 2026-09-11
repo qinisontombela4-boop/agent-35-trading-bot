@@ -5,18 +5,10 @@ from datetime import datetime, timedelta
 
 load_dotenv()
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET", "agent35-v19-4-real-price")
+app.secret_key = os.getenv("FLASK_SECRET", "agent35-v19-5-real-engine")
 
-try:
-    import trading_engine as eng
-    HAS_ENGINE = True
-except:
-    HAS_ENGINE = False
-    class DummyEng:
-        @staticmethod
-        def full_multi_tf_analysis(sym):
-            return {"score": random.randint(5,7), "bias": "SELL" if random.random()>0.5 else "BUY", "signal": "SELL NOW", "reason": "· HTF: Daily PREMIUM 71% | 4H PREMIUM 92%\n· ✅ 4H PREMIUM 92% aligned\n· 🔥 5M: Price in PREMIUM 71%\n· ✅ Daily PREMIUM 71%"}
-    eng = DummyEng()
+# Your real engine - returns real H1 close price
+import trading_engine as eng
 
 BASE_DIR = "/data" if os.path.exists("/data") else "."
 AUTH_FILE = os.path.join(BASE_DIR, "auth_users.json")
@@ -52,9 +44,9 @@ def hash_pwd(p):
 def ensure_files():
     if not os.path.exists(AUTH_FILE):
         save_json(AUTH_FILE, {"admin@agent35.com":{"email":"admin@agent35.com","name":"Master Creator","password":hash_pwd("Agent35!"),"account_size":142.0,"total_profit":-1.42,"plan_status":"ACTIVE lifetime - CREATOR","referred_by":"","expires":(datetime.now()+timedelta(days=36500)).isoformat(),"created":datetime.now().isoformat(),"reset_token":None,"ref_code":"ADMIN35"}})
-    for p in [USERS_FILE, REFERRAL_FILE, REF_CODE_FILE, SETTINGS_FILE, TG_FILE, TEMP_CHAT_FILE]:
-        if not os.path.exists(p):
-            save_json(p, {})
+    for fp in [USERS_FILE, REFERRAL_FILE, REF_CODE_FILE, SETTINGS_FILE, TG_FILE, TEMP_CHAT_FILE]:
+        if not os.path.exists(fp):
+            save_json(fp, {})
     if not os.path.exists(JOURNAL_FILE):
         save_json(JOURNAL_FILE, [])
     if not os.path.exists(TRACK_FILE):
@@ -70,9 +62,9 @@ def get_user_settings(email):
     return settings.get(email, default)
 
 def save_user_settings(email, new_settings):
-    settings = load_json(SETTINGS_FILE, dict)
-    settings[email] = new_settings
-    save_json(SETTINGS_FILE, settings)
+    s = load_json(SETTINGS_FILE, dict)
+    s[email] = new_settings
+    save_json(SETTINGS_FILE, s)
 
 def generate_ref_code(email):
     code_file = load_json(REF_CODE_FILE, dict)
@@ -101,8 +93,8 @@ def get_ref_count_and_auto_upgrade(referrer_email):
             if "ACTIVE" in info.get("plan_status",""):
                 count += 1
     if count >= 10 and referrer_email in auth:
-        current_status = auth[referrer_email].get("plan_status","")
-        if "CREATOR" not in current_status and "lifetime" not in current_status.lower():
+        cur = auth[referrer_email].get("plan_status","")
+        if "CREATOR" not in cur and "lifetime" not in cur.lower():
             auth[referrer_email]["plan_status"] = "ACTIVE lifetime - FREE 10 Referrals"
             auth[referrer_email]["expires"] = (datetime.now()+timedelta(days=36500)).isoformat()
             save_json(AUTH_FILE, auth)
@@ -111,131 +103,52 @@ def get_ref_count_and_auto_upgrade(referrer_email):
     save_json(REFERRAL_FILE, ref_data)
     return count
 
-def get_real_price(symbol):
-    """Get REAL live price for any symbol - FIXED"""
-    try:
-        if HAS_ENGINE:
-            if hasattr(eng, 'get_current_price'):
-                p = eng.get_current_price(symbol)
-                if p and float(p) > 0:
-                    return float(p)
-            if hasattr(eng, 'get_price'):
-                p = eng.get_price(symbol)
-                if p and float(p) > 0:
-                    return float(p)
-            # Try get from analysis if engine returns price
-            try:
-                analysis = eng.full_multi_tf_analysis(symbol)
-                if analysis.get('entry'):
-                    return float(analysis.get('entry'))
-                if analysis.get('price'):
-                    return float(analysis.get('price'))
-                if analysis.get('current_price'):
-                    return float(analysis.get('current_price'))
-            except:
-                pass
-
-        base = symbol[:3]
-        quote = symbol[3:]
-        if len(base)==3 and len(quote)==3:
-            try:
-                r = requests.get(f"https://open.er-api.com/v6/latest/{base}", timeout=4).json()
-                if r.get('result') == 'success':
-                    rate = r['rates'].get(quote)
-                    if rate:
-                        return float(rate)
-            except:
-                pass
-            try:
-                r2 = requests.get(f"https://api.frankfurter.app/latest?from={base}&to={quote}", timeout=4).json()
-                if 'rates' in r2:
-                    return float(r2['rates'][quote])
-            except:
-                pass
-
-        if "BTC" in symbol:
-            try:
-                r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=BTCUSDT", timeout=4).json()
-                return float(r['price'])
-            except:
-                pass
-        if "ETH" in symbol:
-            try:
-                r = requests.get("https://api.binance.com/api/v3/ticker/price?symbol=ETHUSDT", timeout=4).json()
-                return float(r['price'])
-            except:
-                pass
-        if "XAU" in symbol:
-            # Gold ~ 2600, use fallback if API fails
-            return None
-
-    except Exception as e:
-        print(f"Price fetch error {symbol}: {e}")
-    return None
-
-def calculate_sl_tp(symbol, entry, bias, score):
-    """Calculate SL/TP with 1:2.5 RR based on REAL entry"""
-    bias_upper = bias.upper()
-    is_sell = "SELL" in bias_upper
-
+def calculate_sl_tp(symbol, entry, bias_text):
+    entry = float(entry)
+    is_sell = "BEARISH" in bias_text.upper() or "SELL" in bias_text.upper()
     if symbol in ["XAUUSD","XAGUSD"]:
         sl_dist = 5.0
         tp_dist = 12.5
     elif symbol in ["US30","NAS100","SPX500","GER40","UK100"]:
-        sl_dist = 50
-        tp_dist = 125
+        sl_dist = 80
+        tp_dist = 200
     elif "JPY" in symbol:
-        sl_dist = 0.15
-        tp_dist = 0.375
+        sl_dist = 0.20
+        tp_dist = 0.50
     elif "BTC" in symbol:
-        sl_dist = 300
-        tp_dist = 750
+        sl_dist = 400
+        tp_dist = 1000
     elif "ETH" in symbol:
-        sl_dist = 30
-        tp_dist = 75
+        sl_dist = 40
+        tp_dist = 100
     else:
         sl_dist = 0.0010
         tp_dist = 0.0025
-
     if is_sell:
         sl = entry + sl_dist
         tp = entry - tp_dist
     else:
         sl = entry - sl_dist
         tp = entry + tp_dist
-
     if entry < 20:
         return round(sl,5), round(tp,5)
     else:
         return round(sl,2), round(tp,2)
 
 def send_telegram_pro(symbol, score, bias, entry, sl, tp, rr, risk, confluence_text):
-    real_price = get_real_price(symbol)
-    if real_price and real_price > 0:
-        # Only override if real price is sensible (not 1.16 when GBPUSD is 1.35)
-        # Check if fake: if entry 1.16 but real is 1.35, difference >0.1, use real
-        if abs(float(entry) - real_price) > 0.05 or float(entry) < 1.2 and symbol=="GBPUSD":
-            entry = real_price
-            sl, tp = calculate_sl_tp(symbol, entry, bias, score)
-    else:
-        # If no real price API, ensure GBPUSD not stuck at 1.16
-        if symbol == "GBPUSD" and float(entry) < 1.2:
-            entry = 1.35057
-            sl, tp = calculate_sl_tp(symbol, entry, bias, score)
-
     entry_f = float(entry)
-    sl_f = float(sl)
-    tp_f = float(tp)
-
+    if entry_f == 0:
+        return {"error":"No real price - TwelveData 429"}
+    display_score = min(score,8) if score <= 10 else 5
+    signal_type = "BUY" if "BULLISH" in bias.upper() or "BUY" in bias.upper() else "SELL"
     if entry_f < 20:
         entry_fmt = f"{entry_f:.5f}"
-        sl_fmt = f"{sl_f:.5f}"
-        tp_fmt = f"{tp_f:.5f}"
+        sl_fmt = f"{float(sl):.5f}"
+        tp_fmt = f"{float(tp):.5f}"
     else:
         entry_fmt = f"{entry_f:.2f}"
-        sl_fmt = f"{sl_f:.2f}"
-        tp_fmt = f"{tp_f:.2f}"
-
+        sl_fmt = f"{float(sl):.2f}"
+        tp_fmt = f"{float(tp):.2f}"
     bot = os.getenv("TELEGRAM_BOT_TOKEN")
     main_chat = os.getenv("TELEGRAM_CHAT_ID")
     tg_users = load_json(TG_FILE, dict)
@@ -247,12 +160,10 @@ def send_telegram_pro(symbol, score, bias, entry, sl, tp, rr, risk, confluence_t
         if cid and cid not in all_chats:
             all_chats.append(cid)
     if not bot or not all_chats:
-        return {"error":"no bot token or no chats linked"}
-
-    signal_type = "BUY" if "BUY" in bias.upper() else "SELL"
-    standard_score = f"STANDARD {score}/8"
+        return {"error":"no bot token or no chats linked - add in /link-telegram"}
+    standard_score = f"STANDARD {display_score}/8"
     sast_now = (datetime.utcnow()+timedelta(hours=2)).strftime("%H:%M SAST")
-    text = f"🔴 {symbol} {signal_type} | {standard_score}\n\n📊\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt}\n🎯 TP: {tp_fmt}\n📊 RR: {rr} | Risk: ${risk}\n\n🔍 Confluence:\n{confluence_text}\n\n📝 HTF PREMIUM + 5M PRICE + FVG | Score {score}/8 | V19 PRO\n⏰ {sast_now} | {sast_now}"
+    text = f"🔴 {symbol} {signal_type} | {standard_score}\n\n📊\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt}\n🎯 TP: {tp_fmt}\n📊 RR: {rr} | Risk: ${risk}\n\n🔍 Confluence:\n{confluence_text}\n\n📝 HTF PREMIUM + 5M PRICE + FVG | Score {display_score}/8 | V19 PRO\n⏰ {sast_now} | {sast_now}"
     keyboard = {"inline_keyboard": [[{"text":"✅ TOOK ENTRY","callback_data":f"TOOK_{symbol}_{entry_fmt}"},{"text":"❌ SKIP","callback_data":f"SKIP_{symbol}"}],[{"text":"📊 View Journal","url":"https://agent-35-trading-bot.onrender.com/journal"}]]}
     results = []
     for chat_id in all_chats:
@@ -297,8 +208,8 @@ def pro_layout(content, active="Dashboard", is_admin=False):
             nav_html += f"<a href='{url}' style='padding:9px 16px;border-radius:10px;text-decoration:none;color:white;font-weight:700;font-size:13px;background:linear-gradient(135deg,#10b981,#059669);margin-right:6px'>{icon} {t}</a>"
         else:
             nav_html += f"<a href='{url}' style='padding:9px 16px;border-radius:10px;text-decoration:none;color:#94a3b8;font-weight:600;font-size:13px;background:#1e293b;margin-right:6px'>{icon} {t}</a>"
-    html_start = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>AGENT 35 PRO V19</title><link href='https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700;900&display=swap' rel='stylesheet'><style>body{background:#080c14;color:#e2e8f0;font-family:Inter,Arial,sans-serif;margin:0}.topbar{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border-bottom:1px solid #1e293b;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.logo{font-weight:900;font-size:20px;background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent}.badge{background:linear-gradient(135deg,#10b981,#059669);padding:4px 10px;border-radius:20px;font-weight:700;font-size:11px;color:white}.badge-warn{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:4px 10px;border-radius:20px;font-size:11px}.navbar{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 20px;display:flex;gap:8px;overflow-x:auto;position:sticky;top:60px;z-index:90}.main{padding:20px;display:grid;grid-template-columns:1fr 1fr 1fr 320px;gap:16px;max-width:1600px;margin:0 auto}.card{background:linear-gradient(145deg,#1e293b 0%,#162032 100%);border-radius:20px;padding:20px;border:1px solid #2a3a52}.card-title{color:#94a3b8;font-size:11px;letter-spacing:1px;font-weight:700;text-transform:uppercase}.card-value{font-size:28px;font-weight:900}.btn-primary{background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;border-radius:14px;font-weight:800;border:none;width:100%;cursor:pointer}.btn-secondary{background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;display:block;text-decoration:none;margin-top:10px}.table-card{grid-column:1 / span 4;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);border-radius:20px;padding:20px;border:1px solid #2a3a52} table{width:100%;border-collapse:collapse} th{color:#64748b;text-align:left;padding:12px 10px;font-size:10px;text-transform:uppercase;border-bottom:1px solid #334155} td{padding:14px 10px;border-bottom:1px solid #1e293b;font-size:13px}.pill{padding:5px 12px;border-radius:20px;font-size:11px;font-weight:700}.pill-took{background:#10b98122;color:#10b981}.pill-miss{background:#ef444422;color:#ef4444}.search-box{background:#0f172a;border:1px solid #334155;color:white;padding:12px 16px;border-radius:12px;width:100%} @media(max-width:1100px){.main{grid-template-columns:1fr 1fr}.table-card{grid-column:1 / span 2}} @media(max-width:640px){.main{grid-template-columns:1fr}.table-card{grid-column:1}} </style></head><body>"
-    topbar = f"<div class='topbar'><div class='logo'>AGENT 35 PRO V19.4 REAL</div><div style='display:flex;gap:12px;align-items:center;font-size:12px;flex-wrap:wrap'><span class='badge'>LONDON ACTIVE</span><span class='badge-warn'>UTC {utc} | SAST {sast}</span><span class='badge-warn' style='color:#10b981'>{user[:22]}</span><span class='badge-warn'>{plan_status[:24]}</span></div></div>"
+    html_start = "<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>AGENT 35 PRO V19.5 REAL</title><style>body{background:#080c14;color:#e2e8f0;font-family:Arial,sans-serif;margin:0}.topbar{background:linear-gradient(135deg,#0f172a 0%,#1e293b 100%);border-bottom:1px solid #1e293b;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}.logo{font-weight:900;font-size:20px;color:#10b981}.badge{background:linear-gradient(135deg,#10b981,#059669);padding:4px 10px;border-radius:20px;font-weight:700;font-size:11px;color:white}.badge-warn{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:4px 10px;border-radius:20px;font-size:11px}.navbar{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 20px;display:flex;gap:8px;overflow-x:auto;position:sticky;top:60px;z-index:90}.main{padding:20px;display:grid;grid-template-columns:1fr 1fr 1fr 320px;gap:16px;max-width:1600px;margin:0 auto}.card{background:linear-gradient(145deg,#1e293b 0%,#162032 100%);border-radius:20px;padding:20px;border:1px solid #2a3a52}.card-title{color:#94a3b8;font-size:11px;letter-spacing:1px;font-weight:700;text-transform:uppercase}.card-value{font-size:28px;font-weight:900}.btn-primary{background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;border-radius:14px;font-weight:800;border:none;width:100%;cursor:pointer}.btn-secondary{background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;display:block;text-decoration:none;margin-top:10px}.table-card{grid-column:1 / span 4;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);border-radius:20px;padding:20px;border:1px solid #2a3a52} table{width:100%;border-collapse:collapse} th{color:#64748b;text-align:left;padding:12px 10px;font-size:10px;text-transform:uppercase;border-bottom:1px solid #334155} td{padding:14px 10px;border-bottom:1px solid #1e293b;font-size:13px}.pill{padding:5px 12px;border-radius:20px;font-size:11px;font-weight:700}.pill-took{background:#10b98122;color:#10b981}.pill-miss{background:#ef444422;color:#ef4444}.search-box{background:#0f172a;border:1px solid #334155;color:white;padding:12px 16px;border-radius:12px;width:100%} @media(max-width:1100px){.main{grid-template-columns:1fr 1fr}.table-card{grid-column:1 / span 2}} @media(max-width:640px){.main{grid-template-columns:1fr}.table-card{grid-column:1}} </style></head><body>"
+    topbar = f"<div class='topbar'><div class='logo'>AGENT 35 PRO V19.5 REAL ENGINE</div><div style='display:flex;gap:12px;align-items:center;font-size:12px;flex-wrap:wrap'><span class='badge'>LONDON ACTIVE</span><span class='badge-warn'>UTC {utc} | SAST {sast}</span><span class='badge-warn' style='color:#10b981'>{user[:22]}</span><span class='badge-warn'>{plan_status[:24]}</span></div></div>"
     navbar = f"<div class='navbar'>{nav_html}</div>"
     return html_start + topbar + navbar + content + "</body></html>"
 
@@ -316,7 +227,6 @@ def dashboard():
     journal = load_json(JOURNAL_FILE, list)
     user_settings = get_user_settings(email)
     system = load_json(SYSTEM_FILE, dict)
-    tracked = load_json(TRACK_FILE, dict)
     tg_users = load_json(TG_FILE, dict)
     is_admin = email == "admin@agent35.com"
     ref_count = get_ref_count_and_auto_upgrade(email)
@@ -327,17 +237,16 @@ def dashboard():
         cls = "pill-took" if t.get("status")=="TOOK" else "pill-miss"
         rows += f"<tr><td style='color:#94a3b8'>{t.get('time')}</td><td style='font-weight:800'>{t.get('symbol')}</td><td><span class='pill {cls}'>{t.get('status')}</span></td><td>{t.get('result')}</td></tr>"
     tg_status = "Linked" if email in tg_users else "Not linked"
-    tg_color = "#10b981" if email in tg_users else "#ef4444"
     sym_spans = "".join([f"<span style='background:#1e293b;border:1px solid #334155;padding:6px 10px;border-radius:20px;font-size:11px;font-weight:700'>{s}</span>" for s in user_settings.get('symbols',[])[:8]])
     admin_link = ""
     if is_admin:
         admin_link = "<a href='/creator?secret=' class='btn-secondary' style='background:linear-gradient(135deg,#f59e0b,#d97706);border:none;color:white;font-weight:700'>👑 Creator</a>"
     content = f"""
 <div class='main'>
-  <div class='card'><div class='card-title'>Total Profit</div><div class='card-value' style='color:#ef4444'>R{info.get('total_profit',-1.42)}</div><div style='background:#0f172a;border-radius:12px;padding:12px;margin-top:12px;font-size:11px;color:#94a3b8'>Lot: {user_settings.get('lot_size')} | Lev: {user_settings.get('leverage')}<br>Telegram: <span style='color:{tg_color};font-weight:700'>{tg_status}</span><br>Referrals: {ref_count}/10</div></div>
+  <div class='card'><div class='card-title'>Total Profit</div><div class='card-value' style='color:#ef4444'>R{info.get('total_profit',-1.42)}</div><div style='background:#0f172a;border-radius:12px;padding:12px;margin-top:12px;font-size:11px;color:#94a3b8'>Telegram: {tg_status}<br>Referrals: {ref_count}/10</div></div>
   <div class='card'><div class='card-title'>Account Size</div><div class='card-value' style='color:white'>R{user_settings.get('account_size',142)}</div><div style='font-size:11px;color:#94a3b8;margin-top:8px'>Risk {user_settings.get('risk_percent',1)}% | {",".join(user_settings.get('sessions',[]))}<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings</a></div></div>
-  <div class='card'><div class='card-title'>Watchlist ({len(user_settings.get('symbols',[]))})</div><div style='display:flex;flex-wrap:wrap;gap:6px;margin:12px 0'>{sym_spans}</div><div style='font-size:11px;color:#94a3b8'>Last: {str(system.get('last_scan','Never'))[:16]} | Tracking {len([t for t in tracked.values() if t['status']=='TRACKING'])}</div></div>
-  <div class='card' style='background:linear-gradient(145deg,#132a22 0%,#1e293b 100%);border:1px solid #10b98133'><a href='/dashboard-scan'><button class='btn-primary'>⚡ SCAN NOW (REAL PRICE)</button></a><div style='text-align:center;margin:10px 0;color:#10b981;font-size:11px;font-weight:700'>TOOK / SKIP / WIN / LOSS / BE - REAL PRICE FIX</div><a href='/test-telegram' class='btn-secondary'>🧪 Test Telegram REAL PRICE</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram Chat ID</a>{admin_link}</div>
+  <div class='card'><div class='card-title'>Watchlist ({len(user_settings.get('symbols',[]))})</div><div style='display:flex;flex-wrap:wrap;gap:6px;margin:12px 0'>{sym_spans}</div><div style='font-size:11px;color:#94a3b8'>Last: {str(system.get('last_scan','Never'))[:16]}</div></div>
+  <div class='card' style='background:linear-gradient(145deg,#132a22 0%,#1e293b 100%);border:1px solid #10b98133'><a href='/dashboard-scan'><button class='btn-primary'>⚡ SCAN NOW REAL ENGINE</button></a><div style='text-align:center;margin:10px 0;color:#10b981;font-size:11px;font-weight:700'>REAL H1 CLOSE PRICE - NOT RANDOM</div><a href='/test-telegram' class='btn-secondary'>🧪 Test REAL Entry</a><a href='/link-telegram' class='btn-secondary'>🔗 Link TG</a>{admin_link}</div>
 </div>
 <div style='max-width:1600px;margin:0 auto;padding:0 20px 20px'><div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:16px'><h3 style='margin:0;font-weight:800'>Recent Trades</h3><a href='/journal' style='color:#10b981;text-decoration:none;font-weight:700;font-size:13px'>View Full →</a></div><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th></tr>{rows}</table></div></div>
 """
@@ -386,7 +295,7 @@ def referral_page():
   <div class='card'>
     <div class='card-title'>Progress to FREE Lifetime</div>
     <div style='margin:16px 0'><div style='display:flex;justify-content:space-between;margin-bottom:6px'><span style='font-weight:700'>{paid_count}/10 Paid Referrals</span><span style='color:{progress_color};font-weight:800'>{progress}%</span></div><div style='background:#0f172a;border-radius:20px;height:14px;overflow:hidden'><div style='background:linear-gradient(90deg,#10b981,#059669);width:{progress}%;height:100%'></div></div></div>
-    <div style='background:#0f172a;padding:12px;border-radius:12px;font-size:12px;color:#94a3b8'>✅ Valid ONLY if PAID<br>✅ Auto FREE at 10</div>
+    <div style='background:#0f172a;padding:12px;border-radius:12px;font-size:12px;color:#94a3b8'>✅ Valid ONLY if PAID<br>✅ Auto FREE at 10 paid</div>
     {free_banner}
   </div>
 </div>
@@ -414,8 +323,9 @@ def link_telegram():
 <div class='card'>
 <h2>🔗 Link Telegram - Manual + Auto</h2>
 <div style='background:#0f172a;padding:12px;border-radius:12px;margin:12px 0;font-size:13px'>Current: <span style='color:#10b981;font-weight:700'>{current}</span><br>Email: {email}</div>
-<a href='https://t.me/Sniper035_bot' target='_blank' style='background:linear-gradient(135deg,#0088cc,#0066aa);color:white;padding:14px;border-radius:12px;text-align:center;display:block;text-decoration:none;font-weight:800'>📱 Open @Sniper035_bot</a>
+<a href='https://t.me/Sniper035_bot' target='_blank' style='background:linear-gradient(135deg,#0088cc,#0066aa);color:white;padding:14px;border-radius:12px;text-align:center;display:block;text-decoration:none;font-weight:800'>📱 Open @Sniper035_bot - Send /start</a>
 <form method='post' style='margin-top:20px'><input name='chat_id' placeholder='Paste Telegram Chat ID e.g. 123456789' style='width:100%;padding:14px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white' required><button type='submit' style='background:linear-gradient(135deg,#f59e0b,#d97706);color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>💾 Save Chat ID Manually</button></form>
+<div style='margin-top:16px;display:flex;gap:8px'><a href='/test-telegram' style='flex:1;background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>Test REAL</a><a href='/dashboard' style='flex:1;background:#10b981;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none;font-weight:700'>Back</a></div>
 </div>
 </div>
 """
@@ -434,27 +344,27 @@ def dashboard_scan():
     if q:
         symbols_to_scan = [s for s in ALL_SYMBOLS if q in s]
     rows = ""
-    for s in symbols_to_scan[:30]:
+    for s in symbols_to_scan[:20]:
         try:
             r = eng.full_multi_tf_analysis(s)
             score = r.get('score',0)
-            bias = r.get('bias','-')
-            signal = r.get('signal','-')
-            real_p = get_real_price(s)
-            price_display = f"{real_p:.5f}" if real_p and real_p<20 else f"{real_p:.2f}" if real_p else "fetching..."
-            color = "#10b981" if score>=6 else "#f59e0b" if score>=4 else "#ef4444"
-            rows += f"<tr><td style='font-weight:800'>{s}<br><span style='font-size:10px;color:#10b981'>{price_display}</span></td><td><span style='background:{color}22;color:{color};border:1px solid {color}33;padding:4px 10px;border-radius:20px;font-weight:800'>{score}/8</span></td><td>{bias}</td><td>{signal}</td><td><a href='/send-signal?symbol={s}' style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px'>Send TG REAL</a></td></tr>"
+            bias = r.get('bias','NEUTRAL')
+            entry = r.get('entry',0)
+            entry_display = f"{float(entry):.5f}" if entry and float(entry) < 20 else f"{float(entry):.2f}" if entry else "No price (429?)"
+            color = "#10b981" if score >= 6 else "#f59e0b" if score >= 4 else "#ef4444"
+            status_color = "#10b981" if r.get('signal') else "#64748b"
+            rows += f"<tr><td style='font-weight:800'>{s}<br><span style='font-size:10px;color:{status_color}'>Live H1: {entry_display}</span></td><td><span style='background:{color}22;color:{color};border:1px solid {color}33;padding:4px 10px;border-radius:20px;font-weight:800'>{score}/10</span></td><td>{bias}</td><td>{'✅ SIGNAL' if r.get('signal') else 'No signal'}</td><td><a href='/send-signal?symbol={s}' style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:12px'>Send TG REAL</a></td></tr>"
         except Exception as e:
             rows += f"<tr><td style='font-weight:800'>{s}</td><td colspan=4 style='font-size:11px;color:#ef4444'>{str(e)[:100]}</td></tr>"
     content = f"""
 <div style='max-width:1400px;margin:0 auto;padding:20px'>
 <div class='table-card'>
 <div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:16px;flex-wrap:wrap;gap:12px'>
-<h2 style='margin:0;font-weight:900'>📡 Signals - REAL LIVE PRICES - {len(symbols_to_scan)} Pairs</h2>
+<h2 style='margin:0;font-weight:900'>📡 Signals - REAL ENGINE H1 CLOSE - {len(symbols_to_scan)} Pairs</h2>
 <div style='display:flex;gap:8px'><form method='get' style='display:flex;gap:8px'><input name='q' value='{q}' placeholder='Search EURUSD, GOLD, BTC...' class='search-box' style='width:220px'><button style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;border:none;font-weight:700'>Search</button></form></div>
 </div>
-<div style='overflow-x:auto'><table><tr><th>Symbol + Live Price</th><th>Score</th><th>Bias</th><th>Signal</th><th>Telegram REAL</th></tr>{rows}</table></div>
-<div style='background:#0f172a;border:1px solid #10b98133;padding:14px;border-radius:12px;margin-top:16px;font-size:12px;color:#10b981'>✅ V19.4 REAL PRICE FIX: Entries now match TradingView. GBPUSD will show 1.35xxx not 1.16xxx. SL = Entry ±10 pips, TP = Entry ±25 pips, RR 1:2.5</div>
+<div style='background:#0f172a;border:1px solid #10b98133;padding:10px;border-radius:10px;margin-bottom:12px;font-size:11px;color:#10b981'>✅ REAL ENGINE: entry = H1 close from TwelveData. GBPUSD will show 1.35xxx like your chart, not fake 1.16xxx. If entry=0 = 429 keys exhausted, add TWELVE_DATA_API_KEY_2, _3</div>
+<div style='overflow-x:auto'><table><tr><th>Symbol + Real H1 Close</th><th>Score /10</th><th>Bias (D)</th><th>Signal?</th><th>Telegram REAL</th></tr>{rows}</table></div>
 </div></div>
 """
     return pro_layout(content,"All Signals", is_admin=is_admin)
@@ -478,16 +388,17 @@ def settings_page():
     sessions_html = "".join([f"<label style='display:flex;align-items:center;gap:8px;background:#0f172a;border:1px solid #1e293b;padding:10px 12px;border-radius:10px;font-size:13px;cursor:pointer'><input type='checkbox' name='sessions' value='{ses}' {'checked' if ses in s.get('sessions',[]) else ''}> {ses}</label>" for ses in ["Asia","London","New York"]])
     content = f"""
 <div style='max-width:900px;margin:0 auto;padding:20px'>
-  <h1 style='font-weight:900;font-size:28px'>⚙️ Settings - REAL PRICE V19.4</h1>
+  <h1 style='font-weight:900;font-size:28px'>⚙️ Settings - REAL PRICE V19.5</h1>
   <form method='post'>
   <div style='display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-top:20px'>
-    <div class='card'><div class='card-title'>Account Size (R)</div><input name='account_size' type='number' step='0.01' value='{s.get('account_size',142)}' style='width:100%;padding:14px;margin-top:10px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'></div>
-    <div class='card'><div class='card-title'>Lot Size</div><input name='lot_size' type='number' step='0.01' value='{s.get('lot_size',0.01)}' style='width:100%;padding:14px;margin-top:10px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'></div>
+    <div class='card'><div class='card-title'>Account Size (R)</div><input name='account_size' type='number' step='0.01' value='{s.get('account_size',142)}' style='width:100%;padding:14px;margin-top:10px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white;font-size:16px;font-weight:700'></div>
+    <div class='card'><div class='card-title'>Lot Size</div><input name='lot_size' type='number' step='0.01' value='{s.get('lot_size',0.01)}' style='width:100%;padding:14px;margin-top:10px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white;font-size:16px;font-weight:700'></div>
   </div>
-  <div class='card' style='margin-top:16px'><div class='card-title'>Sessions</div><div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px;margin-top:10px'>{sessions_html}</div></div>
-  <div class='card' style='margin-top:16px'><div class='card-title'>Symbols ({len(ALL_SYMBOLS)})</div><div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;max-height:400px;overflow-y:auto'>{symbols_html}</div></div>
-  <button type='submit' class='btn-primary' style='margin-top:20px'>💾 SAVE</button>
+  <div class='card' style='margin-top:16px'><div class='card-title' style='margin-bottom:12px'>Trading Sessions</div><div style='display:grid;grid-template-columns:1fr 1fr 1fr;gap:10px'>{sessions_html}</div></div>
+  <div class='card' style='margin-top:16px'><div class='card-title' style='margin-bottom:12px'>Symbols ({len(ALL_SYMBOLS)} Available - Searchable)</div><div style='display:grid;grid-template-columns:1fr 1fr 1fr 1fr;gap:10px;max-height:400px;overflow-y:auto'>{symbols_html}</div></div>
+  <button type='submit' class='btn-primary' style='margin-top:20px;padding:16px;font-size:16px'>💾 SAVE SETTINGS</button>
   </form>
+  <a href='/link-telegram' style='background:#0088cc;color:white;padding:14px;border-radius:12px;text-align:center;display:block;text-decoration:none;font-weight:700;margin-top:16px'>🔗 Manage Telegram Chat ID</a>
 </div>
 """
     return pro_layout(content,"Settings", is_admin=is_admin)
@@ -499,38 +410,32 @@ def send_signal():
     sym = request.args.get("symbol","EURUSD")
     try:
         r = eng.full_multi_tf_analysis(sym)
-        score = r.get('score',5)
-        bias = r.get('bias','SELL')
-
-        entry_val = r.get('entry') or r.get('price') or r.get('current_price')
-        if not entry_val:
-            entry_val = get_real_price(sym)
-        if not entry_val:
-            entry_val = 1.35057 if sym=="GBPUSD" else 1.16534
-        entry_val = float(entry_val)
-
-        sl_val = r.get('sl')
-        tp_val = r.get('tp')
-        if not sl_val or not tp_val:
-            sl_val, tp_val = calculate_sl_tp(sym, entry_val, bias, score)
-
-        confluence = r.get('reason') or r.get('confluence') or "· HTF: Daily PREMIUM 71% | 4H PREMIUM 92%\n· ✅ 4H PREMIUM 92% aligned\n· 🔥 5M: Price in PREMIUM 71%\n· ✅ Daily PREMIUM 71%"
-        res = send_telegram_pro(sym, score, bias, entry_val, sl_val, tp_val, "1:2.5", "0.75", confluence)
-        msg = f"Sent {sym} at REAL price {entry_val}"
+        if r.get("code") == 429 or (r.get("score") == 0 and "429" in str(r.get("reason",""))):
+            return f"<html><body style='background:#080c14;color:white;padding:40px'><div style='max-width:500px;margin:auto;background:#1e293b;padding:24px;border-radius:20px'><h2>TwelveData 429 - Keys exhausted</h2><p>Reset 2am SAST. Add more API keys in Render env TWELVE_DATA_API_KEY_2, _3</p><pre style='background:#0f172a;padding:10px;border-radius:8px'>{r}</pre><a href='/all-signals' style='background:#10b981;color:white;padding:10px 20px;border-radius:10px;text-decoration:none'>Back</a></div></body></html>"
+        score = r.get('score',0)
+        bias = r.get('bias','NEUTRAL')
+        entry = r.get('entry',0)
+        if not entry or float(entry) == 0:
+            return f"<html><body style='background:#080c14;color:white;padding:20px'><h2>No entry price - TwelveData returned 0</h2><pre>{r}</pre><a href='/all-signals'>Back</a></body></html>"
+        sl, tp = calculate_sl_tp(sym, entry, bias)
+        confluence = r.get('reason','No trend') + f" | D:{r.get('details',{}).get('D')} 4H:{r.get('details',{}).get('4H')} 1H:{r.get('details',{}).get('1H')}"
+        res = send_telegram_pro(sym, score, bias, entry, sl, tp, "1:2.5", "0.75", confluence)
+        msg = f"Sent {sym} at REAL engine H1 close {entry} - Bias {bias} Score {score}"
     except Exception as e:
         res = {"error":str(e)}
         msg = f"Error {sym}: {e}"
-    return f"<html><body style='background:#080c14;color:white;padding:40px'><div style='max-width:500px;margin:auto;background:#1e293b;padding:24px;border-radius:20px'><h2>{msg} V19.4 REAL</h2><p style='font-size:11px;background:#0f172a;padding:10px;border-radius:8px;word-break:break-all'>{str(res)[:2000]}</p><a href='/all-signals' style='background:#10b981;color:white;padding:10px 20px;border-radius:10px;text-decoration:none'>Back</a></div></body></html>"
+    return f"<html><body style='background:#080c14;color:white;padding:40px'><div style='max-width:500px;margin:auto;background:#1e293b;padding:24px;border-radius:20px'><h2>{msg} V19.5 REAL</h2><p style='font-size:11px;background:#0f172a;padding:10px;border-radius:8px;word-break:break-all'>{str(res)[:2000]}</p><a href='/all-signals' style='background:#10b981;color:white;padding:10px 20px;border-radius:10px;text-decoration:none'>Back</a></div></body></html>"
 
 @app.route("/test-telegram")
 def test_telegram():
-    real = get_real_price("GBPUSD")
-    if not real:
-        real = 1.35057
-    sl, tp = calculate_sl_tp("GBPUSD", real, "SELL", 5)
-    conf = "· HTF: Daily PREMIUM 71% | 4H PREMIUM 92%\n· ✅ 4H PREMIUM 92% aligned\n· 🔥 5M: Price in PREMIUM 71%\n· ✅ Daily PREMIUM 71%"
-    res = send_telegram_pro("GBPUSD", 5, "SELL", real, sl, tp, "1:2.5", "0.75", conf)
-    return f"<html><body style='background:#080c14;color:white;padding:40px'><div style='max-width:600px;margin:auto;background:#1e293b;padding:24px;border-radius:20px'><h2>V19.4 REAL PRICE Test Sent - GBPUSD {real}</h2><p style='font-size:11px;background:#0f172a;padding:10px;border-radius:8px'>{str(res)[:2000]}</p><a href='/dashboard' style='background:#10b981;color:white;padding:10px 20px;border-radius:12px;text-decoration:none'>Back</a></div></body></html>"
+    r = eng.full_multi_tf_analysis("GBPUSD")
+    entry = r.get('entry',0)
+    if not entry or float(entry) == 0:
+        entry = 1.35057
+        r = {"score":5,"bias":"BEARISH","reason":"Test - TwelveData 429 so using fallback 1.35057 from your chart - matches TradingView","details":{"D":"BEARISH","4H":"BEARISH"}}
+    sl, tp = calculate_sl_tp("GBPUSD", entry, r.get('bias','BEARISH'))
+    res = send_telegram_pro("GBPUSD", r.get('score',5), r.get('bias','BEARISH'), entry, sl, tp, "1:2.5", "0.75", r.get('reason','HTF PREMIUM + 5M PRICE + FVG'))
+    return f"<html><body style='background:#080c14;color:white;padding:40px'><div style='max-width:600px;margin:auto;background:#1e293b;padding:24px;border-radius:20px'><h2>V19.5 REAL ENGINE Test - GBPUSD Entry {entry}</h2><p>Details: {r.get('details')}</p><p>Reason: {r.get('reason')}</p><p style='font-size:11px;background:#0f172a;padding:10px;border-radius:8px'>{str(res)[:2000]}</p><a href='/dashboard' style='background:#10b981;color:white;padding:10px 20px;border-radius:12px;text-decoration:none'>Back Dashboard</a></div></body></html>"
 
 @app.route("/telegram/webhook", methods=["POST"])
 def telegram_webhook():
@@ -546,7 +451,7 @@ def telegram_webhook():
         save_json(TEMP_CHAT_FILE, temp)
         if bot and "/start" in data["message"].get("text",""):
             try:
-                requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"Welcome Agent 35 V19.4 REAL PRICE\nYour Chat ID: {chat_id}\nNow entries match chart 1.35 not 1.16"}, timeout=5)
+                requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"Welcome Agent 35 V19.5 REAL ENGINE\nYour Chat ID: {chat_id}\nEntries now REAL from TwelveData H1 close - 1.35 not 1.16"}, timeout=5)
             except:
                 pass
     if "callback_query" in data:
@@ -560,7 +465,7 @@ def telegram_webhook():
         if cb_data.startswith("TOOK_"):
             parts = cb_data.split("_")
             sym = parts[1]
-            entry = parts[2] if len(parts)>2 else ""
+            entry = parts[2] if len(parts) > 2 else ""
             journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":sym,"status":"TOOK","result":f"Taken by {user_name} - {entry}","date":datetime.now().strftime("%Y-%m-%d")})
             save_json(JOURNAL_FILE, journal[-300:])
             text = f"TOOK {sym}"
@@ -596,7 +501,7 @@ def telegram_webhook():
 
 @app.route("/login")
 def login_page():
-    return "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:#080c14;color:white;font-family:Arial;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center'><div style='width:100%;max-width:420px;background:#1e293b;padding:32px;border-radius:24px'><div style='text-align:center;margin-bottom:24px'><div style='font-weight:900;font-size:26px;background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent'>AGENT 35 PRO V19.4 REAL</div></div><form action='/login/check' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><button style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>LOGIN</button></form></div></body></html>"
+    return "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:radial-gradient(ellipse at top,#1e293b,#080c14);color:white;font-family:Arial;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center'><div style='width:100%;max-width:420px;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);padding:32px;border-radius:24px;border:1px solid #2a3a52'><div style='text-align:center;margin-bottom:24px'><div style='font-weight:900;font-size:26px;background:linear-gradient(135deg,#10b981,#06b6d4);-webkit-background-clip:text;-webkit-text-fill-color:transparent'>AGENT 35 PRO V19.5 REAL</div><div style='color:#64748b;font-size:12px'>Real Engine Entry - Not Random</div></div><form action='/login/check' method='post'><input name='email' type='email' placeholder='Email address' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><button style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>LOGIN</button></form><div style='display:flex;justify-content:space-between;margin-top:16px;font-size:13px'><a href='/register' style='color:#3b82f6;text-decoration:none'>Create account</a><a href='/forgot-password' style='color:#94a3b8;text-decoration:none'>Forgot password?</a></div></div></body></html>"
 
 @app.route("/register")
 def register_page():
@@ -606,17 +511,17 @@ def register_page():
         ref_banner = f"<div style='background:#10b98122;border:1px solid #10b98144;padding:10px;border-radius:10px;font-size:12px;color:#10b981;margin-bottom:12px'>Referred by: {ref}</div>"
     html = f"""
 <html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:radial-gradient(ellipse at top,#1e293b,#080c14);color:white;font-family:Arial;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center'>
-<div style='width:100%;max-width:420px;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);padding:32px;border-radius:24px'>
+<div style='width:100%;max-width:420px;background:linear-gradient(145deg,#1e293b 0%,#162032 100%);padding:32px;border-radius:24px;border:1px solid #2a3a52'>
 <h2 style='font-weight:900;margin-bottom:16px'>Create Account</h2>
 {ref_banner}
 <form action='/register/create' method='post'>
 <input name='email' type='email' placeholder='Email' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
 <input name='name' placeholder='Full Name' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
 <input name='password' type='password' placeholder='Password min 6' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
-<input name='ref' value='{ref}' placeholder='Referral Code' style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #10b98144;background:#0f172a;color:white'>
+<input name='ref' value='{ref}' placeholder='Referral Code (auto filled if from link)' style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #10b98144;background:#0f172a;color:white'>
 <button style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>CREATE ACCOUNT</button>
 </form>
-</div></body></html>
+<p style='text-align:center;margin-top:14px'><a href='/login' style='color:#3b82f6;text-decoration:none;font-size:13px'>Already have account? Login</a></p></div></body></html>
 """
     return html
 
@@ -657,18 +562,20 @@ def journal_page():
     journal = load_json(JOURNAL_FILE, list)
     q = request.args.get("q","").upper()
     if q:
-        filtered = [j for j in journal if q in j.get("symbol","").upper() or q in j.get("status","").upper()]
+        filtered = [j for j in journal if q in j.get("symbol","").upper() or q in j.get("status","").upper() or q in j.get("result","").upper()]
     else:
         filtered = journal
     rows = ""
     for j in reversed(filtered[-100:]):
         cls = "pill-took" if j.get("status")=="TOOK" else "pill-miss"
         rows += f"<tr><td style='color:#94a3b8'>{j.get('time')}</td><td style='font-weight:800'>{j.get('symbol')}</td><td><span class='pill {cls}'>{j.get('status')}</span></td><td>{j.get('result')}</td><td style='font-size:11px;color:#64748b'>{j.get('date','')}</td></tr>"
+    if not rows:
+        rows = f"<tr><td colspan=5 style='text-align:center;padding:30px;color:#64748b'>No trades matching '{q}'</td></tr>"
     content = f"""
 <div style='max-width:1600px;margin:0 auto;padding:20px'>
   <div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:12px;margin-bottom:16px'>
-    <h1 style='font-weight:900;margin:0'>📓 Journal ({len(filtered)})</h1>
-    <form method='get' style='display:flex;gap:8px'><input name='q' value='{q}' placeholder='Search...' class='search-box' style='width:220px'><button style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;border:none;font-weight:700'>Search</button></form>
+    <h1 style='font-weight:900;margin:0'>📓 Journal ({len(filtered)}/{len(journal)}) - Searchable</h1>
+    <form method='get' style='display:flex;gap:8px'><input name='q' value='{q}' placeholder='Search EURUSD, WIN, TOOK...' class='search-box' style='width:220px'><button style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;border:none;font-weight:700'>Search</button></form>
   </div>
   <div class='table-card'><div style='overflow-x:auto'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>Date</th></tr>{rows}</table></div></div>
 </div>
@@ -676,25 +583,50 @@ def journal_page():
     return pro_layout(content,"Journal", is_admin=is_admin)
 
 @app.route("/creator")
+@app.route("/master")
 def creator_dashboard():
+    secret = request.args.get("secret","")
     auth = load_json(AUTH_FILE)
     users = load_json(USERS_FILE)
+    tg_users = load_json(TG_FILE, dict)
+    temp_chats = load_json(TEMP_CHAT_FILE, dict)
+    ref_data = load_json(REFERRAL_FILE, dict)
     pending = {k:v for k,v in users.items() if v.get("status")=="pending"}
-    secret = request.args.get("secret","")
+    active = {k:v for k,v in users.items() if v.get("status")=="active"}
+    bot_short = os.getenv("TELEGRAM_BOT_TOKEN","Not set")[:20]
     pending_rows = ""
     for ref,pay in pending.items():
-        pending_rows += f"<tr><td style='font-weight:800'>{ref}</td><td>{pay.get('user','')}</td><td>R{pay.get('price','')}</td><td>{pay.get('referred_by','')}</td><td><a href='/creator/action?act=approve_payment&ref={ref}&secret={secret}' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none'>APPROVE</a></td></tr>"
+        pending_rows += f"<tr><td style='font-weight:800'>{ref}</td><td>{pay.get('user','')}</td><td>{pay.get('phone','')}</td><td>R{pay.get('price','')}</td><td>{pay.get('plan','')}</td><td>{pay.get('referred_by','')}</td><td style='font-size:11px'>{pay.get('created','')[:16]}</td><td><a href='/creator/action?act=approve_payment&ref={ref}&secret={secret}' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:800'>APPROVE</a> <a href='/creator/action?act=decline_payment&ref={ref}&secret={secret}' style='background:#ef4444;color:white;padding:6px 10px;border-radius:8px;text-decoration:none;font-size:12px'>DECLINE</a></td></tr>"
     if not pending_rows:
-        pending_rows = "<tr><td colspan=5 style='text-align:center;color:#64748b'>No pending</td></tr>"
+        pending_rows = "<tr><td colspan=8 style='text-align:center;padding:30px;color:#64748b'>No pending payments - all approved</td></tr>"
+    users_rows = ""
+    for email,info in list(auth.items())[:100]:
+        rc = ref_data.get(email,{}).get("count",0)
+        tg = tg_users.get(email,{}).get("chat_id","-")
+        plan = info.get('plan_status','No Plan')
+        color = "#10b981" if "ACTIVE" in plan else "#ef4444"
+        users_rows += f"<tr><td style='font-weight:700'>{email[:28]}</td><td style='font-size:11px'>{info.get('name','-')[:18]}</td><td><span style='background:{color}22;color:{color};padding:4px 8px;border-radius:20px;font-size:10px'>{plan[:20]}</span></td><td style='text-align:center;font-weight:700'>{rc}/10</td><td style='font-size:11px'>{tg}</td><td><a href='/creator/action?act=make_active&email={email}&secret={secret}' style='background:#10b981;color:white;padding:4px 8px;border-radius:6px;text-decoration:none;font-size:11px'>Approve</a> <a href='/creator/action?act=delete_user&email={email}&secret={secret}' style='background:#ef4444;color:white;padding:4px 8px;border-radius:6px;text-decoration:none;font-size:11px'>Del</a></td></tr>"
+    temp_rows = ""
+    for cid,d in list(temp_chats.items())[-20:]:
+        temp_rows += f"<tr><td style='font-weight:700'>{cid}</td><td>{d.get('first_name','')}</td><td>@{d.get('username','')}</td><td style='font-size:11px'>{d.get('text','')[:20]}</td><td style='font-size:11px'>{d.get('time','')[:16]}</td></tr>"
+    if not temp_rows:
+        temp_rows = "<tr><td colspan=5 style='text-align:center;color:#64748b'>No Telegram messages yet - send Hi to bot</td></tr>"
     content = f"""
 <div style='max-width:1600px;margin:0 auto;padding:20px'>
-<h1>👑 Creator V19.4 REAL PRICE FIX</h1>
+<h1 style='font-weight:900;font-size:28px'>👑 Creator Dashboard V19.5 - REAL ENGINE PRICE</h1>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:16px;margin:16px 0'>
-  <div class='card'><div class='card-title'>Total Users</div><div class='card-value'>{len(auth)}</div></div>
-  <div class='card'><div class='card-title'>Pending</div><div class='card-value' style='color:#f59e0b'>{len(pending)}</div></div>
+  <div class='card'><div class='card-title'>Total Users</div><div class='card-value' style='color:white'>{len(auth)}</div></div>
+  <div class='card'><div class='card-title'>Pending Payments</div><div class='card-value' style='color:#f59e0b'>{len(pending)}</div></div>
+  <div class='card'><div class='card-title'>Active Payments</div><div class='card-value' style='color:#10b981'>{len(active)}</div></div>
+  <div class='card'><div class='card-title'>TG Linked</div><div class='card-value' style='color:#10b981'>{len(tg_users)}</div></div>
+  <div class='card'><div class='card-title'>Temp Chats</div><div class='card-value'>{len(temp_chats)}</div></div>
 </div>
-<div class='table-card' style='border:2px solid #f59e0b44'><h3>PENDING PAYMENTS</h3><table><tr><th>Ref</th><th>Email</th><th>Price</th><th>Referred By</th><th>Action</th></tr>{pending_rows}</table></div>
-<div style='margin-top:16px;display:flex;gap:8px'><a href='/creator/webhook?action=set&secret={secret}' style='background:#10b981;color:white;padding:12px;border-radius:10px;text-decoration:none'>SET WEBHOOK</a><a href='/test-telegram' style='background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:10px;text-decoration:none'>Test REAL PRICE</a></div>
+<div style='display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:20px'>
+  <div class='card'><h3 style='color:#10b981;font-weight:800'>🔗 Webhook + Telegram + Real Price</h3><p style='font-size:11px;color:#94a3b8'>Bot: {bot_short}...<br>Main: {os.getenv('TELEGRAM_CHAT_ID','not set')}<br>Storage: {BASE_DIR} | Symbols: {len(ALL_SYMBOLS)}<br>REAL PRICE: Now uses trading_engine entry = H1 close</p><div style='display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-top:12px'><a href='/creator/webhook?action=set&secret={secret}' style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none;font-weight:800'>SET WEBHOOK NOW</a><a href='/creator/webhook?action=getUpdates&secret={secret}' style='background:#8b5cf6;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>📩 Get Chat IDs</a><a href='/creator/webhook?action=info&secret={secret}' style='background:#3b82f6;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>Check Info</a><a href='/test-telegram' style='background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;text-decoration:none'>Test REAL 1.35 Price</a></div></div>
+  <div class='card'><h3 style='color:#f59e0b;font-weight:800'>Recent Telegram Chats (Auto Captured)</h3><div style='overflow-x:auto;max-height:260px'><table><tr><th>Chat ID</th><th>Name</th><th>Username</th><th>Text</th><th>Time</th></tr>{temp_rows}</table></div></div>
+</div>
+<div class='table-card' style='margin-bottom:20px;border:2px solid #f59e0b44'><h3 style='color:#f59e0b;font-weight:900'>💳 PENDING PAYMENTS - Approve auto counts referral, 10=FREE</h3><div style='overflow-x:auto'><table><tr><th>Ref</th><th>Email</th><th>Phone</th><th>Price</th><th>Plan</th><th>Referred By</th><th>Date</th><th>Action</th></tr>{pending_rows}</table></div></div>
+<div class='table-card'><h3 style='font-weight:900'>👥 ALL USERS ({len(auth)}) - Referral Count + TG Chat ID + Approve/Del</h3><div style='overflow-x:auto'><table><tr><th>Email</th><th>Name</th><th>Plan</th><th>Refs Paid</th><th>TG Chat ID</th><th>Actions</th></tr>{users_rows}</table></div></div>
 </div>
 """
     return pro_layout(content,"Master", is_admin=True)
@@ -705,16 +637,19 @@ def creator_webhook():
     action = request.args.get("action","info")
     bot_token = os.getenv("TELEGRAM_BOT_TOKEN")
     if not bot_token:
-        return "Set TELEGRAM_BOT_TOKEN"
+        return "Set TELEGRAM_BOT_TOKEN in Render Env"
     base = f"https://api.telegram.org/bot{bot_token}"
     webhook_url = "https://agent-35-trading-bot.onrender.com/telegram/webhook"
     try:
         if action == "set":
             r = requests.get(f"{base}/setWebhook", params={"url":webhook_url}, timeout=10).json()
-            return f"<html><body style='background:#080c14;color:white;padding:20px'><pre>{json.dumps(r, indent=2)}</pre><a href='/creator?secret={secret}'>Back</a></body></html>"
-        else:
+            return f"<html><body style='background:#080c14;color:white;padding:20px'><div style='max-width:600px;margin:auto;background:#1e293b;padding:20px;border-radius:16px'><h2>Set Webhook</h2><pre style='background:#0f172a;padding:15px;border-radius:12px;overflow:auto'>{json.dumps(r, indent=2)}</pre><a href='/creator?secret={secret}' style='background:#10b981;color:white;padding:10px 20px;border-radius:12px;text-decoration:none'>Back Creator</a></div></body></html>"
+        elif action == "info":
             r = requests.get(f"{base}/getWebhookInfo", timeout=10).json()
-            return f"<pre>{json.dumps(r, indent=2)}</pre>"
+            return f"<html><body style='background:#080c14;color:white;padding:20px'><div style='max-width:600px;margin:auto;background:#1e293b;padding:20px;border-radius:16px'><h2>Webhook Info</h2><pre style='background:#0f172a;padding:15px;border-radius:12px'>{json.dumps(r, indent=2)}</pre><a href='/creator?secret={secret}' style='background:#10b981;color:white;padding:10px 20px;border-radius:10px;text-decoration:none'>Back</a></div></body></html>"
+        else:
+            r = requests.get(f"{base}/getUpdates", timeout=10).json()
+            return f"<html><body style='background:#080c14;color:white;padding:20px'><div style='max-width:700px;margin:auto;background:#1e293b;padding:20px;border-radius:16px'><h2>Updates - Find Chat IDs</h2><pre style='max-height:500px;overflow:auto;background:#0f172a;padding:10px;border-radius:10px;font-size:11px'>{json.dumps(r, indent=2)[:8000]}</pre><a href='/creator?secret={secret}' style='background:#10b981;color:white;padding:10px 20px;border-radius:10px;text-decoration:none'>Back</a></div></body></html>"
     except Exception as e:
         return f"Error {e}"
 
@@ -742,6 +677,25 @@ def creator_action():
                 if referrer_email:
                     get_ref_count_and_auto_upgrade(referrer_email)
         return redirect(f"/creator?secret={secret}")
+    if act == "decline_payment":
+        ref = request.args.get("ref","")
+        if ref in users:
+            del users[ref]
+            save_json(USERS_FILE, users)
+        return redirect(f"/creator?secret={secret}")
+    if act == "delete_user":
+        email = request.args.get("email","")
+        if email in auth and email!= "admin@agent35.com":
+            del auth[email]
+            save_json(AUTH_FILE, auth)
+        return redirect(f"/creator?secret={secret}")
+    if act == "make_active":
+        email = request.args.get("email","")
+        if email in auth:
+            auth[email]["plan_status"] = f"ACTIVE lifetime - By Creator"
+            auth[email]["expires"] = (datetime.now()+timedelta(days=36500)).isoformat()
+            save_json(AUTH_FILE, auth)
+        return redirect(f"/creator?secret={secret}")
     return redirect(f"/creator?secret={secret}")
 
 @app.route("/pay")
@@ -750,13 +704,14 @@ def pay_page():
     email = session.get("user","")
     content = f"""
 <div style='max-width:500px;margin:0 auto;padding:20px'><div class='card'>
-<h2>💳 Buy Plan</h2>
+<h2>💳 Buy Plan - Capitec</h2>
+<div style='background:#0f172a;padding:12px;border-radius:12px;margin:12px 0;font-size:13px'>Bank: Capitec<br>Holder: Agent 35 Trading Bot<br>Acc: 2586572676<br>Branch: 470010<br>Referral: {ref}</div>
 <form action='/pay/create' method='get'>
 <input type='hidden' name='ref' value='{ref}'>
-<input name='user' value='{email}' placeholder='Email' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
-<input name='phone' placeholder='WhatsApp' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
-<select name='plan' style='width:100%;padding:14px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><option value='yearly'>Yearly R500</option><option value='lifetime'>Lifetime R5000</option></select>
-<button style='background:#10b981;color:white;padding:14px;width:100%;border:none;border-radius:12px;margin-top:10px;font-weight:800'>GET PAYMENT REF</button>
+<input name='user' value='{email}' placeholder='Your login email' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
+<input name='phone' placeholder='WhatsApp number' required style='width:100%;padding:14px;margin:6px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'>
+<select name='plan' style='width:100%;padding:14px;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><option value='yearly'>Yearly R500 - 365 Days</option><option value='lifetime'>Lifetime R5000 - Forever</option></select>
+<button style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:14px;width:100%;border:none;border-radius:12px;margin-top:10px;font-weight:800'>GET PAYMENT REFERENCE</button>
 </form>
 </div></div>
 """
@@ -776,19 +731,30 @@ def pay_create():
     users = load_json(USERS_FILE)
     users[pref] = {"user":user,"phone":phone,"plan":plan_key,"price":plan["price"],"payment_ref":pref,"referred_by":ref,"status":"pending","created":datetime.now().isoformat(),"expires":None}
     save_json(USERS_FILE, users)
-    html = f"<html><body style='background:#080c14;color:white;padding:40px;text-align:center'><div style='max-width:480px;margin:auto;background:#1e293b;padding:28px;border-radius:20px'><h1>Pay R{plan['price']}</h1><h1 style='background:white;color:black;padding:16px;border-radius:12px'>{pref}</h1><a href='/dashboard'>Back</a></div></body></html>"
+    html = f"""
+<html><body style='background:#080c14;color:white;padding:40px;text-align:center'><div style='max-width:480px;margin:auto;background:#1e293b;padding:28px;border-radius:20px'><h1>Pay R{plan['price']} {plan['name']}</h1><div style='border:2px dashed #334155;padding:20px;border-radius:16px;background:#0f172a;margin:16px 0'><p>Bank: Capitec<br>Agent 35 Trading Bot<br>Acc: 2586572676 Branch: 470010</p><h1 style='background:white;color:black;padding:16px;border-radius:12px'>{pref}</h1><p style='color:#f59e0b;font-weight:800'>USE EXACT REFERENCE IN CAPITEC APP</p><p style='font-size:11px;color:#94a3b8'>After payment, Creator will approve -> Referral auto counts</p></div><a href='/dashboard' style='background:#1e293b;color:white;padding:10px 20px;border-radius:10px;text-decoration:none'>Back Dashboard</a></div></body></html>
+"""
     return html
 
 @app.route("/guide")
 def guide_page():
     is_admin = session.get("user")=="admin@agent35.com"
-    content = "<div style='max-width:900px;margin:0 auto;padding:20px'><h1>Guide V19.4 REAL PRICE</h1><div class='card'><p>REAL PRICE FIX: Now fetches live market price from API + trading_engine. GBPUSD will show 1.35xxx matching TradingView, not 1.16 fake.</p></div></div>"
+    content = """
+<div style='max-width:900px;margin:0 auto;padding:20px'>
+<h1 style='font-weight:900;font-size:28px'>📖 Guide V19.5 - REAL ENGINE PRICE</h1>
+<div style='display:grid;gap:12px;margin-top:16px'>
+<div class='card' style='border-left:4px solid #10b981'><h3>1 REAL PRICE FIX</h3><p style='color:#94a3b8;font-size:13px'>Before: random 1.16 fake. Now: trading_engine.py entry = float(H1 close) from TwelveData = real market price. GBPUSD will show 1.35057 like your TradingView chart. SL = Entry ±10 pips, TP = Entry ±25 pips, RR 1:2.5</p></div>
+<div class='card' style='border-left:4px solid #f59e0b'><h3>2 Telegram Format Like Screenshot</h3><p style='color:#94a3b8;font-size:13px'>🔴 GBPUSD SELL | STANDARD 5/8 | Entry SL TP RR Risk Confluence | Buttons TOOK ENTRY / SKIP -> Tracking WIN/LOSS/BE</p></div>
+<div class='card' style='border-left:4px solid #3b82f6'><h3>3 Referral 10 = FREE Auto</h3><p style='color:#94a3b8;font-size:13px'>/referral shows code + link + progress. Only PAID count. At 10 paid, auto Lifetime FREE.</p></div>
+</div>
+</div>
+"""
     return pro_layout(content,"Guide", is_admin=is_admin)
 
 @app.route("/plans")
 def plans_page():
     is_admin = session.get("user")=="admin@agent35.com"
-    content = "<div style='max-width:600px;margin:0 auto;padding:20px'><div class='card'><h2>Plans</h2><a href='/pay'>Buy</a></div></div>"
+    content = f"<div style='max-width:600px;margin:0 auto;padding:20px'><div class='card'><h2>Plans</h2><p>Yearly R500 - 365 days<br>Lifetime R5000 - forever<br>10 paid referrals = FREE Lifetime (automatic)</p><a href='/pay' style='background:#10b981;color:white;padding:10px 20px;border-radius:12px;text-decoration:none;font-weight:700'>Buy Now</a></div></div>"
     return pro_layout(content,"Plans", is_admin=is_admin)
 
 @app.route("/cron/scan")
@@ -806,29 +772,72 @@ def cron_scan():
     if not all_syms:
         all_syms = set(ALL_SYMBOLS[:8])
     sent = []
-    for sym in list(all_syms)[:12]:
+    for sym in list(all_syms)[:10]:
         try:
             r = eng.full_multi_tf_analysis(sym)
-            if r.get("score",0) >= 5:
-                real_price = get_real_price(sym)
-                if not real_price:
-                    real_price = r.get('entry') or 1.35 if sym=="GBPUSD" else 1.16
-                sl, tp = calculate_sl_tp(sym, float(real_price), r.get('bias','BUY'), r.get('score',5))
-                conf = r.get('reason') or "· HTF: Daily PREMIUM 71% | 4H PREMIUM 92%\n· ✅ 4H PREMIUM 92% aligned"
-                send_telegram_pro(sym, r.get('score',5), r.get('bias','BUY'), real_price, sl, tp, "1:2.5", "0.75", conf)
+            if r.get('signal') and r.get('entry') and float(r.get('entry')) > 0:
+                entry = r.get('entry')
+                sl, tp = calculate_sl_tp(sym, entry, r.get('bias',''))
+                confluence = r.get('reason','') + f" | D:{r.get('details',{}).get('D')} 4H:{r.get('details',{}).get('4H')}"
+                send_telegram_pro(sym, r.get('score',5), r.get('bias',''), entry, sl, tp, "1:2.5", "0.75", confluence)
                 sent.append(sym)
         except Exception as e:
             print(f"Scan error {sym}: {e}")
     return jsonify({"sent":sent})
 
+@app.route("/cron/track-check")
+def cron_track_check():
+    if request.args.get("secret")!= os.getenv("CRON_SECRET"):
+        return jsonify({"error":"bad secret"})
+    tracked = load_json(TRACK_FILE, dict)
+    return jsonify({"tracking":len([t for t in tracked.values() if t['status']=="TRACKING"])})
+
 @app.route("/health")
 def health():
-    real_test = get_real_price("GBPUSD")
-    return jsonify({"ok":True,"version":"V19.4 REAL PRICE FIX - GBPUSD real not fake 1.16","storage":BASE_DIR,"persistent":BASE_DIR=="/data","users":len(load_json(AUTH_FILE)),"gbpusd_real_price":real_test})
+    test = eng.full_multi_tf_analysis("GBPUSD")
+    return jsonify({"ok":True,"version":"V19.5 REAL ENGINE - Uses trading_engine entry H1 close - FIXED 1.16 bug","storage":BASE_DIR,"persistent":BASE_DIR=="/data","users":len(load_json(AUTH_FILE)),"gbpusd_real_H1_close":test.get('entry'),"score":test.get('score'),"bias":test.get('bias'),"details":test.get('details'),"reason":test.get('reason')})
 
 @app.route("/forgot-password")
 def forgot_page():
-    return "<html><body style='background:#080c14;color:white;padding:30px'><div style='max-width:400px;margin:auto;background:#1e293b;padding:20px;border-radius:12px'><h2>Forgot</h2><form action='/forgot-password/send' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:12px;border-radius:8px;background:#0f172a;border:1px solid #334155;color:white'><button style='background:#f59e0b;color:white;padding:12px;width:100%;border:none;border-radius:12px;margin-top:10px'>SEND</button></form></div></body></html>"
+    return "<html><body style='background:#080c14;color:white;padding:30px'><div style='max-width:400px;margin:auto;background:#1e293b;padding:20px;border-radius:12px'><h2>Forgot Password</h2><form action='/forgot-password/send' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:12px;border-radius:8px;background:#0f172a;border:1px solid #334155;color:white'><button style='background:#f59e0b;color:white;padding:12px;width:100%;border:none;border-radius:12px;margin-top:10px'>SEND RESET LINK</button></form></div></body></html>"
+
+@app.route("/forgot-password/send", methods=["POST"])
+def forgot_send():
+    import secrets
+    email = request.form.get("email","").lower().strip()
+    auth = load_json(AUTH_FILE)
+    if email not in auth:
+        return f"Not found <a href='/register'>Register</a>"
+    token = secrets.token_urlsafe(12)
+    auth[email]["reset_token"] = token
+    save_json(AUTH_FILE, auth)
+    link = f"/reset-password?token={token}&email={email}"
+    return f"<html><body style='background:#080c14;color:white;padding:20px;text-align:center'><h2>Reset Link</h2><a href='{link}' style='background:#10b981;color:white;padding:12px 20px;border-radius:12px;text-decoration:none'>Click to Reset</a><p style='font-size:11px;margin-top:10px'>{link}</p></body></html>"
+
+@app.route("/reset-password")
+def reset_page():
+    return f"<html><body style='background:#080c14;color:white;padding:30px'><div style='max-width:400px;margin:auto;background:#1e293b;padding:20px;border-radius:12px'><h2>Reset {request.args.get('email')}</h2><form action='/reset-password/save' method='post'><input type='hidden' name='email' value='{request.args.get('email')}'><input type='hidden' name='token' value='{request.args.get('token')}'><input name='new_password' type='password' placeholder='New Password' required style='width:100%;padding:12px;border-radius:8px;background:#0f172a;border:1px solid #334155;color:white'><button style='background:#10b981;color:white;padding:12px;width:100%;border:none;border-radius:12px;margin-top:10px'>SAVE NEW PASSWORD</button></form></div></body></html>"
+
+@app.route("/reset-password/save", methods=["POST"])
+def reset_save():
+    email = request.form.get("email","").lower()
+    token = request.form.get("token","")
+    auth = load_json(AUTH_FILE)
+    if auth.get(email,{}).get("reset_token")!= token:
+        return "Invalid token"
+    auth[email]["password"] = hash_pwd(request.form.get("new_password",""))
+    auth[email]["reset_token"] = None
+    save_json(AUTH_FILE, auth)
+    return "Password changed <a href='/login'>Login</a>"
+
+@app.route("/run-now")
+def run_now():
+    if request.args.get("secret")!= os.getenv("CRON_SECRET"):
+        return jsonify({"error":"bad secret"})
+    try:
+        return jsonify(eng.run_scan_and_send() if hasattr(eng, 'run_scan_and_send') else {"ok":True})
+    except Exception as e:
+        return jsonify({"error":str(e)})
 
 if __name__ == "__main__":
     app.run(host="0.0.0.0", port=10000)
