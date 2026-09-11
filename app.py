@@ -5,7 +5,7 @@ from datetime import datetime, timedelta
 
 load_dotenv()
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET", "agent35-v19-8-clean")
+app.secret_key = os.getenv("FLASK_SECRET", "agent35-v19-8-1-antispam")
 import trading_engine as eng
 
 BASE_DIR = "/data" if os.path.exists("/data") else "."
@@ -145,7 +145,7 @@ def send_telegram_pro(symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, 
         if cid and cid not in all_chats: all_chats.append(cid)
     if not bot or not all_chats: return {"error":"no bot/chats"}
     sast_now=(datetime.utcnow()+timedelta(hours=2)).strftime("%H:%M SAST")
-    text=f"🔴 {symbol} {signal_type} | STANDARD {display_score}/8\n\n📊 Account R{account_size} Lot {lot_size} Lev {leverage}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk R{risk_amt:.2f} ({risk_percent}%)\n\n🔍 Confluence:\n{confluence_text}\n\n📝 V19.8 DYNAMIC | Score {score}/10\n⏰ {sast_now}"
+    text=f"🔴 {symbol} {signal_type} | STANDARD {display_score}/8\n\n📊 Account R{account_size} Lot {lot_size} Lev {leverage}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk R{risk_amt:.2f} ({risk_percent}%)\n\n🔍 Confluence:\n{confluence_text}\n\n📝 V19.8.1 ANTI-SPAM | Score {score}/10\n⏰ {sast_now}"
     keyboard={"inline_keyboard": [[{"text":"✅ TOOK ENTRY","callback_data":f"TOOK_{symbol}_{entry_fmt}"},{"text":"❌ SKIP","callback_data":f"SKIP_{symbol}"}],[{"text":"📊 View Journal","url":"https://agent-35-trading-bot.onrender.com/journal"}]]}
     results=[]
     for chat_id in all_chats:
@@ -165,8 +165,8 @@ def pro_layout(content, active="Dashboard", is_admin=False):
         url=f"/{t.lower().replace(' ','-')}"
         if active==t: nav_html+=f"<a href='{url}' style='padding:9px 16px;border-radius:10px;text-decoration:none;color:white;font-weight:700;font-size:13px;background:linear-gradient(135deg,#10b981,#059669);margin-right:6px'>{icon} {t}</a>"
         else: nav_html+=f"<a href='{url}' style='padding:9px 16px;border-radius:10px;text-decoration:none;color:#94a3b8;font-weight:600;font-size:13px;background:#1e293b;margin-right:6px'>{icon} {t}</a>"
-    html_start=f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>AGENT 35 PRO V19.8</title><style>body{{background:#080c14;color:#e2e8f0;font-family:Arial,sans-serif;margin:0}}.topbar{{background:#0f172a;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}}.logo{{font-weight:900;font-size:18px;color:#10b981}}.badge{{background:#10b981;padding:4px 10px;border-radius:20px;font-weight:700;font-size:11px;color:white}}.badge-warn{{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:4px 10px;border-radius:20px;font-size:11px}}.navbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 20px;display:flex;gap:8px;overflow-x:auto;position:sticky;top:60px;z-index:90}}.main{{padding:20px;display:grid;grid-template-columns:1fr 1fr 1fr 320px;gap:16px;max-width:1600px;margin:0 auto}}.card{{background:#1e293b;border-radius:20px;padding:20px;border:1px solid #2a3a52}}.card-title{{color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase}}.card-value{{font-size:26px;font-weight:900}}.btn-primary{{background:#10b981;color:white;padding:14px;border-radius:14px;font-weight:800;border:none;width:100%;cursor:pointer}}.btn-secondary{{background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;display:block;text-decoration:none;margin-top:10px}}.table-card{{grid-column:1 / span 4;background:#1e293b;border-radius:20px;padding:20px;border:1px solid #2a3a52}} table{{width:100%;border-collapse:collapse}} th{{color:#64748b;text-align:left;padding:12px 10px;font-size:10px;text-transform:uppercase;border-bottom:1px solid #334155}} td{{padding:12px 10px;border-bottom:1px solid #1e293b;font-size:12px}}.pill{{padding:5px 12px;border-radius:20px;font-size:11px;font-weight:700}}.pill-took{{background:#10b98122;color:#10b981}}.pill-miss{{background:#ef444422;color:#ef4444}}.search-box{{background:#0f172a;border:1px solid #334155;color:white;padding:12px 16px;border-radius:12px;width:100%}} @media(max-width:1100px){{.main{{grid-template-columns:1fr 1fr}}.table-card{{grid-column:1 / span 2}}}} @media(max-width:640px){{.main{{grid-template-columns:1fr}}.table-card{{grid-column:1}}}} </style></head><body>"
-    topbar=f"<div class='topbar'><div class='logo'>AGENT 35 PRO V19.8</div><div style='display:flex;gap:10px;align-items:center;font-size:11px;flex-wrap:wrap'><span class='badge'>ACTIVE</span><span class='badge-warn'>UTC {utc} | SAST {sast}</span><span class='badge-warn' style='color:#10b981'>{user[:20]}</span></div></div>"
+    html_start=f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0'><title>AGENT 35 PRO V19.8.1</title><style>body{{background:#080c14;color:#e2e8f0;font-family:Arial,sans-serif;margin:0}}.topbar{{background:#0f172a;padding:14px 20px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100}}.logo{{font-weight:900;font-size:18px;color:#10b981}}.badge{{background:#10b981;padding:4px 10px;border-radius:20px;font-weight:700;font-size:11px;color:white}}.badge-warn{{background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:4px 10px;border-radius:20px;font-size:11px}}.navbar{{background:#0f172a;border-bottom:1px solid #1e293b;padding:12px 20px;display:flex;gap:8px;overflow-x:auto;position:sticky;top:60px;z-index:90}}.main{{padding:20px;display:grid;grid-template-columns:1fr 1fr 1fr 320px;gap:16px;max-width:1600px;margin:0 auto}}.card{{background:#1e293b;border-radius:20px;padding:20px;border:1px solid #2a3a52}}.card-title{{color:#94a3b8;font-size:11px;font-weight:700;text-transform:uppercase}}.card-value{{font-size:26px;font-weight:900}}.btn-primary{{background:#10b981;color:white;padding:14px;border-radius:14px;font-weight:800;border:none;width:100%;cursor:pointer}}.btn-secondary{{background:#1e293b;border:1px solid #334155;color:white;padding:12px;border-radius:12px;text-align:center;display:block;text-decoration:none;margin-top:10px}}.table-card{{grid-column:1 / span 4;background:#1e293b;border-radius:20px;padding:20px;border:1px solid #2a3a52}} table{{width:100%;border-collapse:collapse}} th{{color:#64748b;text-align:left;padding:12px 10px;font-size:10px;text-transform:uppercase;border-bottom:1px solid #334155}} td{{padding:12px 10px;border-bottom:1px solid #1e293b;font-size:12px}}.pill{{padding:5px 12px;border-radius:20px;font-size:11px;font-weight:700}}.pill-took{{background:#10b98122;color:#10b981}}.pill-miss{{background:#ef444422;color:#ef4444}}.search-box{{background:#0f172a;border:1px solid #334155;color:white;padding:12px 16px;border-radius:12px;width:100%}} @media(max-width:1100px){{.main{{grid-template-columns:1fr 1fr}}.table-card{{grid-column:1 / span 2}}}} @media(max-width:640px){{.main{{grid-template-columns:1fr}}.table-card{{grid-column:1}}}} </style></head><body>"
+    topbar=f"<div class='topbar'><div class='logo'>AGENT 35 PRO V19.8.1 ANTI-SPAM</div><div style='display:flex;gap:10px;align-items:center;font-size:11px;flex-wrap:wrap'><span class='badge'>ACTIVE</span><span class='badge-warn'>UTC {utc} | SAST {sast}</span><span class='badge-warn' style='color:#10b981'>{user[:20]}</span></div></div>"
     navbar=f"<div class='navbar'>{nav_html}</div>"
     return html_start+topbar+navbar+content+"</body></html>"
 
@@ -189,7 +189,8 @@ def dashboard():
     sym_spans="".join([f"<span style='background:#1e293b;border:1px solid #334155;padding:5px 9px;border-radius:20px;font-size:10px'>{s}</span>" for s in user_settings.get('symbols',[])[:10]])
     admin_link="<a href='/creator?secret=' class='btn-secondary' style='background:#f59e0b;color:white;font-weight:700'>👑 Creator</a>" if is_admin else ""
     news_status="ON" if user_settings.get('trade_news',True) else "OFF"
-    content=f"<div class='main'><div class='card'><div class='card-title'>Total Profit</div><div class='card-value' style='color:#ef4444'>R{info.get('total_profit',-1.42)}</div><div style='background:#0f172a;border-radius:12px;padding:10px;margin-top:10px;font-size:11px;color:#94a3b8'>TG: {tg_status}<br>Refs: {ref_count}/10<br>News: {news_status}<br>RR 1:{user_settings.get('rr_ratio',2.5)}</div></div><div class='card'><div class='card-title'>Account</div><div class='card-value'>R{user_settings.get('account_size',142)}</div><div style='font-size:11px;color:#94a3b8'>Lot {user_settings.get('lot_size',0.01)} Lev {user_settings.get('leverage','1:500')}<br>Risk {user_settings.get('risk_percent',1)}% RR 1:{user_settings.get('rr_ratio',2.5)}<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings</a></div></div><div class='card'><div class='card-title'>Watchlist</div><div style='display:flex;flex-wrap:wrap;gap:5px;margin:10px 0'>{sym_spans}</div><div style='font-size:11px;color:#94a3b8'>Last: {str(system.get('last_scan','Never'))[:16]}</div></div><div class='card' style='border:1px solid #10b98133'><a href='/dashboard-scan'><button class='btn-primary'>⚡ SCAN NOW</button></a><a href='/test-telegram' class='btn-secondary'>Test Telegram</a><a href='/link-telegram' class='btn-secondary'>Link TG</a>{admin_link}</div></div><div style='max-width:1600px;margin:0 auto;padding:0 20px 20px'><div class='table-card'><h3>Recent Trades</h3><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th></tr>{rows}</table></div></div>"
+    tracked=load_json(TRACK_FILE, dict)
+    content=f"<div class='main'><div class='card'><div class='card-title'>Total Profit</div><div class='card-value' style='color:#ef4444'>R{info.get('total_profit',-1.42)}</div><div style='background:#0f172a;border-radius:12px;padding:10px;margin-top:10px;font-size:11px;color:#94a3b8'>TG: {tg_status}<br>Refs: {ref_count}/10<br>News: {news_status}<br>Tracked: {len(tracked)} (anti-spam)<br>RR 1:{user_settings.get('rr_ratio',2.5)}</div></div><div class='card'><div class='card-title'>Account</div><div class='card-value'>R{user_settings.get('account_size',142)}</div><div style='font-size:11px;color:#94a3b8'>Lot {user_settings.get('lot_size',0.01)} Lev {user_settings.get('leverage','1:500')}<br>Risk {user_settings.get('risk_percent',1)}% RR 1:{user_settings.get('rr_ratio',2.5)}<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings</a></div></div><div class='card'><div class='card-title'>Watchlist</div><div style='display:flex;flex-wrap:wrap;gap:5px;margin:10px 0'>{sym_spans}</div><div style='font-size:11px;color:#94a3b8'>Last: {str(system.get('last_scan','Never'))[:16]}<br>Cooldown: 4h same bias, 1h any</div></div><div class='card' style='border:1px solid #10b98133'><a href='/dashboard-scan'><button class='btn-primary'>⚡ SCAN NOW</button></a><a href='/test-telegram' class='btn-secondary'>Test Telegram</a><a href='/link-telegram' class='btn-secondary'>Link TG</a>{admin_link}</div></div><div style='max-width:1600px;margin:0 auto;padding:0 20px 20px'><div class='table-card'><h3>Recent Trades</h3><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th></tr>{rows}</table></div></div>"
     return pro_layout(content,"Dashboard", is_admin=is_admin)
 
 @app.route("/all-signals")
@@ -215,7 +216,7 @@ def dashboard_scan():
             rows+=f"<tr><td style='font-weight:800'>{s}<br><span style='font-size:10px;color:#10b981'>{entry_display} | {premium:.0f}%</span><br><span style='font-size:9px;color:#94a3b8'>{candles} {sweep} {news_block}</span></td><td><span style='background:{color}22;color:{color};padding:4px 10px;border-radius:20px;font-weight:800'>{score}/10</span></td><td>{bias}</td><td>{'STRONG' if r.get('signal') else 'Wait'}</td><td>{signal_btn}</td></tr>"
         except Exception as e:
             rows+=f"<tr><td>{s}</td><td colspan=4 style='color:#ef4444'>{str(e)[:80]}</td></tr>"
-    content=f"<div style='max-width:1600px;margin:0 auto;padding:20px'><div class='table-card'><h2>Signals - RR 1:{user_settings.get('rr_ratio',2.5)} | News { 'ON' if user_settings.get('trade_news',True) else 'OFF'} | {len(symbols_to_scan)} Pairs</h2><div style='overflow-x:auto'><table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div></div>"
+    content=f"<div style='max-width:1600px;margin:0 auto;padding:20px'><div class='table-card'><h2>Signals - RR 1:{user_settings.get('rr_ratio',2.5)} | News {'ON' if user_settings.get('trade_news',True) else 'OFF'} | {len(symbols_to_scan)} Pairs</h2><div style='overflow-x:auto'><table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div></div>"
     return pro_layout(content,"All Signals", is_admin=is_admin)
 
 @app.route("/settings", methods=["GET","POST"])
@@ -327,7 +328,7 @@ def telegram_webhook():
     return jsonify({"ok":True})
 
 @app.route("/login")
-def login_page(): return "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:#080c14;color:white;font-family:Arial;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center'><div style='width:100%;max-width:420px;background:#1e293b;padding:32px;border-radius:24px'><div style='text-align:center;margin-bottom:24px'><div style='font-weight:900;font-size:26px;color:#10b981'>AGENT 35 PRO V19.8</div></div><form action='/login/check' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><button style='background:#10b981;color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>LOGIN</button></form></div></body></html>"
+def login_page(): return "<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:#080c14;color:white;font-family:Arial;padding:20px;min-height:100vh;display:flex;align-items:center;justify-content:center'><div style='width:100%;max-width:420px;background:#1e293b;padding:32px;border-radius:24px'><div style='text-align:center;margin-bottom:24px'><div style='font-weight:900;font-size:26px;color:#10b981'>AGENT 35 PRO V19.8.1</div></div><form action='/login/check' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:14px;margin:8px 0;border-radius:12px;border:1px solid #334155;background:#0f172a;color:white'><button style='background:#10b981;color:white;padding:14px;width:100%;border:none;border-radius:12px;font-weight:800;margin-top:10px'>LOGIN</button></form></div></body></html>"
 
 @app.route("/register")
 def register_page():
@@ -435,37 +436,104 @@ def pay_create():
 @app.route("/guide")
 def guide_page():
     is_admin=session.get("user")=="admin@agent35.com"
-    content="<div style='max-width:900px;margin:0 auto;padding:20px'><h1>Guide V19.8</h1><div class='card'><p>Settings controls SL/TP = Account*Risk% / Lot * RR + News Toggle.</p></div></div>"
+    content="<div style='max-width:900px;margin:0 auto;padding:20px'><h1>Guide V19.8.1</h1><div class='card'><p>Anti-spam: 4h same bias, 1h any. Change cron to */30 * * * *</p></div></div>"
     return pro_layout(content,"Guide", is_admin=is_admin)
 
 @app.route("/plans")
 def plans_page(): return pro_layout("<div style='max-width:600px;margin:0 auto;padding:20px'><div class='card'><h2>Plans</h2><a href='/pay'>Buy</a></div></div>","Plans", is_admin=session.get("user")=="admin@agent35.com")
 
+@app.route("/referral")
+def referral_page():
+    if not session.get("user"): return redirect("/login")
+    email=session.get("user"); is_admin=email=="admin@agent35.com"
+    auth=load_json(AUTH_FILE); my_code=generate_ref_code(email); get_ref_count_and_auto_upgrade(email)
+    my_refs=[]
+    for e,info in auth.items():
+        if info.get("referred_by","").upper()==my_code.upper():
+            status="PAID" if "ACTIVE" in info.get("plan_status","") else "Pending"
+            my_refs.append({"email":e,"status":status,"plan":info.get("plan_status","")})
+    paid_count=len([r for r in my_refs if "PAID" in r["status"]]); progress=int((paid_count/10)*100) if paid_count<=10 else 100
+    refs_html="".join([f"<tr><td>{r['email'][:28]}</td><td><span style='color:{'#10b981' if 'PAID' in r['status'] else '#f59e0b'}'>{r['status']}</span></td><td>{r['plan'][:24]}</td></tr>" for r in my_refs]) or "<tr><td colspan=3 style='text-align:center;color:#64748b'>No referrals</td></tr>"
+    link=f"https://agent-35-trading-bot.onrender.com/register?ref={my_code}"
+    free_banner="<div style='background:#10b981;color:white;padding:12px;border-radius:12px;text-align:center;font-weight:900;margin-top:12px'>FREE LIFETIME UNLOCKED!</div>" if paid_count>=10 else ""
+    content=f"<div style='max-width:1000px;margin:0 auto;padding:20px'><h1>Referral</h1><div style='display:grid;grid-template-columns:1fr 1fr;gap:16px'><div class='card'><div class='card-title'>Your Code</div><div style='background:white;color:black;padding:16px;border-radius:12px;font-weight:900;font-size:24px;text-align:center;margin:12px 0'>{my_code}</div><div style='background:#0f172a;padding:10px;border-radius:10px;font-size:11px;word-break:break-all'>{link}</div></div><div class='card'><div class='card-title'>Progress {paid_count}/10</div><div style='background:#0f172a;border-radius:20px;height:14px;overflow:hidden;margin:12px 0'><div style='background:#10b981;width:{progress}%;height:100%'></div></div>{free_banner}</div></div><div class='table-card' style='margin-top:20px'><h3>Referrals ({len(my_refs)})</h3><table><tr><th>Email</th><th>Status</th><th>Plan</th></tr>{refs_html}</table></div></div>"
+    return pro_layout(content,"Referral", is_admin=is_admin)
+
 @app.route("/cron/scan")
 def cron_scan():
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
-    system=load_json(SYSTEM_FILE, dict); system["last_scan"]=datetime.now().isoformat(); system["total_scans"]=system.get("total_scans",0)+1; save_json(SYSTEM_FILE, system)
-    settings_all=load_json(SETTINGS_FILE, dict); all_syms=set()
+    system=load_json(SYSTEM_FILE, dict)
+    system["last_scan"]=datetime.now().isoformat()
+    system["total_scans"]=system.get("total_scans",0)+1
+    save_json(SYSTEM_FILE, system)
+
+    settings_all=load_json(SETTINGS_FILE, dict)
+    tracked=load_json(TRACK_FILE, dict)
+    all_syms=set()
     for s in settings_all.values(): all_syms.update(s.get("symbols",[]))
     if not all_syms: all_syms=set(ALL_SYMBOLS[:12])
+
     sent=[]
+    skipped=[]
+    now=datetime.now()
+
+    # Clean old tracked >24h
+    cleaned={}
+    for k,v in tracked.items():
+        try:
+            t=datetime.fromisoformat(v.get("time","2000-01-01T00:00:00"))
+            if (now - t).total_seconds() < 86400: cleaned[k]=v
+        except: pass
+    if len(cleaned)!=len(tracked):
+        tracked=cleaned
+        save_json(TRACK_FILE, tracked)
+
     for sym in list(all_syms)[:20]:
         try:
             sample_settings = next(iter(settings_all.values())) if settings_all else {"trade_news":True,"risk_percent":1,"rr_ratio":2.5,"lot_size":0.01,"leverage":"1:500","account_size":142}
             r=eng.full_multi_tf_analysis(sym, sample_settings)
-            if r.get('signal') and r.get('entry') and float(r.get('entry'))>0:
-                entry=r.get('entry'); rr=sample_settings.get('rr_ratio',2.5); risk_percent=sample_settings.get('risk_percent',1); lot=sample_settings.get('lot_size',0.01); lev=sample_settings.get('leverage','1:500'); acc=sample_settings.get('account_size',142)
-                sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
-                confluence=r.get('confluence', r.get('reason',''))
-                send_telegram_pro(sym, r.get('score',7), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, confluence)
-                sent.append(sym)
-        except Exception as e: print(f"Scan error {sym}: {e}")
-    return jsonify({"sent":sent,"scanned":len(all_syms)})
+
+            if not r.get('signal') or not r.get('entry') or float(r.get('entry'))==0:
+                continue
+
+            last_info=tracked.get(sym)
+            if last_info:
+                try:
+                    last_time=datetime.fromisoformat(last_info.get("time","2000-01-01T00:00:00"))
+                    last_bias=last_info.get("bias","")
+                    hours_since=(now-last_time).total_seconds()/3600
+                    if last_bias==r.get('bias') and hours_since<4:
+                        skipped.append(f"{sym} {last_bias} {hours_since:.1f}h cooldown")
+                        continue
+                    if hours_since<1:
+                        skipped.append(f"{sym} 1h cooldown")
+                        continue
+                except: pass
+
+            entry=r.get('entry')
+            rr=sample_settings.get('rr_ratio',2.5)
+            risk_percent=sample_settings.get('risk_percent',1)
+            lot=sample_settings.get('lot_size',0.01)
+            lev=sample_settings.get('leverage','1:500')
+            acc=sample_settings.get('account_size',142)
+            sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
+            confluence=r.get('confluence', r.get('reason',''))
+            send_telegram_pro(sym, r.get('score',7), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, confluence)
+
+            tracked[sym]={"time":now.isoformat(),"bias":r.get('bias'),"entry":entry,"score":r.get('score')}
+            save_json(TRACK_FILE, tracked)
+            sent.append(sym)
+
+        except Exception as e:
+            print(f"Scan error {sym}: {e}")
+
+    return jsonify({"sent":sent,"skipped":skipped,"scanned":len(all_syms),"cooldown":"4h same bias, 1h any","tracked_count":len(tracked)})
 
 @app.route("/health")
 def health():
     test=eng.full_multi_tf_analysis("GBPUSD", {"trade_news":True})
-    return jsonify({"ok":True,"version":"V19.8 CLEAN DYNAMIC","entry":test.get('entry'),"score":test.get('score'),"bias":test.get('bias'),"premium":test.get('premium_pct'),"details":test.get('details'),"keys":len([k for k in [os.getenv("TWELVE_DATA_API_KEY"),os.getenv("TWELVE_DATA_API_KEY_2"),os.getenv("TWELVE_DATA_API_KEY_3"),os.getenv("TWELVE_DATA_API_KEY_4")] if k])})
+    tracked=load_json(TRACK_FILE, dict)
+    return jsonify({"ok":True,"version":"V19.8.1 ANTI-SPAM 4h/1h","entry":test.get('entry'),"score":test.get('score'),"bias":test.get('bias'),"premium":test.get('premium_pct'),"details":test.get('details'),"keys":len([k for k in [os.getenv("TWELVE_DATA_API_KEY"),os.getenv("TWELVE_DATA_API_KEY_2"),os.getenv("TWELVE_DATA_API_KEY_3"),os.getenv("TWELVE_DATA_API_KEY_4")] if k]),"tracked":len(tracked)})
 
 @app.route("/forgot-password")
 def forgot_page(): return "<html><body style='background:#080c14;color:white;padding:30px'><div style='max-width:400px;margin:auto;background:#1e293b;padding:20px;border-radius:12px'><h2>Forgot</h2><form action='/forgot-password/send' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:12px;border-radius:8px;background:#0f172a;border:1px solid #334155;color:white'><button style='background:#f59e0b;color:white;padding:12px;width:100%;border:none;border-radius:12px;margin-top:10px'>SEND</button></form></div></body></html>"
