@@ -1,5 +1,5 @@
 import os, requests, random
-from datetime import datetime
+from datetime import datetime, timedelta
 
 # ================= KEYS ROTATION =================
 def get_keys():
@@ -70,6 +70,31 @@ def get_values(symbol, interval, outputsize=50):
         except:
             continue
     return candles, None
+
+# ================= MARKET HOURS FILTER V21 =================
+def is_market_open(symbol):
+    now_utc = datetime.utcnow()
+    weekday = now_utc.weekday() # 0=Mon 5=Sat 6=Sun
+    hour = now_utc.hour
+
+    # Crypto 24/7 always open
+    if symbol in ["BTCUSD","ETHUSD","SOLUSD","BNBUSD","BTC/USD","ETH/USD"]:
+        return True, ""
+
+    # Forex & Gold & Indices CLOSED Saturday + Sunday
+    # Saturday 00:00 UTC to Sunday 22:00 UTC approx
+    if weekday == 5: # Saturday
+        return False, "Market Closed - Saturday"
+    if weekday == 6: # Sunday
+        # Forex opens Sunday 22:00 UTC, so closed before 22
+        if hour < 22:
+            return False, "Market Closed - Sunday (Opens 22:00 UTC)"
+
+    # Friday night close 22:00 UTC
+    if weekday == 4 and hour >= 22:
+        return False, "Market Closed - Friday 22:00 UTC Close"
+
+    return True, ""
 
 # ================= INDICATORS =================
 def ema(candles, period):
@@ -183,6 +208,81 @@ def detect_fvg(candles):
         return True
     return False
 
+# ================= V21 NEW: ORDER BLOCK DETECTION =================
+def detect_order_block(candles):
+    """
+    V21: Detect if price is respecting Order Block
+    Bullish OB: Last bearish candle before strong bullish impulse, price now retesting that zone
+    Bearish OB: Last bullish candle before strong bearish impulse
+    """
+    if len(candles) < 20:
+        return False, "", 0
+
+    last_close = candles[-1]["close"]
+    last_low = candles[-1]["low"]
+    last_high = candles[-1]["high"]
+
+    # Look back 15 candles for OB
+    for i in range(len(candles)-15, len(candles)-3):
+        c = candles[i]
+        body = abs(c["close"] - c["open"])
+        if body == 0:
+            continue
+        # Check next 2-4 candles for impulse
+        next_candles = candles[i+1:i+5]
+        if len(next_candles) < 2:
+            continue
+
+        # Bullish OB: bearish candle followed by bullish impulse
+        if c["close"] < c["open"]: # bearish OB candle
+            impulse_high = max([cc["close"] for cc in next_candles])
+            impulse_strength = (impulse_high - c["high"]) / c["high"] if c["high"]!=0 else 0
+            # Impulse must be at least 0.3% for forex/gold, 1% for BTC
+            if impulse_strength > 0.002: # 0.2% min
+                # Is current price respecting this OB? Price within OB zone or just above
+                ob_low = c["low"]
+                ob_high = c["high"]
+                ob_mid = (ob_low + ob_high)/2
+                # Price near OB (within 0.5% for BTC, 0.15% for forex)
+                tolerance = ob_high * 0.005 if ob_high > 1000 else ob_high * 0.0015
+                if abs(last_close - ob_mid) <= tolerance or (last_low <= ob_high and last_close >= ob_low):
+                    # Check if price bounced from OB (hammer, engulf near OB)
+                    return True, f"Bull OB {ob_low:.2f}-{ob_high:.2f}", 4
+
+        # Bearish OB: bullish candle followed by bearish impulse
+        if c["close"] > c["open"]: # bullish OB candle
+            impulse_low = min([cc["close"] for cc in next_candles])
+            impulse_strength = (c["low"] - impulse_low) / c["low"] if c["low"]!=0 else 0
+            if impulse_strength > 0.002:
+                ob_low = c["low"]
+                ob_high = c["high"]
+                ob_mid = (ob_low + ob_high)/2
+                tolerance = ob_high * 0.005 if ob_high > 1000 else ob_high * 0.0015
+                if abs(last_close - ob_mid) <= tolerance or (last_high >= ob_low and last_close <= ob_high):
+                    return True, f"Bear OB {ob_low:.2f}-{ob_high:.2f}", 4
+
+    return False, "", 0
+
+def detect_multi_tf_ob(symbol):
+    """
+    Check OB on 4h, 2h, 1h - for BTC case user mentioned
+    Returns True if OB found on any higher timeframe
+    """
+    timeframes = ["4h","2h","1h"]
+    ob_found = False
+    ob_details = []
+    total_score = 0
+    for tf in timeframes:
+        candles,_ = get_values(symbol, tf, 50)
+        if not candles or len(candles) < 20:
+            continue
+        found, zone, score = detect_order_block(candles)
+        if found:
+            ob_found = True
+            ob_details.append(f"{tf.upper()} {zone}")
+            total_score += score
+    return ob_found, " | ".join(ob_details), total_score
+
 def is_news_time(user_settings):
     trade_news=user_settings.get("trade_news",True)
     now=datetime.utcnow()
@@ -195,9 +295,14 @@ def is_news_time(user_settings):
         return True,"NEWS BLOCKED - Trade News OFF"
     return False,""
 
-# ================= 5 TRADING METHODS =================
+# ================= 5 TRADING METHODS V21 =================
 
 def method1_premium_sweep(symbol, user_settings):
+    # Market closed check V21
+    is_open, closed_reason = is_market_open(symbol)
+    if not is_open:
+        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method1_premium_sweep"}
+
     daily_bias,premium_pct,daily_candles=get_htf_bias(symbol)
     if daily_bias=="NEUTRAL":
         return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":premium_pct,"reason":"Daily NEUTRAL - Sideways","confluence":"Daily sideways no trend","details":{"news_blocked":False},"method":"method1_premium_sweep"}
@@ -214,14 +319,20 @@ def method1_premium_sweep(symbol, user_settings):
     h1_patterns,h1_pat_score=detect_candle(h1_candles)
     h1_sweep,h1_sweep_score=detect_sweep(h1_candles,daily_bias)
     h1_fvg=detect_fvg(h1_candles)
+    h1_ob, h1_ob_zone, h1_ob_score = detect_order_block(h1_candles)
     h1_entry=h1_candles[-1]["close"]
     m5_candles,_=get_values(symbol,"5min",30)
-    m5_patterns=[]; m5_pat_score=0; m5_sweep=False; m5_sweep_score=0; m5_fvg=False; m5_entry=h1_entry
+    m5_patterns=[]; m5_pat_score=0; m5_sweep=False; m5_sweep_score=0; m5_fvg=False; m5_ob=False; m5_ob_score=0; m5_entry=h1_entry
     if m5_candles and len(m5_candles)>=12:
         m5_patterns,m5_pat_score=detect_candle(m5_candles)
         m5_sweep,m5_sweep_score=detect_sweep(m5_candles,daily_bias)
         m5_fvg=detect_fvg(m5_candles)
+        m5_ob, m5_ob_zone, m5_ob_score = detect_order_block(m5_candles)
         m5_entry=m5_candles[-1]["close"]
+
+    # Multi TF OB for BTC case
+    multi_ob, multi_ob_details, multi_ob_score = detect_multi_tf_ob(symbol)
+
     score=0; parts=[]
     if daily_bias!="NEUTRAL": score+=2; parts.append(f"Daily {daily_bias}")
     if aligned_4h: score+=2; parts.append(f"4H {bias_4h} aligned")
@@ -232,22 +343,42 @@ def method1_premium_sweep(symbol, user_settings):
     if h1_patterns: score+=h1_pat_score; parts.append(f"H1 {','.join(h1_patterns)} +{h1_pat_score}")
     if h1_sweep: score+=h1_sweep_score; parts.append(f"H1 Sweep +{h1_sweep_score}")
     if h1_fvg: score+=1; parts.append("H1 FVG +1")
+    if h1_ob: score+=h1_ob_score; parts.append(f"H1 {h1_ob_zone} +{h1_ob_score}")
     if m5_patterns: score+=m5_pat_score; parts.append(f"M5 {','.join(m5_patterns)} +{m5_pat_score}")
     if m5_sweep: score+=m5_sweep_score; parts.append(f"M5 Sweep +{m5_sweep_score}")
     if m5_fvg: score+=1; parts.append("M5 FVG +1")
+    if m5_ob: score+=m5_ob_score; parts.append(f"M5 {m5_ob_zone} +{m5_ob_score}")
+    if multi_ob: score+=multi_ob_score; parts.append(f"MTF OB {multi_ob_details} +{multi_ob_score}")
+
     has_sweep=h1_sweep or m5_sweep
+    has_ob = h1_ob or m5_ob or multi_ob
     has_strong=h1_pat_score>=3 or m5_pat_score>=3
-    is_strong=score>=7 and has_sweep and has_strong
+
+    # V21 FIX: OB respect can replace sweep requirement for BTC/crypto
+    is_crypto = symbol in ["BTCUSD","ETHUSD","SOLUSD","BNBUSD"]
+    if is_crypto:
+        # For crypto, OB + Engulfing = STRONG even without sweep
+        is_strong = score>=6 and (has_sweep or has_ob) and has_strong
+    else:
+        is_strong=score>=7 and has_sweep and has_strong
+
     if not is_strong:
-        if score<7: reason=f"Score {score}/10 low - Need 7+"
-        elif not has_sweep: reason=f"Score {score}/10 but no sweep - Waiting liquidity grab"
+        if score<6: reason=f"Score {score}/10 low - Need 6+"
+        elif not (has_sweep or has_ob): reason=f"Score {score}/10 but no sweep/OB - Waiting liquidity or OB respect"
         elif not has_strong: reason=f"Score {score}/10 but no engulf/hammer - Waiting strong candle"
         else: reason=f"Score {score}/10 Wait"
-    else: reason=f"Score {score}/10 STRONG - Premium+Sweep+Engulf"
+    else:
+        if has_ob and not has_sweep:
+            reason=f"Score {score}/10 STRONG - OB Respect+Engulf (No sweep needed for BTC)"
+        else:
+            reason=f"Score {score}/10 STRONG - Premium+Sweep/OB+Engulf"
     final_entry=m5_entry if m5_entry!=0 else h1_entry
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":daily_bias,"bias_4h":bias_4h,"entry":final_entry,"premium_pct":premium_pct,"reason":reason,"confluence":" | ".join(parts),"details":{"candles":h1_patterns+m5_patterns,"sweep":has_sweep,"fvg":h1_fvg or m5_fvg,"premium":premium_pct,"h1_entry":h1_entry,"m5_entry":m5_entry,"aligned_4h":aligned_4h},"method":"method1_premium_sweep"}
+    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":daily_bias,"bias_4h":bias_4h,"entry":final_entry,"premium_pct":premium_pct,"reason":reason,"confluence":" | ".join(parts),"details":{"candles":h1_patterns+m5_patterns,"sweep":has_sweep,"fvg":h1_fvg or m5_fvg,"premium":premium_pct,"h1_entry":h1_entry,"m5_entry":m5_entry,"aligned_4h":aligned_4h,"ob":has_ob,"ob_details":multi_ob_details},"method":"method1_premium_sweep"}
 
 def method2_ema_rsi(symbol, user_settings):
+    is_open, closed_reason = is_market_open(symbol)
+    if not is_open:
+        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method2_ema_rsi"}
     daily_bias,premium_pct,daily_candles=get_htf_bias(symbol)
     h1_candles,_=get_values(symbol,"1h",40)
     if not h1_candles or len(h1_candles)<20:
@@ -258,6 +389,7 @@ def method2_ema_rsi(symbol, user_settings):
         return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":h1_entry,"premium_pct":premium_pct,"reason":"No EMA","confluence":"No EMA","details":{},"method":"method2_ema_rsi"}
     bias="BULLISH" if ema5>ema20 else "BEARISH" if ema5<ema20 else "NEUTRAL"
     patterns,pat_score=detect_candle(h1_candles)
+    ob_found, ob_zone, ob_score = detect_order_block(h1_candles)
     score=0; parts=[]
     if bias=="BULLISH" and 40<=rsi_val<=55:
         score+=4; parts.append(f"RSI {rsi_val:.0f} pullback BUY zone 40-55")
@@ -267,13 +399,17 @@ def method2_ema_rsi(symbol, user_settings):
         parts.append(f"RSI {rsi_val:.0f} no pullback")
     if bias!="NEUTRAL": score+=2; parts.append(f"EMA5>20 {bias}")
     if patterns: score+=pat_score; parts.append(f"{','.join(patterns)} +{pat_score}")
+    if ob_found: score+=ob_score; parts.append(f"OB {ob_zone} +{ob_score}")
     if bias=="BULLISH" and premium_pct<=50: score+=2; parts.append(f"Discount {premium_pct:.0f}%")
     if bias=="BEARISH" and premium_pct>=50: score+=2; parts.append(f"Premium {premium_pct:.0f}%")
     is_strong=score>=6 and (40<=rsi_val<=60) and pat_score>=2
     reason=f"EMA+RSI Score {score}/10 RSI {rsi_val:.0f} {bias} {'STRONG' if is_strong else 'Wait pullback'}"
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":h1_entry,"premium_pct":premium_pct,"reason":reason,"confluence":" | ".join(parts),"details":{"rsi":rsi_val,"candles":patterns,"ema5":ema5,"ema20":ema20},"method":"method2_ema_rsi"}
+    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":h1_entry,"premium_pct":premium_pct,"reason":reason,"confluence":" | ".join(parts),"details":{"rsi":rsi_val,"candles":patterns,"ema5":ema5,"ema20":ema20,"ob":ob_found},"method":"method2_ema_rsi"}
 
 def method3_breakout_retest(symbol, user_settings):
+    is_open, closed_reason = is_market_open(symbol)
+    if not is_open:
+        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method3_breakout_retest"}
     h1_candles,_=get_values(symbol,"1h",40)
     if not h1_candles or len(h1_candles)<25:
         return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":"No H1 data","confluence":"No H1","details":{},"method":"method3_breakout_retest"}
@@ -281,6 +417,7 @@ def method3_breakout_retest(symbol, user_settings):
     recent_low=min([c["low"] for c in h1_candles[-21:-1]])
     last=h1_candles[-1]; entry=last["close"]
     patterns,pat_score=detect_candle(h1_candles)
+    ob_found, ob_zone, ob_score = detect_order_block(h1_candles)
     score=0; parts=[]; bias="NEUTRAL"
     if last["close"]>recent_high*1.0002:
         bias="BULLISH"; score+=3; parts.append(f"Break High {recent_high:.5f}")
@@ -291,11 +428,15 @@ def method3_breakout_retest(symbol, user_settings):
     else:
         parts.append(f"Inside {recent_low:.5f}-{recent_high:.5f}")
     if patterns: score+=pat_score; parts.append(f"{','.join(patterns)} +{pat_score}")
+    if ob_found: score+=ob_score; parts.append(f"OB {ob_zone} +{ob_score}")
     is_strong=score>=6 and bias!="NEUTRAL" and pat_score>=2
     reason=f"Breakout Score {score}/10 {bias} {'STRONG breakout+retest' if is_strong else 'Wait breakout'}"
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":entry,"premium_pct":50,"reason":reason,"confluence":" | ".join(parts),"details":{"break_high":recent_high,"break_low":recent_low,"candles":patterns},"method":"method3_breakout_retest"}
+    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":entry,"premium_pct":50,"reason":reason,"confluence":" | ".join(parts),"details":{"break_high":recent_high,"break_low":recent_low,"candles":patterns,"ob":ob_found},"method":"method3_breakout_retest"}
 
 def method4_scalp_m5(symbol, user_settings):
+    is_open, closed_reason = is_market_open(symbol)
+    if not is_open and symbol not in ["BTCUSD","ETHUSD","SOLUSD","BNBUSD"]:
+        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method4_scalp_m5"}
     m5_candles,_=get_values(symbol,"5min",50)
     if not m5_candles or len(m5_candles)<25:
         return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":"No M5 data","confluence":"No M5","details":{},"method":"method4_scalp_m5"}
@@ -305,17 +446,24 @@ def method4_scalp_m5(symbol, user_settings):
         return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":entry,"premium_pct":50,"reason":"No EMA9/21","confluence":"No EMA","details":{},"method":"method4_scalp_m5"}
     bias="BULLISH" if ema9>ema21 else "BEARISH" if ema9<ema21 else "NEUTRAL"
     sweep,sweep_score=detect_sweep(m5_candles,bias)
+    ob_found, ob_zone, ob_score = detect_order_block(m5_candles)
     score=0; parts=[]
     if bias=="BULLISH" and rsi_val<70 and rsi_val>30: score+=3; parts.append(f"EMA9>21 BUY RSI {rsi_val:.0f}")
     elif bias=="BEARISH" and rsi_val>30 and rsi_val<70: score+=3; parts.append(f"EMA9<21 SELL RSI {rsi_val:.0f}")
     else: parts.append(f"RSI {rsi_val:.0f} extreme")
     if patterns: score+=pat_score; parts.append(f"{','.join(patterns)} +{pat_score}")
     if sweep: score+=2; parts.append(f"M5 Sweep +{sweep_score}")
+    if ob_found: score+=ob_score; parts.append(f"OB {ob_zone} +{ob_score}")
     is_strong=score>=5 and bias!="NEUTRAL" and 30<=rsi_val<=70
     reason=f"Scalp M5 Score {score}/10 RSI {rsi_val:.0f} {bias} {'STRONG' if is_strong else 'Wait EMA cross'}"
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":entry,"premium_pct":50,"reason":reason,"confluence":" | ".join(parts),"details":{"rsi":rsi_val,"candles":patterns,"sweep":sweep,"ema9":ema9,"ema21":ema21},"method":"method4_scalp_m5"}
+    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":entry,"premium_pct":50,"reason":reason,"confluence":" | ".join(parts),"details":{"rsi":rsi_val,"candles":patterns,"sweep":sweep,"ema9":ema9,"ema21":ema21,"ob":ob_found},"method":"method4_scalp_m5"}
 
 def method5_smc_ob_bos(symbol, user_settings):
+    # V21: Crypto always open, so BTC will still signal on Saturday
+    is_open, closed_reason = is_market_open(symbol)
+    if not is_open:
+        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method5_smc_ob_bos"}
+
     daily_bias,premium_pct,daily_candles=get_htf_bias(symbol)
     h1_candles,_=get_values(symbol,"1h",40)
     if not h1_candles or len(h1_candles)<25:
@@ -327,6 +475,8 @@ def method5_smc_ob_bos(symbol, user_settings):
     bos_bear=last["close"]<recent_low
     fvg=detect_fvg(h1_candles)
     patterns,pat_score=detect_candle(h1_candles)
+    ob_found, ob_zone, ob_score = detect_order_block(h1_candles)
+    multi_ob, multi_ob_details, multi_ob_score = detect_multi_tf_ob(symbol)
     entry=last["close"]
     score=0; parts=[]; bias="NEUTRAL"
     if bos_bull: bias="BULLISH"; score+=4; parts.append(f"BOS Bull break {recent_high:.5f} +4")
@@ -335,15 +485,52 @@ def method5_smc_ob_bos(symbol, user_settings):
     if fvg: score+=3; parts.append("FVG +3")
     else: parts.append("No FVG")
     if patterns: score+=pat_score; parts.append(f"{','.join(patterns)} +{pat_score}")
+    if ob_found: score+=ob_score; parts.append(f"H1 {ob_zone} +{ob_score}")
+    if multi_ob: score+=multi_ob_score; parts.append(f"MTF {multi_ob_details} +{multi_ob_score}")
     if daily_bias==bias and bias!="NEUTRAL": score+=2; parts.append(f"Daily {daily_bias} aligned +2")
-    is_strong=score>=7 and (bos_bull or bos_bear) and fvg
-    reason=f"SMC OB+BOS Score {score}/10 BOS:{bos_bull or bos_bear} FVG:{fvg} {'STRONG' if is_strong else 'Wait BOS+FVG'}"
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":entry,"premium_pct":premium_pct,"reason":reason,"confluence":" | ".join(parts),"details":{"bos_bull":bos_bull,"bos_bear":bos_bear,"fvg":fvg,"candles":patterns,"break_high":recent_high,"break_low":recent_low},"method":"method5_smc_ob_bos"}
+
+    # V21 FIX FOR BTC: OB Respect alone is enough, no need BOS+FVG both
+    has_ob = ob_found or multi_ob
+    is_crypto = symbol in ["BTCUSD","ETHUSD","SOLUSD","BNBUSD"]
+    if is_crypto:
+        # BTC in OB on 4h/2h/1h + price respecting = STRONG
+        is_strong = score>=6 and (has_ob or bos_bull or bos_bear) and pat_score>=2
+        if has_ob and pat_score>=2:
+            is_strong = True # OB + candle = signal for crypto
+    else:
+        is_strong=score>=6 and (bos_bull or bos_bear or has_ob) and (fvg or has_ob)
+
+    if is_strong:
+        if has_ob and not (bos_bull or bos_bear):
+            reason=f"SMC OB Respect Score {score}/10 {ob_zone} {multi_ob_details} STRONG - OB respect (BTC case)"
+        else:
+            reason=f"SMC OB+BOS Score {score}/10 BOS:{bos_bull or bos_bear} FVG:{fvg} OB:{has_ob} STRONG"
+    else:
+        reason=f"SMC Score {score}/10 BOS:{bos_bull or bos_bear} FVG:{fvg} OB:{has_ob} Wait"
+
+    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":entry,"premium_pct":premium_pct,"reason":reason,"confluence":" | ".join(parts),"details":{"bos_bull":bos_bull,"bos_bear":bos_bear,"fvg":fvg,"candles":patterns,"break_high":recent_high,"break_low":recent_low,"ob":has_ob,"ob_zone":ob_zone,"multi_ob":multi_ob_details},"method":"method5_smc_ob_bos"}
 
 # ================= DISPATCHER =================
 def full_multi_tf_analysis(symbol, user_settings=None):
     if user_settings is None:
         user_settings={"trade_news":True,"trading_method":"method1_premium_sweep","currency":"ZAR","spread_forex":0.7,"spread_gold":0.35}
+
+    # Weekend check first
+    is_open, closed_reason = is_market_open(symbol)
+    if not is_open:
+        return {
+            "symbol":symbol,
+            "signal":False,
+            "score":0,
+            "bias":"NEUTRAL",
+            "entry":0,
+            "premium_pct":50,
+            "reason":closed_reason,
+            "confluence":closed_reason,
+            "details":{"market_closed":True},
+            "method":user_settings.get("trading_method","method1_premium_sweep")
+        }
+
     blocked,reason=is_news_time(user_settings)
     if blocked:
         return {
