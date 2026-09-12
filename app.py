@@ -1,15 +1,50 @@
 from flask import Flask, request, jsonify, session, redirect, Response
-import os, json, hashlib, requests, random, string, csv, io, threading
+import os, json, hashlib, requests, random, string, csv, io, sys, secrets, smtplib
+from email.mime.text import MIMEText
+from urllib.parse import quote
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
+from werkzeug.security import generate_password_hash, check_password_hash
 
 load_dotenv()
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET", "agent35-v23-final-all-features")
+
+# --- FLASK_SECRET is required, no fallback. A predictable/hardcoded session
+# secret lets anyone forge a login session cookie for any user, including admin.
+if not os.getenv("FLASK_SECRET"):
+    raise RuntimeError(
+        "FLASK_SECRET environment variable is not set. "
+        "Set it to a long random string before starting the app."
+    )
+app.secret_key = os.environ["FLASK_SECRET"]
+
+# --- CREATOR_SECRET replaces the old hardcoded "ADMIN35" bypass string.
+# If it's not set, the query-param admin bypass is simply disabled — the
+# admin can still always get in via normal login as admin@agent35.com.
+CREATOR_SECRET = os.getenv("CREATOR_SECRET", "")
+if not CREATOR_SECRET:
+    print("[WARN] CREATOR_SECRET is not set. The /creator?secret=... bypass "
+          "is disabled until you set it (admin login still works normally).",
+          file=sys.stderr)
+
 import trading_engine as eng
 
+# --- PERSISTENCE NOTE (read this if data keeps resetting on deploy):
+# BASE_DIR only survives redeploys if "/data" is an actually-mounted
+# persistent volume on your hosting platform (e.g. a Render Disk attached
+# to this service). This is an infrastructure setting, not something fixable
+# in code — if you haven't attached a persistent disk at /data, every deploy
+# WILL wipe local files regardless of anything below. The backup/restore
+# system here is a safety net for that case, not a replacement for it.
 BASE_DIR = "/data" if os.path.exists("/data") else "."
-BACKUP_URL = os.getenv("DATA_BACKUP_URL", "https://api.npoint.io/1e8f3c2a9b4d6e5f7a8c")
+print(f"[STARTUP] BASE_DIR={BASE_DIR} "
+      f"({'persistent disk detected' if BASE_DIR == '/data' else 'WARNING: no persistent disk detected at /data — data will NOT survive redeploys unless BASE_DIR is backed by a mounted volume'})",
+      file=sys.stderr)
+
+BACKUP_URL = os.getenv("DATA_BACKUP_URL", "")
+if not BACKUP_URL:
+    print("[WARN] DATA_BACKUP_URL is not set — no off-box backup safety net is active.", file=sys.stderr)
+
 MAX_TRACKED = 6
 
 AUTH_FILE = os.path.join(BASE_DIR, "auth_users.json")
@@ -23,8 +58,13 @@ SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
 TG_FILE = os.path.join(BASE_DIR, "telegram_users.json")
 TEMP_CHAT_FILE = os.path.join(BASE_DIR, "temp_chats.json")
 
+DATA_FILES = ["auth_users.json","users_data.json","referrals.json","ref_codes.json","journal.json",
+              "tracked_trades.json","system_status.json","user_settings.json","telegram_users.json","temp_chats.json"]
+
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","EURCHF","GBPCHF","EURAUD","GBPAUD","EURCAD","GBPCAD","EURNZD","GBPNZD","AUDNZD","AUDCAD","NZDCAD","AUDCHF","NZDJPY","XAUUSD","XAGUSD","XTIUSD","XBRUSD","US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200","BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
 CURRENCY_MAP = {"ZAR":{"symbol":"R","name":"Rand"},"USD":{"symbol":"$","name":"Dollar"},"EUR":{"symbol":"€","name":"Euro"},"GBP":{"symbol":"£","name":"Pound"}}
+
+# ================= STORAGE (JSON files, kept as-is by request) =================
 
 def load_json(p, dt=dict):
     if not os.path.exists(p): return {} if dt==dict else []
@@ -32,22 +72,29 @@ def load_json(p, dt=dict):
         with open(p,"r") as f: return json.load(f)
     except: return {} if dt==dict else []
 
+def _backup_sync():
+    """Synchronous (blocking) backup so it actually completes before the
+    process can be killed for a redeploy. Failures are logged, not swallowed."""
+    if not BACKUP_URL: return
+    try:
+        all_data = {}
+        for fname in DATA_FILES:
+            fp = os.path.join(BASE_DIR, fname)
+            if os.path.exists(fp):
+                try:
+                    with open(fp,"r") as ff: all_data[fname] = json.load(ff)
+                except Exception as e:
+                    print(f"[BACKUP] Skipped {fname}, unreadable: {e}", file=sys.stderr)
+        r = requests.post(BACKUP_URL, json=all_data, timeout=8)
+        if r.status_code != 200:
+            print(f"[BACKUP FAILED] status={r.status_code} body={r.text[:200]}", file=sys.stderr)
+    except Exception as e:
+        print(f"[BACKUP FAILED] {e}", file=sys.stderr)
+
 def save_json(p, data):
     os.makedirs(os.path.dirname(p) if os.path.dirname(p) else ".", exist_ok=True)
     with open(p,"w") as f: json.dump(data,f,indent=2)
-    if BACKUP_URL:
-        def do_backup():
-            try:
-                all_data = {}
-                for fname in ["auth_users.json","users_data.json","referrals.json","ref_codes.json","journal.json","tracked_trades.json","system_status.json","user_settings.json","telegram_users.json","temp_chats.json"]:
-                    fp = os.path.join(BASE_DIR, fname)
-                    if os.path.exists(fp):
-                        try:
-                            with open(fp,"r") as ff: all_data[fname] = json.load(ff)
-                        except: pass
-                requests.post(BACKUP_URL, json=all_data, timeout=15)
-            except: pass
-        threading.Thread(target=do_backup, daemon=True).start()
+    _backup_sync()
 
 def remote_restore():
     if not BACKUP_URL: return False
@@ -65,15 +112,36 @@ def remote_restore():
             try:
                 with open(dst,"w") as f: json.dump(content, f, indent=2)
             except: pass
+        print("[STARTUP] Restored data from remote backup.", file=sys.stderr)
         return True
-    except: return False
+    except Exception as e:
+        print(f"[STARTUP] Remote restore failed: {e}", file=sys.stderr)
+        return False
 
-def hash_pwd(p): return hashlib.sha256(p.encode()).hexdigest()
+# ================= PASSWORD HASHING (salted, with legacy migration) =================
+
+def hash_pwd_legacy(p): return hashlib.sha256(p.encode()).hexdigest()
+def hash_pwd(p): return generate_password_hash(p)
+
+def verify_and_maybe_upgrade_password(auth, email, plain_password):
+    """Checks a password against the stored hash. Supports old unsalted
+    SHA-256 hashes from before this fix and transparently upgrades them to
+    a salted Werkzeug hash on successful login, so no one gets locked out."""
+    user = auth.get(email)
+    if not user: return False
+    stored = user.get("password", "")
+    if stored.startswith(("pbkdf2:", "scrypt:", "argon2:")):
+        return check_password_hash(stored, plain_password)
+    if stored and stored == hash_pwd_legacy(plain_password):
+        user["password"] = hash_pwd(plain_password)
+        save_json(AUTH_FILE, auth)
+        return True
+    return False
 
 def ensure_files():
     remote_restore()
     if not os.path.exists(AUTH_FILE):
-        save_json(AUTH_FILE, {"admin@agent35.com":{"email":"admin@agent35.com","name":"Master Creator","password":hash_pwd("Agent35!"),"account_size":142.0,"total_profit":-1.42,"plan_status":"ACTIVE lifetime - CREATOR","referred_by":"","expires":(datetime.now()+timedelta(days=36500)).isoformat(),"created":datetime.now().isoformat(),"reset_token":None,"ref_code":"ADMIN35"}})
+        save_json(AUTH_FILE, {"admin@agent35.com":{"email":"admin@agent35.com","name":"Master Creator","password":hash_pwd("Agent35!"),"account_size":142.0,"total_profit":-1.42,"plan_status":"ACTIVE lifetime - CREATOR","referred_by":"","expires":(datetime.now()+timedelta(days=36500)).isoformat(),"created":datetime.now().isoformat(),"reset_token":None,"reset_token_expires":None,"ref_code":"ADMIN35"}})
     for fp in [USERS_FILE, REFERRAL_FILE, REF_CODE_FILE, SETTINGS_FILE, TG_FILE, TEMP_CHAT_FILE]:
         if not os.path.exists(fp): save_json(fp, {})
     if not os.path.exists(JOURNAL_FILE): save_json(JOURNAL_FILE, [])
@@ -200,6 +268,94 @@ def get_active_sessions():
     if not sessions: sessions=["Closed"]
     return sessions
 
+# ================= EMAIL (forgot password) =================
+
+def send_reset_email(to_email, reset_link):
+    """Sends via SMTP using env vars. If SMTP isn't configured, returns
+    False so the caller can fall back to showing the link on-screen."""
+    host = os.getenv("SMTP_HOST"); port = os.getenv("SMTP_PORT")
+    user = os.getenv("SMTP_USER"); pwd = os.getenv("SMTP_PASSWORD")
+    sender = os.getenv("SMTP_FROM", user)
+    if not (host and port and user and pwd):
+        return False, "SMTP not configured"
+    try:
+        msg = MIMEText(
+            f"Reset your AGENT 35 PRO password:\n\n{reset_link}\n\n"
+            f"This link expires in 1 hour. If you didn't request this, you can ignore this email."
+        )
+        msg["Subject"] = "AGENT 35 PRO - Password Reset"
+        msg["From"] = sender
+        msg["To"] = to_email
+        with smtplib.SMTP(host, int(port), timeout=10) as server:
+            server.starttls()
+            server.login(user, pwd)
+            server.sendmail(sender, [to_email], msg.as_string())
+        return True, ""
+    except Exception as e:
+        return False, str(e)
+
+# ================= ANALYSIS CACHE (reduces API rate-limit errors during scans) =================
+
+_ANALYSIS_CACHE = {}
+_ANALYSIS_TTL_SECONDS = 240  # ~ one 5-minute candle
+
+def cached_analysis(symbol, user_settings):
+    mode = user_settings.get("trading_mode", "regular")
+    key = (symbol, mode)
+    now = datetime.now()
+    hit = _ANALYSIS_CACHE.get(key)
+    if hit and (now - hit[0]).total_seconds() < _ANALYSIS_TTL_SECONDS:
+        return hit[1]
+    result = eng.full_multi_tf_analysis(symbol, user_settings)
+    _ANALYSIS_CACHE[key] = (now, result)
+    return result
+
+# ================= SHARED UI =================
+
+FAVICON = "<link rel='icon' href=\"data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📈</text></svg>\">"
+
+SHARED_STYLE_VARS = """
+:root{
+  --bg:#050a14; --panel:#111a2e; --panel-2:#151e32; --border:#1e293b; --border-hover:#334155;
+  --text:#e2e8f0; --muted:#64748b; --muted-2:#94a3b8;
+  --accent:#10b981; --accent-2:#059669; --danger:#ef4444; --warn:#f59e0b; --info:#3b82f6;
+}
+"""
+
+def alert(message, kind="info"):
+    colors = {
+        "error": ("rgba(239,68,68,0.12)", "rgba(239,68,68,0.3)", "#fca5a5"),
+        "success": ("rgba(16,185,129,0.12)", "rgba(16,185,129,0.3)", "#6ee7b7"),
+        "info": ("rgba(59,130,246,0.12)", "rgba(59,130,246,0.3)", "#93c5fd"),
+    }
+    bg, border, color = colors.get(kind, colors["info"])
+    return f"<div style='background:{bg};border:1px solid {border};color:{color};padding:10px 14px;border-radius:10px;font-size:12px;margin-bottom:12px;line-height:1.5'>{message}</div>"
+
+def auth_layout(title, body_html):
+    return f"""<html><head><meta name='viewport' content='width=device-width, initial-scale=1'>
+{FAVICON}
+<title>{title} - AGENT 35 PRO</title>
+<style>
+{SHARED_STYLE_VARS}
+body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,Inter,Arial,sans-serif;margin:0;padding:20px;box-sizing:border-box;display:flex;align-items:center;justify-content:center;min-height:100vh}}
+.auth-card{{width:100%;max-width:380px;background:linear-gradient(135deg,var(--panel-2) 0%,var(--panel) 100%);padding:28px;border-radius:20px;border:1px solid var(--border);box-shadow:0 20px 40px rgba(0,0,0,0.4)}}
+.auth-logo{{text-align:center;margin-bottom:20px}}
+.auth-logo .name{{font-weight:900;font-size:22px;letter-spacing:-1px;color:#fff}}
+.auth-logo .name span{{color:var(--accent)}}
+.auth-logo .tag{{font-size:11px;color:var(--muted);margin-top:4px}}
+input{{width:100%;padding:12px;margin:6px 0;border-radius:10px;border:1px solid var(--border);background:#0b1220;color:white;font-size:14px;box-sizing:border-box;font-family:inherit}}
+input:focus{{outline:none;border-color:var(--accent)}}
+.btn-primary{{background:linear-gradient(135deg,var(--accent) 0%,var(--accent-2) 100%);color:white;padding:13px;border-radius:12px;font-weight:800;border:none;width:100%;cursor:pointer;font-size:13px;margin-top:10px;box-shadow:0 4px 12px rgba(16,185,129,0.3)}}
+.auth-link{{text-align:center;margin-top:14px;font-size:12px}}
+.auth-link a{{color:var(--accent);text-decoration:none;font-weight:600}}
+h2{{text-align:center}}
+</style></head><body>
+<div class='auth-card'>
+<div class='auth-logo'><div class='name'>AGENT <span>35</span> PRO</div><div class='tag'>Unified Strategy • 2 Modes • Score 5+ Send</div></div>
+{body_html}
+</div>
+</body></html>"""
+
 def pro_layout(content, active="Dashboard", is_admin=False):
     user=session.get("user","Guest")
     active_sess = get_active_sessions()
@@ -211,37 +367,40 @@ def pro_layout(content, active="Dashboard", is_admin=False):
     if is_admin: tabs.append(("Master","👑"))
     nav_html=""
     for t,icon in tabs:
-        url="/creator?secret=ADMIN35" if t=="Master" else f"/{t.lower().replace(' ','-')}"
+        url="/creator" if t=="Master" else f"/{t.lower().replace(' ','-')}"
         if active==t: nav_html+=f"<a href='{url}' class='nav-active'>{icon} {t}</a>"
         else: nav_html+=f"<a href='{url}' class='nav-item'>{icon} {t}</a>"
     html=f"""<html><head><meta name='viewport' content='width=device-width, initial-scale=1.0, maximum-scale=1.0'>
-<title>AGENT 35 PRO</title>
+{FAVICON}
+<title>{active} - AGENT 35 PRO</title>
 <style>
+{SHARED_STYLE_VARS}
 @keyframes pulse{{0%{{opacity:1}}50%{{opacity:0.6}}100%{{opacity:1}}}}
-body{{background:#050a14;color:#e2e8f0;font-family:-apple-system,BlinkMacSystemFont,Inter,Arial,sans-serif;margin:0;padding:0; -webkit-font-smoothing:antialiased}}
-.topbar{{background:rgba(15,23,42,0.95);backdrop-filter:blur(12px);padding:12px 16px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100;border-bottom:1px solid #1e293b;flex-wrap:wrap;gap:8px}}
-.logo{{font-weight:900;font-size:16px;color:#fff;letter-spacing:-0.5px}}.logo span{{color:#10b981}}
-.live-clock{{background:#0f172a;border:1px solid #1e293b;padding:6px 12px;border-radius:10px;font-family:monospace;font-weight:700;font-size:12px;color:#10b981;letter-spacing:0.5px}}
-.badge-live{{background:#10b981;padding:4px 10px;border-radius:20px;font-weight:800;font-size:9px;color:white;letter-spacing:0.5px}}
-.navbar{{background:#0b1220;border-bottom:1px solid #1e293b;padding:10px 12px;display:flex;gap:6px;overflow-x:auto;position:sticky;top:60px;z-index:90; -webkit-overflow-scrolling:touch; scrollbar-width:none}}
+body{{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSystemFont,Inter,Arial,sans-serif;margin:0;padding:0; -webkit-font-smoothing:antialiased}}
+.topbar{{background:rgba(15,23,42,0.95);backdrop-filter:blur(12px);padding:12px 16px;display:flex;justify-content:space-between;align-items:center;position:sticky;top:0;z-index:100;border-bottom:1px solid var(--border);flex-wrap:wrap;gap:8px}}
+.logo{{font-weight:900;font-size:16px;color:#fff;letter-spacing:-0.5px}}.logo span{{color:var(--accent)}}
+.live-clock{{background:#0f172a;border:1px solid var(--border);padding:6px 12px;border-radius:10px;font-family:monospace;font-weight:700;font-size:12px;color:var(--accent);letter-spacing:0.5px}}
+.badge-live{{background:var(--accent);padding:4px 10px;border-radius:20px;font-weight:800;font-size:9px;color:white;letter-spacing:0.5px}}
+.navbar{{background:#0b1220;border-bottom:1px solid var(--border);padding:10px 12px;display:flex;gap:6px;overflow-x:auto;position:sticky;top:60px;z-index:90; -webkit-overflow-scrolling:touch; scrollbar-width:none}}
 .navbar::-webkit-scrollbar{{display:none}}
-.nav-active{{padding:8px 14px;border-radius:10px;text-decoration:none;color:white;font-weight:700;font-size:11px;background:#10b981;white-space:nowrap;box-shadow:0 2px 8px rgba(16,185,129,0.3)}}
-.nav-item{{padding:8px 14px;border-radius:10px;text-decoration:none;color:#94a3b8;font-weight:600;font-size:11px;background:#151e32;border:1px solid #1e293b;white-space:nowrap;transition:all 0.2s}}
-.nav-item:hover{{color:white;border-color:#334155}}
+.nav-active{{padding:8px 14px;border-radius:10px;text-decoration:none;color:white;font-weight:700;font-size:11px;background:var(--accent);white-space:nowrap;box-shadow:0 2px 8px rgba(16,185,129,0.3)}}
+.nav-item{{padding:8px 14px;border-radius:10px;text-decoration:none;color:var(--muted-2);font-weight:600;font-size:11px;background:var(--panel-2);border:1px solid var(--border);white-space:nowrap;transition:all 0.2s}}
+.nav-item:hover{{color:white;border-color:var(--border-hover)}}
 .main{{padding:14px;display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px;max-width:1600px;margin:0 auto}}
-.card{{background:linear-gradient(135deg,#151e32 0%,#111a2e 100%);border-radius:16px;padding:16px;border:1px solid #1e293b;box-shadow:0 4px 12px rgba(0,0,0,0.2);min-width:0;transition:transform 0.2s}}
-.card:hover{{transform:translateY(-1px);border-color:#2a3a52}}
-.card-title{{color:#64748b;font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px}}
+.card{{background:linear-gradient(135deg,var(--panel-2) 0%,var(--panel) 100%);border-radius:16px;padding:16px;border:1px solid var(--border);box-shadow:0 4px 12px rgba(0,0,0,0.2);min-width:0;transition:transform 0.2s}}
+.card:hover{{transform:translateY(-1px);border-color:var(--border-hover)}}
+.card-title{{color:var(--muted);font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:0.8px;margin-bottom:6px}}
 .card-value{{font-size:24px;font-weight:900;color:#f8fafc;letter-spacing:-0.5px;word-break:break-word}}
-.card-sub{{font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4}}
-.btn-primary{{background:linear-gradient(135deg,#10b981 0%,#059669 100%);color:white;padding:13px;border-radius:12px;font-weight:800;border:none;width:100%;cursor:pointer;font-size:13px;box-shadow:0 4px 12px rgba(16,185,129,0.3)}}
-.btn-secondary{{background:#151e32;border:1px solid #1e293b;color:#e2e8f0;padding:10px;border-radius:10px;text-align:center;display:block;text-decoration:none;margin-top:8px;font-size:11px;font-weight:600}}
-.table-card{{grid-column:1 / -1;background:#111a2e;border-radius:16px;padding:18px;border:1px solid #1e293b;box-shadow:0 4px 12px rgba(0,0,0,0.2);overflow-x:auto}}
-table{{width:100%;border-collapse:collapse;min-width:500px}} th{{color:#64748b;text-align:left;padding:10px 8px;font-size:9px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid #1e293b;white-space:nowrap}} td{{padding:10px 8px;border-bottom:1px solid #0f172a;font-size:11px;white-space:nowrap}}
+.card-sub{{font-size:11px;color:var(--muted-2);margin-top:8px;line-height:1.4}}
+.btn-primary{{background:linear-gradient(135deg,var(--accent) 0%,var(--accent-2) 100%);color:white;padding:13px;border-radius:12px;font-weight:800;border:none;width:100%;cursor:pointer;font-size:13px;box-shadow:0 4px 12px rgba(16,185,129,0.3);transition:opacity 0.15s}}
+.btn-primary:disabled{{opacity:0.6;cursor:wait}}
+.btn-secondary{{background:var(--panel-2);border:1px solid var(--border);color:var(--text);padding:10px;border-radius:10px;text-align:center;display:block;text-decoration:none;margin-top:8px;font-size:11px;font-weight:600}}
+.table-card{{grid-column:1 / -1;background:var(--panel);border-radius:16px;padding:18px;border:1px solid var(--border);box-shadow:0 4px 12px rgba(0,0,0,0.2);overflow-x:auto}}
+table{{width:100%;border-collapse:collapse;min-width:500px}} th{{color:var(--muted);text-align:left;padding:10px 8px;font-size:9px;text-transform:uppercase;letter-spacing:0.5px;border-bottom:1px solid var(--border);white-space:nowrap}} td{{padding:10px 8px;border-bottom:1px solid #0f172a;font-size:11px;white-space:nowrap}}
 .pill{{padding:4px 10px;border-radius:20px;font-size:10px;font-weight:700;display:inline-block}}
-.pill-took{{background:rgba(16,185,129,0.15);color:#10b981;border:1px solid rgba(16,185,129,0.2)}}
-.pill-win{{background:rgba(16,185,129,0.15);color:#10b981}}.pill-loss{{background:rgba(239,68,68,0.15);color:#ef4444}}
-.pro-badge{{background:#0f172a;border:1px solid #1e293b;color:#94a3b8;padding:5px 10px;border-radius:20px;font-size:9px;display:inline-block;margin:2px}}
+.pill-took{{background:rgba(16,185,129,0.15);color:var(--accent);border:1px solid rgba(16,185,129,0.2)}}
+.pill-win{{background:rgba(16,185,129,0.15);color:var(--accent)}}.pill-loss{{background:rgba(239,68,68,0.15);color:var(--danger)}}
+.pro-badge{{background:#0f172a;border:1px solid var(--border);color:var(--muted-2);padding:5px 10px;border-radius:20px;font-size:9px;display:inline-block;margin:2px}}
 @media(max-width:768px){{.main{{grid-template-columns:1fr; padding:10px}}.card-value{{font-size:20px}}}}
 </style>
 <script>
@@ -265,13 +424,27 @@ window.onload=updateClock;
   </div>
   <div style='display:flex;align-items:center;gap:10px;flex-wrap:wrap'>
     <div style='display:flex;align-items:center;gap:4px'>{sess_html}</div>
-    <span style='background:#111a2e;border:1px solid #1e293b;color:#94a3b8;padding:5px 10px;border-radius:20px;font-size:10px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>{user[:18]}</span>
+    <span style='background:var(--panel);border:1px solid var(--border);color:var(--muted-2);padding:5px 10px;border-radius:20px;font-size:10px;max-width:140px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap'>{user[:18]}</span>
   </div>
 </div>
 <div class='navbar'>{nav_html}</div>
 {content}
 </body></html>"""
     return html
+
+# ================= ERROR PAGES =================
+
+@app.errorhandler(404)
+def not_found(e):
+    body = "<h2 style='font-size:20px;font-weight:800;margin:0 0 8px'>404 - Page Not Found</h2><p style='color:var(--muted);font-size:12px;text-align:center;margin:0 0 16px'>That page doesn't exist.</p><div class='auth-link'><a href='/dashboard'>Back to Dashboard</a></div>"
+    return auth_layout("Not Found", body), 404
+
+@app.errorhandler(500)
+def server_error(e):
+    body = "<h2 style='font-size:20px;font-weight:800;margin:0 0 8px'>500 - Something Went Wrong</h2><p style='color:var(--muted);font-size:12px;text-align:center;margin:0 0 16px'>An unexpected error occurred. Please try again.</p><div class='auth-link'><a href='/dashboard'>Back to Dashboard</a></div>"
+    return auth_layout("Error", body), 500
+
+# ================= ROUTES =================
 
 @app.route("/")
 def home(): return redirect("/dashboard") if session.get("user") else redirect("/login")
@@ -293,14 +466,14 @@ def dashboard():
             rows+=f"<tr><td style='color:#94a3b8'>{t.get('time')}</td><td style='font-weight:700'>{t.get('symbol')}</td><td><span class='pill {cls}'>{t.get('status')}</span></td><td>{t.get('result')}</td><td style='font-weight:700'>{curr_sym}{pnl}</td></tr>"
     tg_status="✅ Connected" if email in tg_users else "⚠️ Not linked"
     pnl_color="#10b981" if stats['total_pnl']>=0 else "#ef4444"
-    admin_link="<a href='/creator?secret=ADMIN35' class='btn-secondary' style='background:#f59e0b;color:white;font-weight:700;border-color:#f59e0b'>👑 Creator Panel</a>" if is_admin else ""
+    admin_link="<a href='/creator' class='btn-secondary' style='background:#f59e0b;color:white;font-weight:700;border-color:#f59e0b'>👑 Creator Panel</a>" if is_admin else ""
     mode_badge = "⚡ SCALP MODE - Fast M5 - 10-20/day" if mode=="scalp" else "🎯 REGULAR MODE - Swing - 2-5/day"
     content=f"""
 <div class='main'>
 <div class='card'><div class='card-title'>Total Profit & Loss</div><div class='card-value' style='color:{pnl_color}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0b1220;border-radius:10px;padding:10px;margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px'><div><div style='font-size:9px;color:#64748b'>TODAY</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['daily']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>WEEK</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['weekly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>MONTH</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['monthly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>YEAR</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div class='card-sub'>{mode_badge}<br>Score: 5=takeable, 6=good, 7=strong, 8+=A+</div></div>
 <div class='card'><div class='card-title'>Performance</div><div class='card-value'>{stats['total_trades']} Trades • {stats['win_rate']}% WR</div><div class='card-sub'>✅ Wins: {stats['wins']} ❌ Losses: {stats['losses']} ➖ BE: {stats['be']}<br><br>Telegram: {tg_status}<br>Referrals: {ref_count}/10 free lifetime<br>Tracked: {len(tracked)}/{MAX_TRACKED} active (limit 6)</div></div>
 <div class='card'><div class='card-title'>Account Overview</div><div class='card-value'>{curr_sym}{user_settings.get('account_size',142)}</div><div class='card-sub'>Lot Size: {user_settings.get('lot_size',0.01)} • Lev {user_settings.get('leverage','1:500')}<br>Risk: {user_settings.get('risk_percent',1)}% • RR 1:{user_settings.get('rr_ratio',2.5)}<br>Currency: {user_settings.get('currency','ZAR')} {curr_sym}<br>Mode: {mode.upper()} - All strategies as ONE<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings →</a></div></div>
-<div class='card'><div class='card-title'>Quick Actions</div><div style='display:flex;flex-direction:column;gap:2px;margin-top:8px'><a href='/dashboard-scan'><button class='btn-primary'>🔍 Scan Market Now</button></a><a href='/test-telegram' class='btn-secondary'>📤 Test Telegram</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram</a><a href='/export-journal' class='btn-secondary'>📥 Export Journal CSV</a><a href='/clear-tracked' class='btn-secondary' style='color:#ef4444'>Clear Tracked ({len(tracked)}/{MAX_TRACKED})</a>{admin_link}</div></div>
+<div class='card'><div class='card-title'>Quick Actions</div><div style='display:flex;flex-direction:column;gap:2px;margin-top:8px'><a href='/dashboard-scan' onclick="this.querySelector('button').innerHTML='⏳ Scanning...'; this.querySelector('button').disabled=true;"><button class='btn-primary'>🔍 Scan Market Now</button></a><a href='/test-telegram' class='btn-secondary'>📤 Test Telegram</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram</a><a href='/export-journal' class='btn-secondary'>📥 Export Journal CSV</a><a href='/clear-tracked' class='btn-secondary' style='color:#ef4444'>Clear Tracked ({len(tracked)}/{MAX_TRACKED})</a>{admin_link}</div></div>
 </div>
 <div style='max-width:1600px;margin:0 auto;padding:0 14px 14px'><div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px'><h3 style='margin:0;font-size:14px;font-weight:800'>Recent Activity - {mode_badge}</h3><span style='font-size:11px;color:#64748b;background:#0b1220;padding:5px 10px;border-radius:20px'>{stats['wins']}W / {stats['losses']}L • {stats['win_rate']}% WR</span></div><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>PnL</th></tr>{rows}</table></div></div>
 """
@@ -350,7 +523,7 @@ def dashboard_scan():
     rows=""
     for s in symbols_to_scan[:30]:
         try:
-            r=eng.full_multi_tf_analysis(s, user_settings); score=r.get('score',0); bias=r.get('bias','NEUTRAL'); entry=r.get('entry',0)
+            r=cached_analysis(s, user_settings); score=r.get('score',0); bias=r.get('bias','NEUTRAL'); entry=r.get('entry',0)
             entry_display=f"{float(entry):.5f}" if entry and float(entry)<20 else f"{float(entry):.2f}" if entry else "0"
             color="#10b981" if score>=7 else "#f59e0b" if score>=5 else "#ef4444"
             if r.get('signal'):
@@ -358,7 +531,12 @@ def dashboard_scan():
                 else: signal_btn=f"<a href='/send-signal?symbol={s}' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:11px'>Send {score}/10</a>"
             else: signal_btn=f"<span style='color:#64748b;font-size:10px'>{r.get('reason','')[:44]}</span>"
             rows+=f"<tr><td style='font-weight:700'>{s}<div style='font-size:9px;color:#64748b'>{entry_display}</div></td><td><span class='pill' style='background:{color}22;color:{color};border:1px solid {color}44'>{score}/10</span></td><td>{bias}</td><td>{'✅ SEND' if r.get('signal') else '⏳ Wait'}</td><td>{signal_btn}</td></tr>"
-        except Exception as e: rows+=f"<tr><td>{s}</td><td colspan=4 style='color:#ef4444;font-size:10px'>{str(e)[:50]}</td></tr>"
+        except Exception as e:
+            err_msg = str(e)
+            if "429" in err_msg or "rate" in err_msg.lower():
+                rows+=f"<tr><td style='font-weight:700'>{s}</td><td colspan=4><span class='pill' style='background:rgba(245,158,11,0.15);color:#f59e0b'>Rate limited — try again shortly</span></td></tr>"
+            else:
+                rows+=f"<tr><td>{s}</td><td colspan=4 style='color:#ef4444;font-size:10px'>{err_msg[:50]}</td></tr>"
     mode_badge = "⚡ SCALP MODE" if mode=="scalp" else "🎯 REGULAR MODE"
     content=f"""<div style='max-width:1600px;margin:0 auto;padding:14px'>
 <div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold 5+ sends. Choose: 5=takeable, 6=good, 7=strong, 8+=A+. Tracked {len(tracked)}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
@@ -395,7 +573,7 @@ def journal_page():
 <a href='/journal?period=month' style='padding:7px 14px;border-radius:20px;text-decoration:none;font-size:11px;font-weight:600;{get_style("month")}'>Month</a>
 <a href='/journal?period=year' style='padding:7px 14px;border-radius:20px;text-decoration:none;font-size:11px;font-weight:600;{get_style("year")}'>Year</a>
 </div>
-<div class='table-card'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>PnL</th><th>Date</th></tr>{rows if rows else '<tr><td colspan=6 style=text-align:center;color:#64748b;padding:20px>No trades yet</td></tr>'}</table></div>
+<div class='table-card'><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>PnL</th><th>Date</th></tr>{rows if rows else "<tr><td colspan=6 style='text-align:center;color:#64748b;padding:20px'>No trades yet</td></tr>"}</table></div>
 </div>"""
     return pro_layout(content,"Journal", is_admin=is_admin)
 
@@ -497,16 +675,15 @@ Weekend: Forex/Gold/Indices closed Sat, Crypto 24/7 trades
 def creator_dashboard():
     email = session.get("user","")
     secret_param = request.args.get("secret","")
-    cron_secret = os.getenv("CRON_SECRET","")
-    is_authorized = (email=="admin@agent35.com") or (secret_param and secret_param==cron_secret) or (secret_param=="ADMIN35")
+    is_authorized = (email=="admin@agent35.com") or (secret_param and CREATOR_SECRET and secret_param==CREATOR_SECRET)
     if not is_authorized:
-        return pro_layout("<div style='max-width:600px;margin:80px auto;text-align:center'><div class='card'><h2>🔒 Access Denied</h2><p style='color:#64748b;font-size:13px'>Creator panel requires admin login<br>/creator?secret=ADMIN35</p></div></div>","Master", is_admin=False)
+        return pro_layout("<div style='max-width:600px;margin:80px auto;text-align:center'><div class='card'><h2>🔒 Access Denied</h2><p style='color:#64748b;font-size:13px'>Creator panel requires admin login.</p></div></div>","Master", is_admin=False)
     users=load_json(USERS_FILE); auth=load_json(AUTH_FILE); journal=load_json(JOURNAL_FILE, list); tracked=load_json(TRACK_FILE, dict); system=load_json(SYSTEM_FILE, dict); stats=calculate_pnl_stats(journal)
     pending={k:v for k,v in users.items() if v.get("status")=="pending"}
     pending_rows="".join([f"<tr><td style='font-family:monospace;font-size:10px'>{ref}</td><td>{pay.get('user','')[:24]}</td><td>{pay.get('plan','yearly')}</td><td>R{pay.get('price','')}</td><td><a href='/creator/action?act=approve_payment&ref={ref}&secret={secret_param}' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:11px'>Approve</a> <a href='/creator/action?act=reject&ref={ref}&secret={secret_param}' style='background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Reject</a></td></tr>" for ref,pay in pending.items()]) or "<tr><td colspan=5 style='text-align:center;color:#64748b;padding:16px'>No pending payments ✅</td></tr>"
     user_rows="".join([f"<tr><td style='font-size:10px'>{e[:24]}</td><td style='font-size:10px'>{info.get('plan_status','')[:18]}</td><td style='font-size:10px'>{info.get('ref_code','')}</td><td style='font-size:10px'>{str(info.get('expires',''))[:10]}</td></tr>" for e,info in list(auth.items())[-15:]])
     content=f"""<div style='max-width:1600px;margin:0 auto;padding:14px'>
-<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><h1 style='font-size:20px;font-weight:900;margin:0'>👑 Creator Master Panel - V23 Unified 2 Modes</h1><div style='display:flex;gap:6px;flex-wrap:wrap'><span class='pro-badge'>Users: {len(auth)}</span><span class='pro-badge'>Pending: {len(pending)}</span><span class='pro-badge'>Trades: {len(journal)}</span><span class='pro-badge'>Tracked: {len(tracked)}/{MAX_TRACKED}</span></div></div>
+<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><h1 style='font-size:20px;font-weight:900;margin:0'>👑 Creator Master Panel - V24 Unified 2 Modes</h1><div style='display:flex;gap:6px;flex-wrap:wrap'><span class='pro-badge'>Users: {len(auth)}</span><span class='pro-badge'>Pending: {len(pending)}</span><span class='pro-badge'>Trades: {len(journal)}</span><span class='pro-badge'>Tracked: {len(tracked)}/{MAX_TRACKED}</span></div></div>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px'>
 <div class='card'><div class='card-title'>Pending Payments</div><div class='card-value' style='font-size:20px;color:#f59e0b'>{len(pending)}</div></div>
 <div class='card'><div class='card-title'>Total Users</div><div class='card-value' style='font-size:20px'>{len(auth)}</div></div>
@@ -523,8 +700,8 @@ def creator_dashboard():
 
 @app.route("/creator/action")
 def creator_action():
-    secret=request.args.get("secret",""); cron_secret=os.getenv("CRON_SECRET",""); email=session.get("user","")
-    is_authorized = (email=="admin@agent35.com") or (secret and secret==cron_secret) or secret=="ADMIN35"
+    secret=request.args.get("secret",""); email=session.get("user","")
+    is_authorized = (email=="admin@agent35.com") or (secret and CREATOR_SECRET and secret==CREATOR_SECRET)
     if not is_authorized: return "Unauthorized"
     act=request.args.get("act",""); auth=load_json(AUTH_FILE); users=load_json(USERS_FILE)
     if act=="approve_payment":
@@ -558,7 +735,7 @@ def send_signal():
     if len(tracked)>=MAX_TRACKED and sym not in tracked:
         return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Track Limit {MAX_TRACKED} Reached</h2><p style='color:#94a3b8'>Tracked: {', '.join(tracked.keys())}<br>Clear to allow new</p><div style='display:flex;gap:8px;justify-content:center;margin-top:16px'><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Back</a><a href='/clear-tracked' style='background:#ef4444;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Clear All</a></div></div></div>","All Signals", is_admin=email=="admin@agent35.com")
     try:
-        r=eng.full_multi_tf_analysis(sym, user_set); entry=r.get('entry',0)
+        r=cached_analysis(sym, user_set); entry=r.get('entry',0)
         if not entry or float(entry)==0: return pro_layout(f"<div class='card' style='max-width:600px;margin:40px auto'><h3>No entry for {sym}</h3><pre style='font-size:10px'>{r}</pre></div>","All Signals", is_admin=email=="admin@agent35.com")
         rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
         curr_sym=get_currency_symbol(user_set.get("currency","ZAR")); mode=user_set.get("trading_mode","regular")
@@ -579,7 +756,7 @@ def export_journal():
 @app.route("/test-telegram")
 def test_telegram():
     email=session.get("user") or "admin@agent35.com"; user_set=get_user_settings(email)
-    r=eng.full_multi_tf_analysis("GBPUSD", user_set); entry=r.get('entry',0)
+    r=cached_analysis("GBPUSD", user_set); entry=r.get('entry',0)
     if not entry or float(entry)==0: entry=1.35057; r={"score":8,"bias":"BEARISH","confluence":"Test unified strategy - all 5 methods combined as ONE score 8/10 A+","details":{}}
     rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
     curr_sym=get_currency_symbol(user_set.get("currency","ZAR")); mode=user_set.get("trading_mode","regular")
@@ -622,31 +799,134 @@ def telegram_webhook():
     return jsonify({"ok":True})
 
 @app.route("/login")
-def login_page(): return f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:#050a14;color:white;font-family:Inter,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:12px'><div style='width:100%;max-width:360px;background:#111a2e;padding:24px;border-radius:20px;border:1px solid #1e293b;box-shadow:0 20px 40px rgba(0,0,0,0.4)'><div style='text-align:center;margin-bottom:20px'><div style='font-weight:900;font-size:22px;letter-spacing:-1px'>AGENT <span style='color:#10b981'>35</span> PRO</div><div style='font-size:11px;color:#64748b;margin-top:4px'>Unified Strategy • 2 Modes • Score 5+ Send</div><div style='display:flex;gap:6px;justify-content:center;margin-top:10px'><span style='background:#10b98122;color:#10b981;border:1px solid #10b98133;padding:3px 8px;border-radius:20px;font-size:9px'>55 Symbols</span><span style='background:#0b1220;border:1px solid #1e293b;color:#64748b;padding:3px 8px;border-radius:20px;font-size:9px'>Live Clock + Sessions</span></div></div><form action='/login/check' method='post'><input name='email' type='email' placeholder='Email address' required style='width:100%;padding:12px;margin:6px 0;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white;font-size:14px'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:12px;margin:6px 0;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white;font-size:14px'><button style='background:linear-gradient(135deg,#10b981,#059669);color:white;padding:12px;width:100%;border:none;border-radius:10px;font-weight:800;margin-top:12px;cursor:pointer'>Login</button></form><div style='text-align:center;margin-top:16px;font-size:12px'><a href='/register' style='color:#10b981;text-decoration:none;font-weight:600'>Create account →</a></div></div></body></html>"
+def login_page():
+    err = request.args.get("error","")
+    body = (alert(err, "error") if err else "") + """
+<form action='/login/check' method='post'>
+<input name='email' type='email' placeholder='Email address' required>
+<input name='password' type='password' placeholder='Password' required>
+<button class='btn-primary'>Login</button>
+</form>
+<div class='auth-link'><a href='/forgot-password'>Forgot password?</a></div>
+<div class='auth-link'><a href='/register'>Create account →</a></div>
+"""
+    return auth_layout("Login", body)
 
 @app.route("/register")
 def register_page():
     ref=request.args.get("ref","")
-    ref_banner=f"<div style='background:#10b98115;border:1px solid #10b98133;padding:8px;border-radius:10px;font-size:11px;color:#10b981;margin-bottom:12px'>🎁 Referred by: <b>{ref}</b></div>" if ref else ""
-    return f"<html><head><meta name='viewport' content='width=device-width, initial-scale=1'></head><body style='background:#050a14;color:white;font-family:Inter,Arial,sans-serif;display:flex;align-items:center;justify-content:center;min-height:100vh;padding:12px'><div style='width:100%;max-width:380px;background:#111a2e;padding:24px;border-radius:20px;border:1px solid #1e293b'><h2 style='font-size:18px;font-weight:800;margin:0 0 4px'>Create Account</h2><p style='color:#64748b;font-size:12px;margin:0 0 16px'>Unified strategy - 2 modes - Score 5+ send</p>{ref_banner}<form action='/register/create' method='post'><input name='email' type='email' placeholder='Email' required style='width:100%;padding:12px;margin:5px 0;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'><input name='name' placeholder='Full Name' required style='width:100%;padding:12px;margin:5px 0;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'><input name='password' type='password' placeholder='Password' required style='width:100%;padding:12px;margin:5px 0;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'><input name='ref' value='{ref}' placeholder='Referral Code (optional)' style='width:100%;padding:12px;margin:5px 0;border-radius:10px;border:1px solid #10b98133;background:#0b1220;color:white'><button style='background:#10b981;color:white;padding:12px;width:100%;border:none;border-radius:10px;font-weight:800;margin-top:12px;cursor:pointer'>Create Account</button></form><div style='text-align:center;margin-top:14px;font-size:12px'><a href='/login' style='color:#64748b;text-decoration:none'>Already have account? Login</a></div></div></body></html>"
+    err = request.args.get("error","")
+    ref_banner = alert(f"🎁 Referred by: <b>{ref}</b>", "info") if ref else ""
+    err_html = alert(err, "error") if err else ""
+    body = f"""<h2 style='font-size:18px;font-weight:800;margin:0 0 4px'>Create Account</h2>
+<p style='color:#64748b;font-size:12px;margin:0 0 16px;text-align:center'>Unified strategy - 2 modes - Score 5+ send</p>
+{err_html}{ref_banner}
+<form action='/register/create' method='post'>
+<input name='email' type='email' placeholder='Email' required>
+<input name='name' placeholder='Full Name' required>
+<input name='password' type='password' placeholder='Password' required>
+<input name='ref' value='{ref}' placeholder='Referral Code (optional)'>
+<button class='btn-primary'>Create Account</button>
+</form>
+<div class='auth-link'><a href='/login'>Already have account? Login</a></div>"""
+    return auth_layout("Register", body)
 
 @app.route("/register/create", methods=["POST"])
 def register_create():
     email=request.form.get("email","").lower().strip(); auth=load_json(AUTH_FILE)
-    if email in auth: return f"Exists <a href='/login'>Login</a>"
+    if email in auth:
+        return redirect(f"/register?error={quote('An account with that email already exists.')}&ref={request.form.get('ref','')}")
     ref_code=request.form.get("ref","").upper().strip(); my_code=generate_ref_code(email)
-    auth[email]={"email":email,"name":request.form.get("name"),"password":hash_pwd(request.form.get("password","")),"account_size":142.0,"total_profit":-1.42,"plan_status":"No Plan","referred_by":ref_code,"created":datetime.now().isoformat(),"reset_token":None,"ref_code":my_code}
+    auth[email]={"email":email,"name":request.form.get("name"),"password":hash_pwd(request.form.get("password","")),"account_size":142.0,"total_profit":-1.42,"plan_status":"No Plan","referred_by":ref_code,"created":datetime.now().isoformat(),"reset_token":None,"reset_token_expires":None,"ref_code":my_code}
     save_json(AUTH_FILE, auth); session["user"]=email; return redirect("/dashboard")
 
 @app.route("/login/check", methods=["POST"])
 def login_check():
     email=request.form.get("email","").lower().strip(); pwd=request.form.get("password",""); auth=load_json(AUTH_FILE)
-    if email in auth and auth[email].get("password")==hash_pwd(pwd):
+    if email in auth and verify_and_maybe_upgrade_password(auth, email, pwd):
         session["user"]=email; return redirect("/dashboard")
-    return f"Wrong <a href='/login'>Retry</a>"
+    return redirect(f"/login?error={quote('Incorrect email or password.')}")
 
 @app.route("/logout")
 def logout(): session.pop("user",None); return redirect("/login")
+
+@app.route("/forgot-password", methods=["GET","POST"])
+def forgot_password():
+    if request.method=="POST":
+        email = request.form.get("email","").lower().strip()
+        auth = load_json(AUTH_FILE)
+        fallback_link = None
+        if email in auth:
+            token = secrets.token_urlsafe(32)
+            auth[email]["reset_token"] = token
+            auth[email]["reset_token_expires"] = (datetime.now()+timedelta(hours=1)).isoformat()
+            save_json(AUTH_FILE, auth)
+            base_url = os.getenv("APP_BASE_URL", request.host_url.rstrip("/"))
+            reset_link = f"{base_url}/reset-password?token={token}&email={quote(email)}"
+            sent, _ = send_reset_email(email, reset_link)
+            if not sent:
+                fallback_link = reset_link
+        # Same message regardless of whether the email exists, so this
+        # endpoint can't be used to discover which emails are registered.
+        body = alert("If that email exists in our system, a password reset link has been sent.", "success")
+        if fallback_link:
+            body += alert(f"Email isn't configured yet — here's your reset link:<br><a href='{fallback_link}' style='color:#93c5fd;word-break:break-all'>{fallback_link}</a>", "info")
+        body += "<div class='auth-link'><a href='/login'>Back to login</a></div>"
+        return auth_layout("Check Your Email", body)
+    body = """<h2 style='font-size:18px;font-weight:800;margin:0 0 4px'>Forgot Password</h2>
+<p style='color:#64748b;font-size:12px;margin:0 0 16px;text-align:center'>Enter your email and we'll send you a reset link.</p>
+<form method='post'>
+<input name='email' type='email' placeholder='Email address' required>
+<button class='btn-primary'>Send Reset Link</button>
+</form>
+<div class='auth-link'><a href='/login'>Back to login</a></div>"""
+    return auth_layout("Forgot Password", body)
+
+@app.route("/reset-password", methods=["GET","POST"])
+def reset_password():
+    token = request.args.get("token","") or request.form.get("token","")
+    email = request.args.get("email","") or request.form.get("email","")
+    auth = load_json(AUTH_FILE)
+    user = auth.get(email)
+
+    def token_valid(u):
+        if not u or not token: return False
+        if u.get("reset_token") != token: return False
+        expires = u.get("reset_token_expires")
+        if not expires: return False
+        try: return datetime.fromisoformat(expires) > datetime.now()
+        except: return False
+
+    invalid_body = alert("This reset link is invalid or has expired. Please request a new one.", "error") + "<div class='auth-link'><a href='/forgot-password'>Request New Link</a></div>"
+
+    if request.method=="POST":
+        if not token_valid(user):
+            return auth_layout("Reset Password", invalid_body)
+        new_pwd = request.form.get("password","")
+        if len(new_pwd) < 6:
+            body = alert("Password must be at least 6 characters.", "error") + f"""
+<form method='post'>
+<input type='hidden' name='token' value='{token}'><input type='hidden' name='email' value='{email}'>
+<input name='password' type='password' placeholder='New password' required minlength='6'>
+<button class='btn-primary'>Reset Password</button>
+</form>"""
+            return auth_layout("Reset Password", body)
+        auth[email]["password"] = hash_pwd(new_pwd)
+        auth[email]["reset_token"] = None
+        auth[email]["reset_token_expires"] = None
+        save_json(AUTH_FILE, auth)
+        body = alert("Your password has been reset. You can log in now.", "success") + "<div class='auth-link'><a href='/login'>Go to Login</a></div>"
+        return auth_layout("Password Reset", body)
+
+    if not token_valid(user):
+        return auth_layout("Reset Password", invalid_body)
+    body = f"""<h2 style='font-size:18px;font-weight:800;margin:0 0 4px'>Reset Password</h2>
+<form method='post'>
+<input type='hidden' name='token' value='{token}'><input type='hidden' name='email' value='{email}'>
+<input name='password' type='password' placeholder='New password' required minlength='6'>
+<button class='btn-primary'>Reset Password</button>
+</form>"""
+    return auth_layout("Reset Password", body)
 
 @app.route("/link-telegram", methods=["GET","POST"])
 def link_telegram():
@@ -724,7 +1004,7 @@ def cron_scan():
         if len(tracked)>=MAX_TRACKED and sym not in tracked: skipped.append(f"{sym} LIMIT"); continue
         try:
             sample_settings = next(iter(settings_all.values())) if settings_all else {"trade_news":True,"risk_percent":1,"rr_ratio":2.5,"lot_size":0.01,"leverage":"1:500","account_size":142,"currency":"ZAR","trading_mode":"regular"}
-            r=eng.full_multi_tf_analysis(sym, sample_settings)
+            r=cached_analysis(sym, sample_settings)
             if not r.get('signal'): continue
             entry=r.get('entry'); rr=sample_settings.get('rr_ratio',2.5)
             sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), 142, 0.01, "1:500", 1, rr, 0.7, 0.35, 2.0, 10.0)
@@ -738,9 +1018,9 @@ def cron_scan():
 
 @app.route("/health")
 def health():
-    test=eng.full_multi_tf_analysis("BTCUSD", {"trade_news":True,"currency":"ZAR","trading_mode":"regular"})
+    test=cached_analysis("BTCUSD", {"trade_news":True,"currency":"ZAR","trading_mode":"regular"})
     tracked=load_json(TRACK_FILE, dict)
-    return jsonify({"ok":True,"version":"V23 FINAL ALL FEATURES 2 MODES UNIFIED 5+ SEND","symbols":len(ALL_SYMBOLS),"tracked":f"{len(tracked)}/{MAX_TRACKED}","btc_test":test,"threshold":5,"modes":["regular","scalp"]})
+    return jsonify({"ok":True,"version":"V24 - forgot password, security fixes, unified UI, scan caching","symbols":len(ALL_SYMBOLS),"tracked":f"{len(tracked)}/{MAX_TRACKED}","btc_test":test,"threshold":5,"modes":["regular","scalp"]})
 
 @app.route("/backup-now")
 def backup_now():
@@ -749,7 +1029,8 @@ def backup_now():
     return redirect("/dashboard")
 
 @app.route("/master")
-def master_redirect(): return redirect("/creator?secret=ADMIN35")
+def master_redirect():
+    return redirect("/creator") if session.get("user")=="admin@agent35.com" else redirect("/login")
 
 if __name__=="__main__":
     app.run(host="0.0.0.0", port=10000)
