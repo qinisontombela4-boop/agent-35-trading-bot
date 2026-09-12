@@ -1,5 +1,5 @@
-import os, requests, random
-from datetime import datetime, timedelta
+import os, requests
+from datetime import datetime
 
 def get_keys():
     keys=[]
@@ -11,7 +11,6 @@ def get_keys():
 KEYS=get_keys()
 KEY_INDEX=0
 
-# EXPANDED MAP - 55 SYMBOLS - 28 Forex + 4 Metals/Oil + 10 Indices + 13 Crypto
 SYMBOL_MAP={
     "EURUSD":"EUR/USD","GBPUSD":"GBP/USD","USDJPY":"USD/JPY","USDCHF":"USD/CHF",
     "AUDUSD":"AUD/USD","USDCAD":"USD/CAD","NZDUSD":"NZD/USD","EURJPY":"EUR/JPY",
@@ -25,94 +24,61 @@ SYMBOL_MAP={
     "FRA40":"CAC","ESP35":"IBEX","ITA40":"FTSE MIB","JPN225":"NIKKEI","AUS200":"ASX 200",
     "BTCUSD":"BTC/USD","ETHUSD":"ETH/USD","SOLUSD":"SOL/USD","BNBUSD":"BNB/USD",
     "XRPUSD":"XRP/USD","ADAUSD":"ADA/USD","DOGEUSD":"DOGE/USD","DOTUSD":"DOT/USD",
-    "AVAXUSD":"AVAX/USD","LINKUSD":"LINK/USD","MATICUSD":"MATIC/USD","LTCUSD":"LTC/USD","ETHUSD":"ETH/USD"
+    "AVAXUSD":"AVAX/USD","LINKUSD":"LINK/USD","MATICUSD":"MATIC/USD","LTCUSD":"LTC/USD"
 }
 
 def get_next_key():
     global KEY_INDEX
     if not KEYS: return None
-    key=KEYS[KEY_INDEX % len(KEYS)]
-    KEY_INDEX+=1
-    return key
+    key=KEYS[KEY_INDEX % len(KEYS)]; KEY_INDEX+=1; return key
 
 def td_request(symbol, interval, outputsize=50):
-    if not KEYS:
-        return {"code":500,"message":"No API keys set"}
-    td_symbol=SYMBOL_MAP.get(symbol,symbol)
-    last_error=None
+    if not KEYS: return {"code":500,"message":"No keys"}
+    td_symbol=SYMBOL_MAP.get(symbol,symbol); last_error=None
     for _ in range(len(KEYS)):
         key=get_next_key()
         url=f"https://api.twelvedata.com/time_series?symbol={td_symbol}&interval={interval}&outputsize={outputsize}&apikey={key}"
         try:
             r=requests.get(url,timeout=12).json()
-            if "code" in r and r["code"]==429:
-                last_error=r
-                continue
-            if "values" in r:
-                return r
+            if "code" in r and r["code"]==429: last_error=r; continue
+            if "values" in r: return r
             last_error=r
-        except Exception as e:
-            last_error={"code":500,"message":str(e)}
-            continue
-    return last_error if last_error else {"code":500,"message":"All keys failed"}
+        except Exception as e: last_error={"code":500,"message":str(e)}; continue
+    return last_error if last_error else {"code":500,"message":"fail"}
 
 def get_values(symbol, interval, outputsize=50):
     data=td_request(symbol, interval, outputsize)
-    if "values" not in data:
-        return None, data
-    vals=data["values"]
-    vals.reverse()
-    candles=[]
+    if "values" not in data: return None, data
+    vals=data["values"]; vals.reverse(); candles=[]
     for v in vals:
-        try:
-            candles.append({
-                "open":float(v["open"]),
-                "high":float(v["high"]),
-                "low":float(v["low"]),
-                "close":float(v["close"]),
-                "time":v.get("datetime","")
-            })
-        except:
-            continue
+        try: candles.append({"open":float(v["open"]),"high":float(v["high"]),"low":float(v["low"]),"close":float(v["close"]),"time":v.get("datetime","")})
+        except: continue
     return candles, None
 
-# V22 WEEKEND FILTER - SATURDAY CLOSED, CRYPTO 24/7 OPEN
 def is_market_open(symbol):
-    now_utc = datetime.utcnow()
-    weekday = now_utc.weekday() # 0=Mon 5=Sat 6=Sun
-    hour = now_utc.hour
-    crypto_list = ["BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
-    if symbol in crypto_list:
-        return True, ""
-    if weekday == 5:
-        return False, "Market Closed - Saturday"
-    if weekday == 6:
-        if hour < 22:
-            return False, "Market Closed - Sunday (Opens 22:00 UTC)"
-    if weekday == 4 and hour >= 22:
-        return False, "Market Closed - Friday 22:00 UTC Close"
+    now_utc = datetime.utcnow(); weekday = now_utc.weekday(); hour = now_utc.hour
+    crypto = ["BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
+    if symbol in crypto: return True, ""
+    if weekday==5: return False, "Closed - Saturday"
+    if weekday==6 and hour<22: return False, "Closed - Sunday opens 22:00 UTC"
+    if weekday==4 and hour>=22: return False, "Closed - Friday 22:00"
     return True, ""
 
 def ema(candles, period):
     if len(candles)<period: return None
-    closes=[c["close"] for c in candles]
-    ema_val=sum(closes[:period])/period
-    k=2/(period+1)
-    for price in closes[period:]:
-        ema_val=price*k + ema_val*(1-k)
+    closes=[c["close"] for c in candles]; ema_val=sum(closes[:period])/period; k=2/(period+1)
+    for price in closes[period:]: ema_val=price*k + ema_val*(1-k)
     return ema_val
 
 def rsi(candles, period=14):
     if len(candles)<period+1: return 50
-    closes=[c["close"] for c in candles]
-    gains=0; losses=0
+    closes=[c["close"] for c in candles]; gains=0; losses=0
     for i in range(1,period+1):
         change=closes[i]-closes[i-1]
         if change>0: gains+=change
         else: losses+=-change
     if losses==0: return 100
-    rs=gains/losses if losses!=0 else 0
-    return 100 - (100/(1+rs))
+    rs=gains/losses if losses!=0 else 0; return 100 - (100/(1+rs))
 
 def get_htf_bias(symbol):
     candles,_=get_values(symbol,"1day",50)
@@ -120,10 +86,8 @@ def get_htf_bias(symbol):
     ema5=ema(candles,5); ema20=ema(candles,20)
     if not ema5 or not ema20: return "NEUTRAL",50,candles
     bias="BULLISH" if ema5>ema20 else "BEARISH" if ema5<ema20 else "NEUTRAL"
-    daily_high=max([c["high"] for c in candles[-20:]])
-    daily_low=min([c["low"] for c in candles[-20:]])
-    current=candles[-1]["close"]
-    rng=daily_high-daily_low
+    daily_high=max([c["high"] for c in candles[-20:]]); daily_low=min([c["low"] for c in candles[-20:]])
+    current=candles[-1]["close"]; rng=daily_high-daily_low
     premium=((current-daily_low)/rng)*100 if rng!=0 else 50
     return bias,premium,candles
 
@@ -133,28 +97,19 @@ def check_4h_alignment(symbol, daily_bias):
     ema5=ema(candles,5); ema20=ema(candles,20)
     if not ema5 or not ema20: return False,"NEUTRAL"
     bias4h="BULLISH" if ema5>ema20 else "BEARISH" if ema5<ema20 else "NEUTRAL"
-    aligned=(bias4h==daily_bias and daily_bias!="NEUTRAL")
-    return aligned,bias4h
+    aligned=(bias4h==daily_bias and daily_bias!="NEUTRAL"); return aligned,bias4h
 
 def detect_candle(candles):
     if len(candles)<3: return [],0
-    last=candles[-1]; prev=candles[-2]
-    patterns=[]; score=0
-    body=abs(last["close"]-last["open"])
-    range_c=last["high"]-last["low"]
+    last=candles[-1]; prev=candles[-2]; patterns=[]; score=0
+    body=abs(last["close"]-last["open"]); range_c=last["high"]-last["low"]
     if range_c==0: return [],0
-    if prev["close"]<prev["open"] and last["close"]>last["open"] and last["close"]>prev["open"] and last["open"]<prev["close"]:
-        patterns.append("Bull Engulf"); score+=4
-    if prev["close"]>prev["open"] and last["close"]<last["open"] and last["close"]<prev["open"] and last["open"]>prev["close"]:
-        patterns.append("Bear Engulf"); score+=4
-    lower_wick=min(last["open"],last["close"])-last["low"]
-    upper_wick=last["high"]-max(last["open"],last["close"])
-    if lower_wick>body*2 and upper_wick<body*0.5 and range_c>0:
-        patterns.append("Hammer"); score+=3
-    if upper_wick>body*2 and lower_wick<body*0.5:
-        patterns.append("Hang Man"); score+=3
-    if body<range_c*0.1:
-        patterns.append("Doji"); score+=2
+    if prev["close"]<prev["open"] and last["close"]>last["open"] and last["close"]>prev["open"] and last["open"]<prev["close"]: patterns.append("Bull Engulf"); score+=4
+    if prev["close"]>prev["open"] and last["close"]<last["open"] and last["close"]<prev["open"] and last["open"]>prev["close"]: patterns.append("Bear Engulf"); score+=4
+    lower_wick=min(last["open"],last["close"])-last["low"]; upper_wick=last["high"]-max(last["open"],last["close"])
+    if lower_wick>body*2 and upper_wick<body*0.5 and range_c>0: patterns.append("Hammer"); score+=3
+    if upper_wick>body*2 and lower_wick<body*0.5: patterns.append("Hang Man"); score+=3
+    if body<range_c*0.1: patterns.append("Doji"); score+=2
     return patterns,score
 
 def detect_sweep(candles, bias):
@@ -175,13 +130,11 @@ def detect_fvg(candles):
     if c3["high"]<c1["low"]: return True
     return False
 
-# V22 NEW: ORDER BLOCK DETECTION - BTC IN OB ON 4H,2H,1H
 def detect_order_block(candles):
     if len(candles) < 20: return False, "", 0
     last_close = candles[-1]["close"]; last_low = candles[-1]["low"]; last_high = candles[-1]["high"]
     for i in range(len(candles)-15, len(candles)-3):
-        c = candles[i]
-        body = abs(c["close"] - c["open"])
+        c = candles[i]; body = abs(c["close"] - c["open"])
         if body == 0: continue
         next_candles = candles[i+1:i+5]
         if len(next_candles) < 2: continue
@@ -204,183 +157,153 @@ def detect_order_block(candles):
     return False, "", 0
 
 def detect_multi_tf_ob(symbol):
-    timeframes = ["4h","2h","1h"]
-    ob_found = False; ob_details = []; total_score = 0
+    timeframes = ["4h","2h","1h"]; ob_found = False; ob_details = []; total_score = 0
     for tf in timeframes:
         candles,_ = get_values(symbol, tf, 50)
         if not candles or len(candles) < 20: continue
         found, zone, score = detect_order_block(candles)
-        if found:
-            ob_found = True; ob_details.append(f"{tf.upper()} {zone}"); total_score += score
+        if found: ob_found = True; ob_details.append(f"{tf.upper()} {zone}"); total_score += score
     return ob_found, " | ".join(ob_details), total_score
 
 def is_news_time(user_settings):
-    trade_news=user_settings.get("trade_news",True)
-    now=datetime.utcnow(); weekday=now.weekday()
-    is_nfp_day=weekday==4 and 1<=now.day<=7
-    is_fomc=now.day in [29,30,31] and now.month in [1,3,5,6,7,9,11,12]
-    is_cpi_week=10<=now.day<=15
-    is_news=is_nfp_day or is_fomc or is_cpi_week
-    if not trade_news and is_news:
-        return True,"NEWS BLOCKED - Trade News OFF"
+    trade_news=user_settings.get("trade_news",True); now=datetime.utcnow(); weekday=now.weekday()
+    is_nfp_day=weekday==4 and 1<=now.day<=7; is_fomc=now.day in [29,30,31] and now.month in [1,3,5,6,7,9,11,12]; is_cpi_week=10<=now.day<=15; is_news=is_nfp_day or is_fomc or is_cpi_week
+    if not trade_news and is_news: return True,"NEWS BLOCKED - Trade News OFF"
     return False,""
 
-def method1_premium_sweep(symbol, user_settings):
+# ================= V23 UNIFIED ENGINE - ONE STRATEGY, 2 MODES =================
+def full_multi_tf_analysis(symbol, user_settings=None):
+    if user_settings is None: user_settings={"trade_news":True,"trading_mode":"regular","currency":"ZAR"}
+    mode = user_settings.get("trading_mode","regular") # regular or scalp
     is_open, closed_reason = is_market_open(symbol)
     if not is_open:
-        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method1_premium_sweep"}
+        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"mode":mode}
+    blocked,reason=is_news_time(user_settings)
+    if blocked:
+        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":reason,"confluence":reason,"details":{"news_blocked":True},"mode":mode}
+
     daily_bias,premium_pct,daily_candles=get_htf_bias(symbol)
-    if daily_bias=="NEUTRAL":
-        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":premium_pct,"reason":"Daily NEUTRAL","confluence":"Daily sideways","details":{},"method":"method1_premium_sweep"}
-    if daily_bias=="BULLISH" and premium_pct>65:
-        entry_val=daily_candles[-1]["close"] if daily_candles else 0
-        return {"symbol":symbol,"signal":False,"score":3,"bias":daily_bias,"entry":entry_val,"premium_pct":premium_pct,"reason":f"Wait Discount {premium_pct:.0f}% Premium","confluence":f"Daily {daily_bias} but Premium","details":{},"method":"method1_premium_sweep"}
-    if daily_bias=="BEARISH" and premium_pct<35:
-        entry_val=daily_candles[-1]["close"] if daily_candles else 0
-        return {"symbol":symbol,"signal":False,"score":3,"bias":daily_bias,"entry":entry_val,"premium_pct":premium_pct,"reason":f"Wait Premium {premium_pct:.0f}% Discount","confluence":f"Daily {daily_bias} but Discount","details":{},"method":"method1_premium_sweep"}
     aligned_4h,bias_4h=check_4h_alignment(symbol,daily_bias)
-    h1_candles,_=get_values(symbol,"1h",30)
-    if not h1_candles or len(h1_candles)<12:
-        return {"symbol":symbol,"signal":False,"score":0,"bias":daily_bias,"entry":0,"premium_pct":premium_pct,"reason":"No H1 data","confluence":"No H1","details":{},"method":"method1_premium_sweep"}
+    h1_candles,_=get_values(symbol,"1h",40)
+    m5_candles,_=get_values(symbol,"5min",50)
+    if not h1_candles or len(h1_candles)<20:
+        return {"symbol":symbol,"signal":False,"score":0,"bias":daily_bias,"entry":0,"premium_pct":premium_pct,"reason":"No H1 data","confluence":"No H1","details":{},"mode":mode}
+
+    # ALL INDICATORS - ONE CALCULATION
+    ema5_h1=ema(h1_candles,5); ema20_h1=ema(h1_candles,20); rsi_h1=rsi(h1_candles,14)
     h1_patterns,h1_pat_score=detect_candle(h1_candles)
     h1_sweep,h1_sweep_score=detect_sweep(h1_candles,daily_bias)
     h1_fvg=detect_fvg(h1_candles)
     h1_ob, h1_ob_zone, h1_ob_score = detect_order_block(h1_candles)
-    h1_entry=h1_candles[-1]["close"]
-    m5_candles,_=get_values(symbol,"5min",30)
-    m5_patterns=[]; m5_pat_score=0; m5_sweep=False; m5_sweep_score=0; m5_fvg=False; m5_ob=False; m5_ob_score=0; m5_entry=h1_entry
-    if m5_candles and len(m5_candles)>=12:
+    recent_high = max([c["high"] for c in h1_candles[-21:-1]]); recent_low = min([c["low"] for c in h1_candles[-21:-1]])
+    last_h1=h1_candles[-1]
+    bos_bull = last_h1["close"]>recent_high; bos_bear = last_h1["close"]<recent_low
+    breakout_bull = last_h1["close"]>recent_high*1.0002; breakout_bear = last_h1["close"]<recent_low*0.9998
+    multi_ob, multi_ob_details, multi_ob_score = detect_multi_tf_ob(symbol)
+
+    m5_pat_score=0; m5_sweep=False; m5_sweep_score=0; m5_fvg=False; m5_ob=False; m5_ob_score=0; m5_patterns=[]; ema9_m5=None; ema21_m5=None; rsi_m5=50
+    if m5_candles and len(m5_candles)>=20:
+        ema9_m5=ema(m5_candles,9); ema21_m5=ema(m5_candles,21); rsi_m5=rsi(m5_candles,14)
         m5_patterns,m5_pat_score=detect_candle(m5_candles)
         m5_sweep,m5_sweep_score=detect_sweep(m5_candles,daily_bias)
         m5_fvg=detect_fvg(m5_candles)
-        m5_ob, m5_ob_zone, m5_ob_score = detect_order_block(m5_candles)
-        m5_entry=m5_candles[-1]["close"]
-    multi_ob, multi_ob_details, multi_ob_score = detect_multi_tf_ob(symbol)
+        m5_ob, _, m5_ob_score = detect_order_block(m5_candles)
+
+    # DETERMINE BIAS - unified
+    bias_votes = []
+    if daily_bias!="NEUTRAL": bias_votes.append(daily_bias)
+    if bias_4h!="NEUTRAL": bias_votes.append(bias_4h)
+    if ema5_h1 and ema20_h1:
+        bias_votes.append("BULLISH" if ema5_h1>ema20_h1 else "BEARISH")
+    if ema9_m5 and ema21_m5:
+        bias_votes.append("BULLISH" if ema9_m5>ema21_m5 else "BEARISH")
+    if bos_bull or breakout_bull: bias_votes.append("BULLISH")
+    if bos_bear or breakout_bear: bias_votes.append("BEARISH")
+    if not bias_votes: final_bias="NEUTRAL"
+    else: final_bias = max(set(bias_votes), key=bias_votes.count) if bias_votes else daily_bias
+
+    # SCORING - ALL STRATEGIES COMBINED AS ONE
     score=0; parts=[]
+
+    # HTF
     if daily_bias!="NEUTRAL": score+=2; parts.append(f"Daily {daily_bias}")
     if aligned_4h: score+=2; parts.append(f"4H {bias_4h} aligned")
+    # Premium/Discount
     if daily_bias=="BULLISH" and premium_pct<=35: score+=3; parts.append(f"Discount {premium_pct:.0f}%")
     elif daily_bias=="BEARISH" and premium_pct>=65: score+=3; parts.append(f"Premium {premium_pct:.0f}%")
-    if h1_patterns: score+=h1_pat_score; parts.append(f"H1 {','.join(h1_patterns)} +{h1_pat_score}")
-    if h1_sweep: score+=h1_sweep_score; parts.append(f"H1 Sweep +{h1_sweep_score}")
-    if h1_fvg: score+=1; parts.append("H1 FVG +1")
-    if h1_ob: score+=h1_ob_score; parts.append(f"H1 {h1_ob_zone} +{h1_ob_score}")
-    if m5_patterns: score+=m5_pat_score; parts.append(f"M5 {','.join(m5_patterns)} +{m5_pat_score}")
-    if m5_sweep: score+=m5_sweep_score; parts.append(f"M5 Sweep +{m5_sweep_score}")
-    if m5_fvg: score+=1; parts.append("M5 FVG +1")
-    if m5_ob: score+=m5_ob_score; parts.append(f"M5 {m5_ob_zone} +{m5_ob_score}")
-    if multi_ob: score+=multi_ob_score; parts.append(f"MTF OB {multi_ob_details} +{multi_ob_score}")
-    has_sweep=h1_sweep or m5_sweep; has_ob = h1_ob or m5_ob or multi_ob; has_strong=h1_pat_score>=3 or m5_pat_score>=3
+    elif 35 < premium_pct < 65: score+=1; parts.append(f"Mid {premium_pct:.0f}%")
+    # EMA + RSI (method2)
+    if ema5_h1 and ema20_h1:
+        if final_bias=="BULLISH" and 40<=rsi_h1<=55: score+=2; parts.append(f"RSI {rsi_h1:.0f} BUY pullback")
+        elif final_bias=="BEARISH" and 45<=rsi_h1<=60: score+=2; parts.append(f"RSI {rsi_h1:.0f} SELL pullback")
+    # Breakout + BOS (method3 + method5)
+    if bos_bull or breakout_bull: score+=2; parts.append("BOS/Break High")
+    if bos_bear or breakout_bear: score+=2; parts.append("BOS/Break Low")
+    # FVG
+    if h1_fvg: score+=2; parts.append("H1 FVG")
+    if m5_fvg: score+=1; parts.append("M5 FVG")
+    # Order Block - BTC case (method5)
+    if h1_ob: score+=h1_ob_score; parts.append(f"H1 {h1_ob_zone}")
+    if m5_ob: score+=m5_ob_score; parts.append(f"M5 OB")
+    if multi_ob: score+=multi_ob_score; parts.append(f"MTF {multi_ob_details}")
+    # Sweep (method1)
+    if h1_sweep: score+=h1_sweep_score; parts.append(f"H1 Sweep")
+    if m5_sweep: score+=m5_sweep_score; parts.append(f"M5 Sweep")
+    # Candle patterns
+    if h1_patterns: score+=h1_pat_score; parts.append(f"H1 {','.join(h1_patterns)}")
+    if m5_patterns: score+=m5_pat_score; parts.append(f"M5 {','.join(m5_patterns)}")
+
+    # Cap score 0-10
+    score = min(score, 10)
+
+    # ENTRY - best available
+    entry = m5_candles[-1]["close"] if m5_candles and len(m5_candles)>0 else h1_candles[-1]["close"] if h1_candles else 0
+
+    # MODE LOGIC - REGULAR vs SCALP
     crypto_list = ["BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
     is_crypto = symbol in crypto_list
-    if is_crypto:
-        is_strong = score>=6 and (has_sweep or has_ob) and has_strong
+    has_ob = h1_ob or m5_ob or multi_ob
+    has_sweep = h1_sweep or m5_sweep
+    has_pattern = h1_pat_score>=2 or m5_pat_score>=2
+
+    if mode=="scalp":
+        # SCALP MODE: M5 only, faster, lower threshold, 30-70 RSI, need EMA cross + pattern
+        m5_bias_ok = ema9_m5 and ema21_m5 and ((ema9_m5>ema21_m5 and final_bias=="BULLISH") or (ema9_m5<ema21_m5 and final_bias=="BEARISH") or final_bias!="NEUTRAL")
+        is_signal = score>=5 and has_pattern and m5_bias_ok and 20<=rsi_m5<=80
+        if not is_signal:
+            if score<5: reason=f"Scalp Score {score}/10 - need 5+"
+            elif not has_pattern: reason=f"Scalp Score {score}/10 no pattern"
+            else: reason=f"Scalp Score {score}/10 Wait RSI {rsi_m5:.0f}"
+        else:
+            reason=f"Scalp {score}/10 STRONG {final_bias} {'OB' if has_ob else 'Sweep' if has_sweep else 'EMA'}"
     else:
-        is_strong=score>=7 and has_sweep and has_strong
-    if not is_strong:
-        if score<6: reason=f"Score {score}/10 low"
-        elif not (has_sweep or has_ob): reason=f"Score {score}/10 no sweep/OB"
-        else: reason=f"Score {score}/10 Wait"
-    else:
-        reason=f"Score {score}/10 STRONG {'OB Respect (No sweep needed for crypto)' if has_ob and not has_sweep else 'Premium+Sweep'}"
-    final_entry=m5_entry if m5_entry!=0 else h1_entry
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":daily_bias,"bias_4h":bias_4h,"entry":final_entry,"premium_pct":premium_pct,"reason":reason,"confluence":" | ".join(parts),"details":{"candles":h1_patterns+m5_patterns,"sweep":has_sweep,"fvg":h1_fvg or m5_fvg,"ob":has_ob,"ob_details":multi_ob_details},"method":"method1_premium_sweep"}
+        # REGULAR MODE: Combined all swing strategies, need OB or Sweep + pattern for quality
+        if is_crypto:
+            is_signal = score>=5 and (has_ob or has_sweep or bos_bull or bos_bear or breakout_bull or breakout_bear) and has_pattern
+        else:
+            is_signal = score>=5 and (has_ob or has_sweep) and has_pattern
+        if not is_signal:
+            if score<5: reason=f"Regular Score {score}/10 - need 5+"
+            elif not (has_ob or has_sweep): reason=f"Regular {score}/10 no OB/Sweep"
+            elif not has_pattern: reason=f"Regular {score}/10 no engulf/hammer"
+            else: reason=f"Regular {score}/10 Wait"
+        else:
+            if score>=8: strength="🔥 8-10 A+ Setup"
+            elif score>=7: strength="✅ 7 Strong"
+            elif score>=6: strength="👍 6 Good"
+            else: strength="⚡ 5 Takeable"
+            reason=f"Regular {score}/10 {strength} {final_bias} {'OB Respect' if has_ob and not has_sweep else 'Sweep+Engulf'}"
 
-def method2_ema_rsi(symbol, user_settings):
-    is_open, closed_reason = is_market_open(symbol)
-    if not is_open: return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method2_ema_rsi"}
-    daily_bias,premium_pct,_=get_htf_bias(symbol)
-    h1_candles,_=get_values(symbol,"1h",40)
-    if not h1_candles or len(h1_candles)<20: return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":"No H1","confluence":"No H1","details":{},"method":"method2_ema_rsi"}
-    ema5=ema(h1_candles,5); ema20=ema(h1_candles,20); rsi_val=rsi(h1_candles,14); h1_entry=h1_candles[-1]["close"]
-    if not ema5 or not ema20: return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":h1_entry,"premium_pct":50,"reason":"No EMA","confluence":"No EMA","details":{},"method":"method2_ema_rsi"}
-    bias="BULLISH" if ema5>ema20 else "BEARISH" if ema5<ema20 else "NEUTRAL"
-    patterns,pat_score=detect_candle(h1_candles); ob_found, ob_zone, ob_score = detect_order_block(h1_candles)
-    score=0; parts=[]
-    if bias=="BULLISH" and 40<=rsi_val<=55: score+=4; parts.append(f"RSI {rsi_val:.0f} BUY zone")
-    elif bias=="BEARISH" and 45<=rsi_val<=60: score+=4; parts.append(f"RSI {rsi_val:.0f} SELL zone")
-    else: parts.append(f"RSI {rsi_val:.0f}")
-    if bias!="NEUTRAL": score+=2; parts.append(f"EMA5>20 {bias}")
-    if patterns: score+=pat_score; parts.append(f"{','.join(patterns)} +{pat_score}")
-    if ob_found: score+=ob_score; parts.append(f"OB {ob_zone} +{ob_score}")
-    is_strong=score>=6 and (40<=rsi_val<=60) and pat_score>=2
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":h1_entry,"premium_pct":premium_pct,"reason":f"EMA+RSI Score {score}/10 {bias}","confluence":" | ".join(parts),"details":{"rsi":rsi_val},"method":"method2_ema_rsi"}
-
-def method3_breakout_retest(symbol, user_settings):
-    is_open, closed_reason = is_market_open(symbol)
-    if not is_open: return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method3_breakout_retest"}
-    h1_candles,_=get_values(symbol,"1h",40)
-    if not h1_candles or len(h1_candles)<25: return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":"No H1","confluence":"No H1","details":{},"method":"method3_breakout_retest"}
-    recent_high=max([c["high"] for c in h1_candles[-21:-1]]); recent_low=min([c["low"] for c in h1_candles[-21:-1]]); last=h1_candles[-1]; entry=last["close"]
-    patterns,pat_score=detect_candle(h1_candles); ob_found, ob_zone, ob_score = detect_order_block(h1_candles)
-    score=0; parts=[]; bias="NEUTRAL"
-    if last["close"]>recent_high*1.0002: bias="BULLISH"; score+=3; parts.append(f"Break High")
-    elif last["close"]<recent_low*0.9998: bias="BEARISH"; score+=3; parts.append(f"Break Low")
-    if patterns: score+=pat_score; parts.append(f"{','.join(patterns)} +{pat_score}")
-    if ob_found: score+=ob_score; parts.append(f"OB {ob_zone}")
-    is_strong=score>=6 and bias!="NEUTRAL"
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":entry,"premium_pct":50,"reason":f"Breakout {score}/10 {bias}","confluence":" | ".join(parts),"details":{},"method":"method3_breakout_retest"}
-
-def method4_scalp_m5(symbol, user_settings):
-    crypto_list = ["BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
-    is_open, closed_reason = is_market_open(symbol)
-    if not is_open and symbol not in crypto_list:
-        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method4_scalp_m5"}
-    m5_candles,_=get_values(symbol,"5min",50)
-    if not m5_candles or len(m5_candles)<25: return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":"No M5","confluence":"No M5","details":{},"method":"method4_scalp_m5"}
-    ema9=ema(m5_candles,9); ema21=ema(m5_candles,21); rsi_val=rsi(m5_candles,14); entry=m5_candles[-1]["close"]
-    patterns,pat_score=detect_candle(m5_candles)
-    if not ema9 or not ema21: return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":entry,"premium_pct":50,"reason":"No EMA","confluence":"No EMA","details":{},"method":"method4_scalp_m5"}
-    bias="BULLISH" if ema9>ema21 else "BEARISH" if ema9<ema21 else "NEUTRAL"
-    sweep,sweep_score=detect_sweep(m5_candles,bias); ob_found, ob_zone, ob_score = detect_order_block(m5_candles)
-    score=0; parts=[]
-    if bias!="NEUTRAL": score+=3; parts.append(f"EMA9>21 {bias} RSI {rsi_val:.0f}")
-    if patterns: score+=pat_score; parts.append(f"{','.join(patterns)} +{pat_score}")
-    if sweep: score+=2; parts.append(f"Sweep +{sweep_score}")
-    if ob_found: score+=ob_score; parts.append(f"OB {ob_zone}")
-    is_strong=score>=5 and bias!="NEUTRAL" and 30<=rsi_val<=70
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":entry,"premium_pct":50,"reason":f"Scalp M5 Score {score}/10 {bias}","confluence":" | ".join(parts),"details":{},"method":"method4_scalp_m5"}
-
-def method5_smc_ob_bos(symbol, user_settings):
-    is_open, closed_reason = is_market_open(symbol)
-    if not is_open: return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":"method5_smc_ob_bos"}
-    daily_bias,premium_pct,_=get_htf_bias(symbol)
-    h1_candles,_=get_values(symbol,"1h",40)
-    if not h1_candles or len(h1_candles)<25: return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":premium_pct,"reason":"No H1","confluence":"No H1","details":{},"method":"method5_smc_ob_bos"}
-    recent_high=max([c["high"] for c in h1_candles[-11:-1]]); recent_low=min([c["low"] for c in h1_candles[-11:-1]]); last=h1_candles[-1]
-    bos_bull=last["close"]>recent_high; bos_bear=last["close"]<recent_low
-    fvg=detect_fvg(h1_candles); patterns,pat_score=detect_candle(h1_candles); ob_found, ob_zone, ob_score = detect_order_block(h1_candles); multi_ob, multi_ob_details, multi_ob_score = detect_multi_tf_ob(symbol); entry=last["close"]
-    score=0; parts=[]; bias="NEUTRAL"
-    if bos_bull: bias="BULLISH"; score+=4; parts.append(f"BOS Bull +4")
-    if bos_bear: bias="BEARISH"; score+=4; parts.append(f"BOS Bear +4")
-    if fvg: score+=3; parts.append("FVG +3")
-    if patterns: score+=pat_score; parts.append(f"{','.join(patterns)} +{pat_score}")
-    if ob_found: score+=ob_score; parts.append(f"H1 {ob_zone} +{ob_score}")
-    if multi_ob: score+=multi_ob_score; parts.append(f"MTF {multi_ob_details} +{multi_ob_score}")
-    has_ob = ob_found or multi_ob
-    crypto_list = ["BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
-    is_crypto = symbol in crypto_list
-    if is_crypto:
-        is_strong = score>=6 and (has_ob or bos_bull or bos_bear) and pat_score>=2
-        if has_ob and pat_score>=2: is_strong = True
-    else:
-        is_strong=score>=6 and (bos_bull or bos_bear or has_ob)
-    reason=f"SMC Score {score}/10 BOS:{bos_bull or bos_bear} FVG:{fvg} OB:{has_ob} {'STRONG OB Respect - BTC case fixed' if has_ob and is_strong else 'STRONG' if is_strong else 'Wait'}"
-    return {"symbol":symbol,"signal":is_strong,"score":score,"bias":bias,"entry":entry,"premium_pct":premium_pct,"reason":reason,"confluence":" | ".join(parts),"details":{"ob":has_ob,"ob_zone":ob_zone,"multi_ob":multi_ob_details},"method":"method5_smc_ob_bos"}
-
-def full_multi_tf_analysis(symbol, user_settings=None):
-    if user_settings is None:
-        user_settings={"trade_news":True,"trading_method":"method1_premium_sweep","currency":"ZAR"}
-    is_open, closed_reason = is_market_open(symbol)
-    if not is_open:
-        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"method":user_settings.get("trading_method","method1_premium_sweep")}
-    blocked,reason=is_news_time(user_settings)
-    if blocked:
-        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":reason,"confluence":reason,"details":{"news_blocked":True},"method":user_settings.get("trading_method","method1_premium_sweep")}
-    method=user_settings.get("trading_method","method1_premium_sweep")
-    if method=="method1_premium_sweep": return method1_premium_sweep(symbol, user_settings)
-    elif method=="method2_ema_rsi": return method2_ema_rsi(symbol, user_settings)
-    elif method=="method3_breakout_retest": return method3_breakout_retest(symbol, user_settings)
-    elif method=="method4_scalp_m5": return method4_scalp_m5(symbol, user_settings)
-    elif method=="method5_smc_ob_bos": return method5_smc_ob_bos(symbol, user_settings)
-    else: return method1_premium_sweep(symbol, user_settings)
+    return {
+        "symbol":symbol,
+        "signal":is_signal,
+        "score":score,
+        "bias":final_bias,
+        "bias_4h":bias_4h,
+        "entry":entry,
+        "premium_pct":premium_pct,
+        "reason":reason,
+        "confluence":" | ".join(parts) if parts else "No confluence",
+        "details":{"candles":h1_patterns+m5_patterns,"sweep":has_sweep,"fvg":h1_fvg or m5_fvg,"ob":has_ob,"ob_details":multi_ob_details,"rsi_h1":rsi_h1,"rsi_m5":rsi_m5,"bos":bos_bull or bos_bear,"breakout":breakout_bull or breakout_bear},
+        "mode":mode
+    }
