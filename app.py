@@ -208,39 +208,43 @@ def calculate_pnl_stats(journal):
 def calculate_dynamic_sl_tp(symbol, entry, bias, account_size, lot_size, leverage, risk_percent, rr_ratio, spread_forex=0.7, spread_gold=0.35, spread_indices=2.0, spread_crypto=10.0):
     entry=float(entry); is_sell="BEARISH" in bias.upper() or "SELL" in bias.upper()
     risk_amount=float(account_size)*(float(risk_percent)/100.0); lot_size=float(lot_size) if float(lot_size)>0 else 0.01; rr_ratio=float(rr_ratio) if float(rr_ratio)>0 else 2.5
+    # FIXED: decimal precision now comes from eng.price_decimals(symbol) — a
+    # per-instrument lookup — instead of branching on "is entry < 20", which
+    # gave the wrong decimal count for JPY pairs, indices, and any crypto
+    # whose price happens to sit near that threshold.
+    dp = eng.price_decimals(symbol)
     if symbol in ["XAUUSD","XAGUSD"]:
         spread=float(spread_gold); sl_dollar=risk_amount/(lot_size*100) if lot_size>0 else 5.0; sl_dollar=max(2.0,min(sl_dollar,15.0)); sl_dollar+=spread; tp_dollar=sl_dollar*rr_ratio - spread
         sl=entry+sl_dollar if is_sell else entry-sl_dollar; tp=entry-tp_dollar if is_sell else entry+tp_dollar
-        return round(sl,2),round(tp,2),round(sl_dollar,2),round(tp_dollar,2),risk_amount
+        return round(sl,dp),round(tp,dp),round(sl_dollar,2),round(tp_dollar,2),risk_amount
     elif symbol in ["XTIUSD","XBRUSD"]:
         spread=float(spread_gold); sl_dollar=risk_amount/(lot_size*50) if lot_size>0 else 0.5; sl_dollar=max(0.3,min(sl_dollar,2.0)); sl_dollar+=spread; tp_dollar=sl_dollar*rr_ratio - spread
         sl=entry+sl_dollar if is_sell else entry-sl_dollar; tp=entry-tp_dollar if is_sell else entry+tp_dollar
-        return round(sl,2),round(tp,2),round(sl_dollar,2),round(tp_dollar,2),risk_amount
+        return round(sl,dp),round(tp,dp),round(sl_dollar,2),round(tp_dollar,2),risk_amount
     elif symbol in ["US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200"]:
         spread=float(spread_indices); sl_points=(risk_amount/(lot_size*10)) if lot_size>0 else 80; sl_points=max(30,min(sl_points,250)); sl_points+=spread; tp_points=sl_points*rr_ratio - spread
         sl=entry+sl_points if is_sell else entry-sl_points; tp=entry-tp_points if is_sell else entry+tp_points
-        return round(sl,2),round(tp,2),round(sl_points,1),round(tp_points,1),risk_amount
+        return round(sl,dp),round(tp,dp),round(sl_points,1),round(tp_points,1),risk_amount
     else:
         if any(x in symbol for x in ["BTC","ETH","SOL","BNB","XRP","ADA","DOGE","DOT","AVAX","LINK","MATIC","LTC"]):
             spread=float(spread_crypto)
             if "BTC" in symbol: sl_d=max(100,min(risk_amount/(lot_size*10) if lot_size>0 else 400,1200))
             else: sl_d=max(5,min(risk_amount/(lot_size*10) if lot_size>0 else 40,150))
             sl_d+=spread; tp_d=sl_d*rr_ratio - spread; sl=entry+sl_d if is_sell else entry-sl_d; tp=entry-tp_d if is_sell else entry+tp_d
-            return round(sl,2),round(tp,2),round(sl_d,1),round(tp_d,1),risk_amount
+            return round(sl,dp),round(tp,dp),round(sl_d,1),round(tp_d,1),risk_amount
         else:
             spread=float(spread_forex); pip_value=lot_size*10; sl_pips=risk_amount/pip_value if pip_value!=0 else 10; sl_pips=max(5,min(sl_pips,50)); sl_pips+=spread; tp_pips=sl_pips*rr_ratio - spread
             if "JPY" in symbol: sl_dist=sl_pips*0.01; tp_dist=tp_pips*0.01
             else: sl_dist=sl_pips*0.0001; tp_dist=tp_pips*0.0001
             sl=entry+sl_dist if is_sell else entry-sl_dist; tp=entry-tp_dist if is_sell else entry+tp_dist
-            if entry<20: return round(sl,5),round(tp,5),round(sl_pips,1),round(tp_pips,1),risk_amount
-            else: return round(sl,2),round(tp,2),round(sl_pips,1),round(tp_pips,1),risk_amount
+            return round(sl,dp),round(tp,dp),round(sl_pips,1),round(tp_pips,1),risk_amount
 
-def send_telegram_pro(symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name=""):
+def send_telegram_pro(symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale=""):
     entry_f=float(entry)
     if entry_f==0: return {"error":"No price"}
     signal_type="BUY" if "BULLISH" in bias.upper() else "SELL"
-    if entry_f<20: entry_fmt=f"{entry_f:.5f}"; sl_fmt=f"{float(sl):.5f}"; tp_fmt=f"{float(tp):.5f}"
-    else: entry_fmt=f"{entry_f:.2f}"; sl_fmt=f"{float(sl):.2f}"; tp_fmt=f"{float(tp):.2f}"
+    dp = eng.price_decimals(symbol)
+    entry_fmt=f"{entry_f:.{dp}f}"; sl_fmt=f"{float(sl):.{dp}f}"; tp_fmt=f"{float(tp):.{dp}f}"
     bot=os.getenv("TELEGRAM_BOT_TOKEN"); main_chat=os.getenv("TELEGRAM_CHAT_ID")
     tg_users=load_json(TG_FILE, dict); all_chats=[]
     if main_chat: all_chats.append(str(main_chat))
@@ -251,7 +255,8 @@ def send_telegram_pro(symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, 
     sast_now=(datetime.utcnow()+timedelta(hours=2)).strftime("%H:%M SAST")
     mode_emoji = "⚡" if mode_name=="scalp" else "🎯"
     strength = "🔥 A+" if score>=8 else "✅ Strong" if score>=7 else "👍 Good" if score>=6 else "⚡ Takeable"
-    text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_percent}%)\n\n🔍 {confluence_text}\n\n⏰ {sast_now}"
+    rationale_line = f"\n\n💡 {rationale}" if rationale else ""
+    text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_percent}%){rationale_line}\n\n🔍 {confluence_text}\n\n⏰ {sast_now}"
     keyboard={"inline_keyboard": [[{"text":"✅ TOOK ENTRY","callback_data":f"TOOK_{symbol}_{entry_fmt}"},{"text":"❌ SKIP","callback_data":f"SKIP_{symbol}"}],[{"text":"📊 Journal","url":"https://agent-35-trading-bot.onrender.com/journal"}]]}
     results=[]
     for chat_id in all_chats:
@@ -524,7 +529,7 @@ def dashboard_scan():
     for s in symbols_to_scan[:30]:
         try:
             r=cached_analysis(s, user_settings); score=r.get('score',0); bias=r.get('bias','NEUTRAL'); entry=r.get('entry',0)
-            entry_display=f"{float(entry):.5f}" if entry and float(entry)<20 else f"{float(entry):.2f}" if entry else "0"
+            entry_display=f"{float(entry):.{eng.price_decimals(s)}f}" if entry else "0"
             color="#10b981" if score>=7 else "#f59e0b" if score>=5 else "#ef4444"
             if r.get('signal'):
                 if len(tracked)>=MAX_TRACKED and s not in tracked: signal_btn=f"<span class='pill' style='background:rgba(239,68,68,0.15);color:#ef4444'>Limit {MAX_TRACKED}</span>"
@@ -647,11 +652,11 @@ def guide_page():
 </div></div>
 <div class='card'><h3 style='margin:0 0 8px;font-size:14px'>🎯 One Strategy Explained - All Combined</h3><div style='font-size:12px;color:#cbd5e1;line-height:1.7'>
 <b>We combined 5 old strategies into ONE score 0-10:</b><br>
-• Premium/Discount (Daily bias) + 4H alignment +2-3 pts<br>
-• EMA 5/20 + RSI pullback +2 pts<br>
-• Breakout + BOS +2 pts<br>
-• Order Block (BTC OB fixed) +4 pts<br>
-• FVG +2 pts, Sweep +3 pts, Engulfing/Hammer +3-4 pts<br><br>
+- Premium/Discount (Daily bias) + 4H alignment +2-3 pts<br>
+- EMA 5/20 + RSI pullback +2 pts<br>
+- Breakout + BOS +2 pts<br>
+- Order Block (BTC OB fixed) +4 pts<br>
+- FVG +2 pts, Sweep +3 pts, Engulfing/Hammer +3-4 pts<br><br>
 <b>Total capped 10/10. Threshold 5+ sends.</b><br>
 You choose which to take based on score:<br>
 <span style='background:#ef444422;color:#ef4444;padding:2px 8px;border-radius:20px;font-size:10px'>5/10 ⚡ Takeable - minimum decent</span><br>
@@ -740,7 +745,7 @@ def send_signal():
         rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
         curr_sym=get_currency_symbol(user_set.get("currency","ZAR")); mode=user_set.get("trading_mode","regular")
         sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
-        res=send_telegram_pro(sym, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode)
+        res=send_telegram_pro(sym, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''))
         tracked[sym]={"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode}; save_json(TRACK_FILE, tracked)
         msg=f"Sent {sym} Score {r.get('score')}/10 {entry} SL {sl} TP {tp} Mode {mode.upper()}"
     except Exception as e: res={"error":str(e)}; msg=f"Error {sym}: {e}"
@@ -757,11 +762,11 @@ def export_journal():
 def test_telegram():
     email=session.get("user") or "admin@agent35.com"; user_set=get_user_settings(email)
     r=cached_analysis("GBPUSD", user_set); entry=r.get('entry',0)
-    if not entry or float(entry)==0: entry=1.35057; r={"score":8,"bias":"BEARISH","confluence":"Test unified strategy - all 5 methods combined as ONE score 8/10 A+","details":{}}
+    if not entry or float(entry)==0: entry=1.35057; r={"score":8,"bias":"BEARISH","confluence":"Test unified strategy - all 5 methods combined as ONE score 8/10 A+","rationale":"This is a test message — daily and 4H trend aligned bearish; price in premium zone; bearish order block reacted to.","details":{}}
     rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
     curr_sym=get_currency_symbol(user_set.get("currency","ZAR")); mode=user_set.get("trading_mode","regular")
     sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp("GBPUSD", entry, r.get('bias','BEARISH'), acc, lot, lev, risk_percent, rr)
-    res=send_telegram_pro("GBPUSD", r.get('score',8), r.get('bias','BEARISH'), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence','Test'), curr_sym, mode)
+    res=send_telegram_pro("GBPUSD", r.get('score',8), r.get('bias','BEARISH'), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence','Test'), curr_sym, mode, r.get('rationale',''))
     return pro_layout(f"<div style='max-width:700px;margin:40px auto'><div class='card'><h2 style='font-size:15px'>Test Sent - GBPUSD {entry} Score {r.get('score')}/10 {mode.upper()}</h2><p style='font-size:11px;background:#0b1220;padding:12px;border-radius:10px;border:1px solid #1e293b;word-break:break-all'>{str(res)[:2000]}</p><a href='/dashboard' style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700;display:inline-block;margin-top:10px'>Back to Dashboard</a></div></div>","Dashboard", is_admin=email=="admin@agent35.com")
 
 @app.route("/telegram/webhook", methods=["POST"])
@@ -1009,7 +1014,7 @@ def cron_scan():
             entry=r.get('entry'); rr=sample_settings.get('rr_ratio',2.5)
             sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), 142, 0.01, "1:500", 1, rr, 0.7, 0.35, 2.0, 10.0)
             curr_sym=get_currency_symbol(sample_settings.get("currency","ZAR"))
-            send_telegram_pro(sym, r.get('score',7), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, 1, 0.01, "1:500", 142, r.get('confluence',''), curr_sym, r.get('mode','regular'))
+            send_telegram_pro(sym, r.get('score',7), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, 1, 0.01, "1:500", 142, r.get('confluence',''), curr_sym, r.get('mode','regular'), r.get('rationale',''))
             tracked[sym]={"time":now.isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score')}
             save_json(TRACK_FILE, tracked); sent.append(sym)
             if len(tracked)>=MAX_TRACKED: break
@@ -1021,6 +1026,33 @@ def health():
     test=cached_analysis("BTCUSD", {"trade_news":True,"currency":"ZAR","trading_mode":"regular"})
     tracked=load_json(TRACK_FILE, dict)
     return jsonify({"ok":True,"version":"V24 - forgot password, security fixes, unified UI, scan caching","symbols":len(ALL_SYMBOLS),"tracked":f"{len(tracked)}/{MAX_TRACKED}","btc_test":test,"threshold":5,"modes":["regular","scalp"]})
+
+@app.route("/debug-signal")
+def debug_signal():
+    """Diagnostic view: shows the full score breakdown for one symbol so you
+    can see exactly which confluence factors are present/missing, instead of
+    only seeing the final score/reason. Use ?symbol=EURUSD&mode=regular"""
+    if not session.get("user"): return redirect("/login")
+    email=session.get("user"); is_admin=email=="admin@agent35.com"
+    sym = request.args.get("symbol", "EURUSD").upper()
+    mode_override = request.args.get("mode")
+    user_set = get_user_settings(email)
+    if mode_override in ("regular", "scalp"):
+        user_set = dict(user_set); user_set["trading_mode"] = mode_override
+    try:
+        r = eng.full_multi_tf_analysis(sym, user_set)  # bypass cache for a live read
+    except Exception as e:
+        r = {"error": str(e)}
+    details = r.get("details", {})
+    rows = "".join([f"<tr><td style='color:#94a3b8'>{k}</td><td style='font-weight:700'>{v}</td></tr>" for k,v in r.items() if k != "details"])
+    detail_rows = "".join([f"<tr><td style='color:#94a3b8'>{k}</td><td style='font-weight:700'>{v}</td></tr>" for k,v in details.items()])
+    content=f"""<div style='max-width:800px;margin:0 auto;padding:14px'>
+<h1 style='font-size:18px;font-weight:900'>Signal Debug - {sym}</h1>
+<p style='color:#64748b;font-size:12px'>Live (uncached) analysis. Change symbol/mode via ?symbol=XXX&mode=regular|scalp</p>
+<div class='table-card'><h3 style='font-size:13px;margin:0 0 10px'>Top-Level Result</h3><table>{rows}</table></div>
+<div class='table-card' style='margin-top:12px'><h3 style='font-size:13px;margin:0 0 10px'>Detail Breakdown</h3><table>{detail_rows if detail_rows else "<tr><td colspan=2>No details returned</td></tr>"}</table></div>
+</div>"""
+    return pro_layout(content, "All Signals", is_admin=is_admin)
 
 @app.route("/backup-now")
 def backup_now():
