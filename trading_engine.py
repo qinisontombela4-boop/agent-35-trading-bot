@@ -213,6 +213,74 @@ def detect_order_block(candles, bias=None):
                     return True, f"Bear OB {ob_low:.2f}-{ob_high:.2f}", 4
     return False, "", 0
 
+# ---- NEW: decimal precision per instrument CATEGORY, not per live price
+# level. The old approach ("if price < 20, use 5 decimals, else 2") breaks
+# down constantly: JPY pairs and indices sit above 20 but need their own
+# conventions, and crypto alts drift across that threshold over time,
+# silently changing how many decimals a symbol displays from one signal to
+# the next. This is fixed per-symbol instead, matching how real trading
+# platforms quote each instrument. ----
+def price_decimals(symbol):
+    if symbol == "XAUUSD": return 2
+    if symbol == "XAGUSD": return 3
+    if symbol in ("XTIUSD", "XBRUSD"): return 2
+    if symbol in ("US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200"): return 1
+    if symbol in ("BTCUSD","ETHUSD"): return 2
+    if symbol in ("SOLUSD","BNBUSD","LINKUSD","LTCUSD","AVAXUSD"): return 3
+    if symbol in ("XRPUSD","ADAUSD","DOGEUSD","DOTUSD","MATICUSD"): return 5
+    if "JPY" in symbol: return 3
+    return 5  # standard forex majors/crosses (pipette precision)
+
+# ---- NEW: builds a short, plain-language explanation FROM the same factors
+# that produced the score — not a separate guess, just that reasoning
+# translated into a sentence a human can read in the Telegram message. ----
+def build_rationale(symbol, final_bias, score, daily_bias, aligned_4h, bias_4h, premium_pct,
+                     rsi_h1, bos_bull, bos_bear, breakout_bull, breakout_bear,
+                     h1_fvg, m5_fvg, h1_ob, h1_ob_zone, m5_ob, multi_ob, multi_ob_details,
+                     h1_sweep, m5_sweep, h1_patterns, m5_patterns):
+    direction_word = "buyers" if final_bias == "BULLISH" else "sellers"
+    parts = []
+
+    if aligned_4h:
+        parts.append(f"daily and 4H trend both point {final_bias.lower()}, so {direction_word} have the higher-timeframe trend behind them")
+    elif daily_bias != "NEUTRAL":
+        parts.append(f"daily trend is {daily_bias.lower()}")
+
+    if final_bias == "BULLISH" and premium_pct <= 35:
+        parts.append(f"price is in the discount zone of its recent range ({premium_pct:.0f}%), a level buyers have tended to defend")
+    elif final_bias == "BEARISH" and premium_pct >= 65:
+        parts.append(f"price is in the premium zone of its recent range ({premium_pct:.0f}%), a level sellers have tended to defend")
+
+    if h1_sweep or m5_sweep:
+        parts.append("a recent liquidity sweep took out resting stops just before reversing")
+
+    ob_note = None
+    if h1_ob: ob_note = f"an H1 {h1_ob_zone.split(' ')[0].lower()} order block"
+    elif multi_ob: ob_note = f"an order block on {multi_ob_details.split('|')[0].strip()}"
+    elif m5_ob: ob_note = "a fresh 5-minute order block"
+    if ob_note:
+        parts.append(f"price is reacting from {ob_note}")
+
+    if h1_fvg or m5_fvg:
+        parts.append("an unfilled imbalance (fair value gap) sits nearby, often acting as a magnet")
+
+    if bos_bull or bos_bear or breakout_bull or breakout_bear:
+        parts.append(f"structure just broke {'higher' if final_bias=='BULLISH' else 'lower'}, confirming momentum")
+
+    pats = h1_patterns + m5_patterns
+    if pats:
+        parts.append(f"a {', '.join(sorted(set(pats)))} candle confirms rejection at this level")
+
+    if final_bias=="BULLISH" and 40<=rsi_h1<=55:
+        parts.append(f"RSI at {rsi_h1:.0f} shows a healthy pullback, not an overbought chase")
+    elif final_bias=="BEARISH" and 45<=rsi_h1<=60:
+        parts.append(f"RSI at {rsi_h1:.0f} shows a healthy pullback, not an oversold chase")
+
+    if not parts:
+        return f"{score}/10 confluence with no single dominant factor — lower-conviction setup, size accordingly."
+
+    return f"{'; '.join(parts)}.".capitalize()
+
 # ---- FIXED: reuses the already-fetched 1h candles instead of re-fetching,
 # and passes bias through so it doesn't count an opposite-direction OB. ----
 def detect_multi_tf_ob(symbol, bias, cache, h1_candles=None):
@@ -386,6 +454,11 @@ def full_multi_tf_analysis(symbol, user_settings=None):
                 is_signal = False
                 reason = "Rejected: invalid SL distance"
 
+    rationale = build_rationale(symbol, final_bias, score, daily_bias, aligned_4h, bias_4h, premium_pct,
+                                 rsi_h1, bos_bull, bos_bear, breakout_bull, breakout_bear,
+                                 h1_fvg, m5_fvg, h1_ob, h1_ob_zone, m5_ob, multi_ob, multi_ob_details,
+                                 h1_sweep, m5_sweep, h1_patterns, m5_patterns)
+
     return {
         "symbol":symbol,
         "signal":is_signal,
@@ -398,6 +471,7 @@ def full_multi_tf_analysis(symbol, user_settings=None):
         "risk_reward":risk_reward,
         "premium_pct":premium_pct,
         "reason":reason,
+        "rationale":rationale,
         "confluence":" | ".join(parts) if parts else "No confluence",
         "details":{"candles":h1_patterns+m5_patterns,"sweep":has_sweep,"fvg":h1_fvg or m5_fvg,"ob":has_ob,"ob_details":multi_ob_details,"rsi_h1":round(rsi_h1,1),"rsi_m5":round(rsi_m5,1),"bos":bos_bull or bos_bear,"breakout":breakout_bull or breakout_bear},
         "mode":mode
