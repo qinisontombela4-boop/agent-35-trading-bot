@@ -1,5 +1,6 @@
 import os, requests
 from datetime import datetime
+import news_calendar
 
 def get_keys():
     keys=[]
@@ -295,16 +296,23 @@ def detect_multi_tf_ob(symbol, bias, cache, h1_candles=None):
         if found: ob_found = True; ob_details.append(f"{tf.upper()} {zone}"); total_score += score
     return ob_found, " | ".join(ob_details), total_score
 
-def is_news_time(user_settings):
-    # NOTE: this is a rough calendar approximation, not a real economic
-    # calendar feed. It will miss unscheduled/rescheduled high-impact
-    # events and misfire in months where dates don't line up. Wire in a
-    # real calendar API (Trading Economics / Forex Factory / similar) if
-    # you're trading news-sensitive instruments seriously.
-    trade_news=user_settings.get("trade_news",True); now=datetime.utcnow(); weekday=now.weekday()
-    is_nfp_day=weekday==4 and 1<=now.day<=7; is_fomc=now.day in [29,30,31] and now.month in [1,3,5,6,7,9,11,12]; is_cpi_week=10<=now.day<=15; is_news=is_nfp_day or is_fomc or is_cpi_week
-    if not trade_news and is_news: return True,"NEWS BLOCKED - Trade News OFF"
-    return False,""
+# ---- FIXED: now backed by a real economic calendar (news_calendar.py via
+# JBlanked's API) instead of guessed date ranges, and scoped to the specific
+# SYMBOL being analyzed — only blocks symbols actually correlated with the
+# currency behind the imminent event, not a blanket block on everything. ----
+def is_news_time(symbol, user_settings):
+    trade_news = user_settings.get("trade_news", True)
+    if trade_news:
+        return False, ""  # user is OK trading through news — nothing to check
+    blocked, event = news_calendar.is_in_blackout(
+        symbol,
+        minutes_before=user_settings.get("news_blackout_before_min", 15),
+        minutes_after=user_settings.get("news_blackout_after_min", 15),
+    )
+    if blocked and event:
+        when = event["time"].strftime("%H:%M UTC")
+        return True, f"NEWS BLOCKED - {event['currency']} {event['name']} ({when})"
+    return False, ""
 
 # ================= V24 UNIFIED ENGINE - ONE STRATEGY, 2 MODES =================
 def full_multi_tf_analysis(symbol, user_settings=None):
@@ -316,7 +324,7 @@ def full_multi_tf_analysis(symbol, user_settings=None):
     is_open, closed_reason = is_market_open(symbol)
     if not is_open:
         return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"mode":mode}
-    blocked,reason=is_news_time(user_settings)
+    blocked,reason=is_news_time(symbol, user_settings)
     if blocked:
         return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":reason,"confluence":reason,"details":{"news_blocked":True},"mode":mode}
 
