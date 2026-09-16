@@ -5,6 +5,7 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
+from supabase import create_client
 
 load_dotenv()
 app = Flask(__name__)
@@ -28,22 +29,26 @@ if not CREATOR_SECRET:
           file=sys.stderr)
 
 import trading_engine as eng
+import news_calendar as nc
 
-# --- PERSISTENCE NOTE (read this if data keeps resetting on deploy):
-# BASE_DIR only survives redeploys if "/data" is an actually-mounted
-# persistent volume on your hosting platform (e.g. a Render Disk attached
-# to this service). This is an infrastructure setting, not something fixable
-# in code — if you haven't attached a persistent disk at /data, every deploy
-# WILL wipe local files regardless of anything below. The backup/restore
-# system here is a safety net for that case, not a replacement for it.
+# --- SUPABASE: persistent storage. Data lives in a Supabase Postgres
+# table, entirely outside Render's ephemeral disk, so it survives every
+# redeploy automatically — no backup/restore dance needed anymore.
+SUPABASE_URL = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
+supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
+
+# Local-file fallback dir, used ONLY if Supabase isn't configured yet
+# (e.g. running locally without env vars set). Once SUPABASE_URL and
+# SUPABASE_SERVICE_KEY are set, this path is never touched.
 BASE_DIR = "/data" if os.path.exists("/data") else "."
-print(f"[STARTUP] BASE_DIR={BASE_DIR} "
-      f"({'persistent disk detected' if BASE_DIR == '/data' else 'WARNING: no persistent disk detected at /data — data will NOT survive redeploys unless BASE_DIR is backed by a mounted volume'})",
-      file=sys.stderr)
 
-BACKUP_URL = os.getenv("DATA_BACKUP_URL", "")
-if not BACKUP_URL:
-    print("[WARN] DATA_BACKUP_URL is not set — no off-box backup safety net is active.", file=sys.stderr)
+if supabase:
+    print("[STARTUP] Supabase storage active — data persists across redeploys.", file=sys.stderr)
+else:
+    print("[STARTUP] WARNING: SUPABASE_URL / SUPABASE_SERVICE_KEY not set — "
+          f"falling back to local files under {BASE_DIR}, which will NOT "
+          "survive a redeploy on most hosts.", file=sys.stderr)
 
 MAX_TRACKED = 6
 
@@ -57,66 +62,44 @@ SYSTEM_FILE = os.path.join(BASE_DIR, "system_status.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
 TG_FILE = os.path.join(BASE_DIR, "telegram_users.json")
 TEMP_CHAT_FILE = os.path.join(BASE_DIR, "temp_chats.json")
-
-DATA_FILES = ["auth_users.json","users_data.json","referrals.json","ref_codes.json","journal.json",
-              "tracked_trades.json","system_status.json","user_settings.json","telegram_users.json","temp_chats.json"]
+NEWS_ALERTED_FILE = os.path.join(BASE_DIR, "news_alerted.json")  # event ids already Telegram-alerted, so we don't repeat
 
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","EURCHF","GBPCHF","EURAUD","GBPAUD","EURCAD","GBPCAD","EURNZD","GBPNZD","AUDNZD","AUDCAD","NZDCAD","AUDCHF","NZDJPY","XAUUSD","XAGUSD","XTIUSD","XBRUSD","US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200","BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
 CURRENCY_MAP = {"ZAR":{"symbol":"R","name":"Rand"},"USD":{"symbol":"$","name":"Dollar"},"EUR":{"symbol":"€","name":"Euro"},"GBP":{"symbol":"£","name":"Pound"}}
 
-# ================= STORAGE (JSON files, kept as-is by request) =================
+# ================= STORAGE =================
+# Same function names/signatures as before (load_json/save_json), so
+# every route elsewhere in this file is untouched. Only the storage
+# backend changed: Supabase when configured, local JSON files as a
+# fallback for local development without Supabase env vars set.
+
+def _filename(p):
+    return os.path.basename(p)
 
 def load_json(p, dt=dict):
+    if supabase:
+        try:
+            res = supabase.table("app_data").select("content").eq("filename", _filename(p)).execute()
+            if res.data:
+                return res.data[0]["content"]
+            return {} if dt==dict else []
+        except Exception as e:
+            print(f"[SUPABASE READ FAILED] {_filename(p)}: {e}", file=sys.stderr)
+            return {} if dt==dict else []
     if not os.path.exists(p): return {} if dt==dict else []
     try:
         with open(p,"r") as f: return json.load(f)
     except: return {} if dt==dict else []
 
-def _backup_sync():
-    """Synchronous (blocking) backup so it actually completes before the
-    process can be killed for a redeploy. Failures are logged, not swallowed."""
-    if not BACKUP_URL: return
-    try:
-        all_data = {}
-        for fname in DATA_FILES:
-            fp = os.path.join(BASE_DIR, fname)
-            if os.path.exists(fp):
-                try:
-                    with open(fp,"r") as ff: all_data[fname] = json.load(ff)
-                except Exception as e:
-                    print(f"[BACKUP] Skipped {fname}, unreadable: {e}", file=sys.stderr)
-        r = requests.post(BACKUP_URL, json=all_data, timeout=8)
-        if r.status_code != 200:
-            print(f"[BACKUP FAILED] status={r.status_code} body={r.text[:200]}", file=sys.stderr)
-    except Exception as e:
-        print(f"[BACKUP FAILED] {e}", file=sys.stderr)
-
 def save_json(p, data):
+    if supabase:
+        try:
+            supabase.table("app_data").upsert({"filename": _filename(p), "content": data}).execute()
+        except Exception as e:
+            print(f"[SUPABASE WRITE FAILED] {_filename(p)}: {e}", file=sys.stderr)
+        return
     os.makedirs(os.path.dirname(p) if os.path.dirname(p) else ".", exist_ok=True)
     with open(p,"w") as f: json.dump(data,f,indent=2)
-    _backup_sync()
-
-def remote_restore():
-    if not BACKUP_URL: return False
-    try:
-        if os.path.exists(AUTH_FILE) and os.path.getsize(AUTH_FILE) > 50:
-            d = load_json(AUTH_FILE, dict)
-            if len(d) > 1: return False
-        r = requests.get(BACKUP_URL, timeout=15)
-        if r.status_code!=200: return False
-        remote = r.json()
-        if not remote or not isinstance(remote, dict): return False
-        for fname, content in remote.items():
-            if not fname.endswith(".json"): continue
-            dst = os.path.join(BASE_DIR, fname)
-            try:
-                with open(dst,"w") as f: json.dump(content, f, indent=2)
-            except: pass
-        print("[STARTUP] Restored data from remote backup.", file=sys.stderr)
-        return True
-    except Exception as e:
-        print(f"[STARTUP] Remote restore failed: {e}", file=sys.stderr)
-        return False
 
 # ================= PASSWORD HASHING (salted, with legacy migration) =================
 
@@ -139,14 +122,20 @@ def verify_and_maybe_upgrade_password(auth, email, plain_password):
     return False
 
 def ensure_files():
-    remote_restore()
-    if not os.path.exists(AUTH_FILE):
+    # No remote_restore() needed anymore — Supabase IS the persistent
+    # store, so there's nothing to "restore" on startup; load_json always
+    # reads live from it. This just seeds first-run defaults if the row
+    # doesn't exist yet (empty table on a brand-new Supabase project).
+    # FIXED: checks go through load_json (Supabase-aware) instead of
+    # os.path.exists (local-filesystem-only, meaningless once Supabase
+    # is the active backend — these would never have seeded correctly).
+    if not load_json(AUTH_FILE, dict):
         save_json(AUTH_FILE, {"admin@agent35.com":{"email":"admin@agent35.com","name":"Master Creator","password":hash_pwd("Agent35!"),"account_size":142.0,"total_profit":-1.42,"plan_status":"ACTIVE lifetime - CREATOR","referred_by":"","expires":(datetime.now()+timedelta(days=36500)).isoformat(),"created":datetime.now().isoformat(),"reset_token":None,"reset_token_expires":None,"ref_code":"ADMIN35"}})
-    for fp in [USERS_FILE, REFERRAL_FILE, REF_CODE_FILE, SETTINGS_FILE, TG_FILE, TEMP_CHAT_FILE]:
-        if not os.path.exists(fp): save_json(fp, {})
-    if not os.path.exists(JOURNAL_FILE): save_json(JOURNAL_FILE, [])
-    if not os.path.exists(TRACK_FILE): save_json(TRACK_FILE, {})
-    if not os.path.exists(SYSTEM_FILE): save_json(SYSTEM_FILE, {"last_scan":None,"total_scans":0,"total_signals":0,"system_up_since":datetime.now().isoformat()})
+    for fp in [USERS_FILE, REFERRAL_FILE, REF_CODE_FILE, SETTINGS_FILE, TG_FILE, TEMP_CHAT_FILE, NEWS_ALERTED_FILE]:
+        if not load_json(fp, dict): save_json(fp, {})
+    if not load_json(JOURNAL_FILE, list): save_json(JOURNAL_FILE, [])
+    if not load_json(TRACK_FILE, dict): save_json(TRACK_FILE, {})
+    if not load_json(SYSTEM_FILE, dict): save_json(SYSTEM_FILE, {"last_scan":None,"total_scans":0,"total_signals":0,"system_up_since":datetime.now().isoformat()})
 ensure_files()
 
 def get_user_settings(email):
@@ -161,6 +150,10 @@ def get_user_settings(email):
 def get_currency_symbol(code): return CURRENCY_MAP.get(code, CURRENCY_MAP["ZAR"])["symbol"]
 def save_user_settings(email, new_settings):
     s = load_json(SETTINGS_FILE, dict); s[email] = new_settings; save_json(SETTINGS_FILE, s)
+
+def _safe_dt(iso_str):
+    try: return datetime.fromisoformat(iso_str)
+    except Exception: return None
 
 def generate_ref_code(email):
     code_file = load_json(REF_CODE_FILE, dict)
@@ -368,7 +361,7 @@ def pro_layout(content, active="Dashboard", is_admin=False):
     for s in ["Asia","London","New York"]:
         if s in active_sess: sess_html+=f"<span style='background:#10b981;padding:3px 8px;border-radius:20px;font-size:9px;font-weight:800;color:white;margin-right:4px;animation:pulse 2s infinite'>● {s}</span>"
         else: sess_html+=f"<span style='background:#1e293b;border:1px solid #334155;padding:3px 8px;border-radius:20px;font-size:9px;color:#64748b;margin-right:4px'>{s}</span>"
-    tabs=[("Dashboard","📊"),("Journal","📓"),("All Signals","📡"),("Settings","⚙️"),("Referral","👥"),("Plans","💳"),("Guide","📖")]
+    tabs=[("Dashboard","📊"),("Journal","📓"),("All Signals","📡"),("News","🗓️"),("Settings","⚙️"),("Referral","👥"),("Plans","💳"),("Guide","📖")]
     if is_admin: tabs.append(("Master","👑"))
     nav_html=""
     for t,icon in tabs:
@@ -512,6 +505,7 @@ def settings_page():
 <div class='card'><div class='card-title'>Lot Size</div><input name='lot_size' type='number' step='0.01' value='{s.get('lot_size',0.01)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
 <div class='card'><div class='card-title'>Risk %</div><input name='risk_percent' type='number' step='0.1' value='{s.get('risk_percent',1)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
 <div class='card'><div class='card-title'>Risk Reward</div><select name='rr_ratio' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='1.5' {'selected' if str(s.get('rr_ratio'))=='1.5' else ''}>1:1.5 Scalp</option><option value='2' {'selected' if str(s.get('rr_ratio'))=='2' else ''}>1:2</option><option value='2.5' {'selected' if str(s.get('rr_ratio'))=='2.5' else ''}>1:2.5 Regular</option><option value='3' {'selected' if str(s.get('rr_ratio'))=='3' else ''}>1:3 SMC</option></select></div>
+<div class='card' style='border:2px solid #ef444455'><div class='card-title'>Avoid News</div><select name='trade_news' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='yes' {'selected' if s.get('trade_news',True) else ''}>🟢 Trade through news — no blackout</option><option value='no' {'selected' if not s.get('trade_news',True) else ''}>🔴 Avoid news — block signals + auto-flag tracked trades near high-impact events</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When set to Avoid, new signals are blocked ±15min around real high-impact events for correlated symbols, and you'll get a Telegram alert ~30min before. See the <a href='/news' style='color:#10b981'>News</a> tab for the live calendar.</div></div>
 </div>
 <div class='card' style='margin-top:12px'><div class='card-title'>Watchlist - {len(ALL_SYMBOLS)} Symbols Available - Score 5+ will be sent - Max Tracked {MAX_TRACKED}</div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;max-height:380px;overflow-y:auto;margin-top:10px;padding-right:4px'>{symbols_html}</div></div>
 <button type='submit' class='btn-primary' style='margin-top:16px'>Save Settings - {mode.upper()} Mode</button>
@@ -547,6 +541,55 @@ def dashboard_scan():
 <div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold 5+ sends. Choose: 5=takeable, 6=good, 7=strong, 8+=A+. Tracked {len(tracked)}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
 <table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div>"""
     return pro_layout(content,"All Signals", is_admin=is_admin)
+
+@app.route("/news")
+def news_page():
+    if not session.get("user"): return redirect("/login")
+    email=session.get("user"); is_admin=email=="admin@agent35.com"; user_settings=get_user_settings(email)
+    watched = set(user_settings.get("symbols", []))
+    events = nc.upcoming_high_impact(hours_ahead=72)
+
+    if not nc.JBLANKED_API_KEY:
+        content = f"""<div style='max-width:800px;margin:0 auto;padding:14px'>
+<div class='card'><h2 style='margin:0 0 8px'>🗓️ Economic Calendar — Not Configured</h2>
+<p style='color:#94a3b8;font-size:13px;line-height:1.6'>The real news calendar needs a free JBlanked API key.
+Sign up at <a href='https://www.jblanked.com/api/key/' style='color:#10b981' target='_blank'>jblanked.com/api/key</a>,
+then set <code style='background:#0b1220;padding:2px 6px;border-radius:4px'>JBLANKED_API_KEY</code> as an environment variable
+and redeploy. Until then, no news blackout or alerts will fire.</p>
+</div></div>"""
+        return pro_layout(content, "News", is_admin=is_admin)
+
+    cards = ""
+    if not events:
+        cards = "<div class='card'><p style='color:#64748b;text-align:center;padding:20px'>No high-impact events in the next 72 hours.</p></div>"
+    for e in events:
+        correlated = sorted([s for s in ALL_SYMBOLS if e["currency"] in nc.currencies_for_symbol(s)])
+        watched_hit = [s for s in correlated if s in watched]
+        highlight = "border:1px solid #ef444455;background:linear-gradient(135deg,#1a0f0f,#151e32)" if watched_hit else ""
+        watch_note = f"<div style='margin-top:8px;font-size:11px;color:#fca5a5'>⚠️ Affects {len(watched_hit)} symbol(s) on your watchlist: {', '.join(watched_hit[:8])}{'…' if len(watched_hit)>8 else ''}</div>" if watched_hit else ""
+        cards += f"""<div class='card' style='{highlight}'>
+<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
+<div><span class='pill' style='background:rgba(239,68,68,0.15);color:#ef4444'>{e['currency']} HIGH</span></div>
+<div style='color:#64748b;font-size:11px'>{nc.countdown_str(e)} • {e['time'].strftime('%a %H:%M UTC')}</div>
+</div>
+<h3 style='margin:10px 0 4px;font-size:15px'>{e['name']}</h3>
+<div style='display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;font-size:11px'>
+<div><div style='color:#64748b'>FORECAST</div><div style='font-weight:700'>{e.get('forecast') or '—'}</div></div>
+<div><div style='color:#64748b'>PREVIOUS</div><div style='font-weight:700'>{e.get('previous') or '—'}</div></div>
+<div><div style='color:#64748b'>ACTUAL</div><div style='font-weight:700'>{e.get('actual') or '—'}</div></div>
+</div>
+<div style='margin-top:10px;font-size:11px;color:#64748b'>Correlated: {', '.join(correlated[:10]) if correlated else '—'}{'…' if len(correlated)>10 else ''}</div>
+{watch_note}
+</div>"""
+
+    content = f"""<div style='max-width:900px;margin:0 auto;padding:14px'>
+<h1 style='font-size:20px;font-weight:900;margin:0 0 4px'>🗓️ Economic Calendar</h1>
+<p style='color:#64748b;font-size:12px;margin:0 0 16px'>Real high-impact events, next 72 hours. We show correlated symbols and volatility risk —
+not a directional prediction before the number even prints; that's a guess dressed up as data.
+{'Auto-flagging is ON: with Avoid News enabled in Settings, tracked trades on correlated symbols get flagged and you get alerted ahead of these.' if not user_settings.get('trade_news', True) else 'Avoid News is currently OFF in your settings, so these events will not block signals or flag trades for you.'}</p>
+<div style='display:grid;gap:12px'>{cards}</div>
+</div>"""
+    return pro_layout(content, "News", is_admin=is_admin)
 
 @app.route("/journal")
 def journal_page():
@@ -652,11 +695,11 @@ def guide_page():
 </div></div>
 <div class='card'><h3 style='margin:0 0 8px;font-size:14px'>🎯 One Strategy Explained - All Combined</h3><div style='font-size:12px;color:#cbd5e1;line-height:1.7'>
 <b>We combined 5 old strategies into ONE score 0-10:</b><br>
-- Premium/Discount (Daily bias) + 4H alignment +2-3 pts<br>
-- EMA 5/20 + RSI pullback +2 pts<br>
-- Breakout + BOS +2 pts<br>
-- Order Block (BTC OB fixed) +4 pts<br>
-- FVG +2 pts, Sweep +3 pts, Engulfing/Hammer +3-4 pts<br><br>
+• Premium/Discount (Daily bias) + 4H alignment +2-3 pts<br>
+• EMA 5/20 + RSI pullback +2 pts<br>
+• Breakout + BOS +2 pts<br>
+• Order Block (BTC OB fixed) +4 pts<br>
+• FVG +2 pts, Sweep +3 pts, Engulfing/Hammer +3-4 pts<br><br>
 <b>Total capped 10/10. Threshold 5+ sends.</b><br>
 You choose which to take based on score:<br>
 <span style='background:#ef444422;color:#ef4444;padding:2px 8px;border-radius:20px;font-size:10px'>5/10 ⚡ Takeable - minimum decent</span><br>
@@ -987,6 +1030,92 @@ def pay_submit():
     users[ref_id]={"user":email,"plan":request.form.get("plan","yearly"),"price":request.form.get("price","500"),"ref":request.form.get("ref",""),"status":"pending","created":datetime.now().isoformat()}
     save_json(USERS_FILE, users)
     return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2 style='color:#10b981'>Payment Submitted ✅</h2><p style='color:#94a3b8;font-size:13px'>Ref: {ref_id}<br>Admin will approve within 1 hour.</p><a href='/dashboard' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none;font-weight:700;display:inline-block;margin-top:12px'>Back to Dashboard</a></div></div>","Plans", is_admin=email=="admin@agent35.com")
+
+@app.route("/cron/news-check")
+def cron_news_check():
+    """Call this on a schedule (every 5-10 min) from an external cron —
+    same as /cron/scan. Sends a Telegram heads-up ~30min before any
+    high-impact event, and flags/removes correlated tracked trades if
+    avoid-news is active anywhere in the system.
+
+    IMPORTANT LIMITATION: tracked_trades is one shared list for the whole
+    app (not per-user), same as everywhere else in this system. So "avoid
+    news" here means: if ANY user has it enabled in Settings, correlated
+    trades get flagged/removed for EVERYONE's tracked list, not just that
+    user's. There's no per-user trade isolation to do this more precisely
+    without restructuring tracked_trades to be keyed by user — flag this
+    to your users if it matters for them.
+    """
+    if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
+
+    alerted = load_json(NEWS_ALERTED_FILE, dict)
+    # prune alert records older than 3 days so this doesn't grow forever
+    cutoff = datetime.now() - timedelta(days=3)
+    alerted = {k:v for k,v in alerted.items() if _safe_dt(v) and _safe_dt(v) > cutoff}
+
+    settings_all = load_json(SETTINGS_FILE, dict)
+    avoid_news_active = any(not s.get("trade_news", True) for s in settings_all.values()) if settings_all else False
+
+    bot=os.getenv("TELEGRAM_BOT_TOKEN"); main_chat=os.getenv("TELEGRAM_CHAT_ID")
+    tg_users=load_json(TG_FILE, dict); all_chats=[]
+    if main_chat: all_chats.append(str(main_chat))
+    for data in tg_users.values():
+        cid=str(data.get("chat_id",""))
+        if cid and cid not in all_chats: all_chats.append(cid)
+
+    def broadcast(text):
+        if not (bot and all_chats): return
+        for chat_id in all_chats:
+            try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":text}, timeout=10)
+            except Exception: pass
+
+    ALERT_WINDOW_MIN = 30
+    events = nc.upcoming_high_impact(hours_ahead=2)
+    newly_alerted = []
+
+    for e in events:
+        mins = nc.minutes_until(e)
+        if not (0 <= mins <= ALERT_WINDOW_MIN) or e["id"] in alerted:
+            continue
+
+        correlated = sorted([s for s in ALL_SYMBOLS if e["currency"] in nc.currencies_for_symbol(s)])
+        text=(f"⚠️ HIGH-IMPACT NEWS in {int(mins)}min\n\n"
+              f"{e['currency']} — {e['name']}\n"
+              f"Forecast: {e.get('forecast') or '—'} | Previous: {e.get('previous') or '—'}\n\n"
+              f"Correlated: {', '.join(correlated[:10])}{'…' if len(correlated)>10 else ''}\n\n"
+              f"Expect volatility and spread widening.")
+        broadcast(text)
+        alerted[e["id"]] = datetime.now().isoformat()
+        newly_alerted.append(e["name"])
+
+        if avoid_news_active:
+            tracked = load_json(TRACK_FILE, dict)
+            closed = []
+            for sym in list(tracked.keys()):
+                if sym in correlated:
+                    entry = tracked[sym]
+                    journal = load_json(JOURNAL_FILE, list)
+                    journal.append({
+                        "time": datetime.now().strftime("%m-%d %H:%M"),
+                        "symbol": sym, "status": "NEWS CLOSE",
+                        "result": f"Auto-flagged ahead of {e['currency']} {e['name']}",
+                        "pnl": 0, "entry": entry.get("entry"),
+                        "date": datetime.now().strftime("%Y-%m-%d"),
+                    })
+                    save_json(JOURNAL_FILE, journal[-500:])
+                    del tracked[sym]
+                    closed.append(sym)
+            if closed:
+                save_json(TRACK_FILE, tracked)
+                broadcast(
+                    f"🚨 Avoid-News active: flagged and removed from tracking ahead of "
+                    f"{e['currency']} {e['name']}: {', '.join(closed)}\n\n"
+                    f"⚠️ This bot doesn't hold live broker positions — if you're actually "
+                    f"in these trades on your platform, close or hedge them yourself before the news."
+                )
+
+    save_json(NEWS_ALERTED_FILE, alerted)
+    return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "avoid_news_active": avoid_news_active})
 
 @app.route("/cron/scan")
 def cron_scan():
