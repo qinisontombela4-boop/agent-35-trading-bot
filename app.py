@@ -51,6 +51,8 @@ else:
           "survive a redeploy on most hosts.", file=sys.stderr)
 
 MAX_TRACKED = 6
+MAX_SIGNALS_PER_DAY = 20  # global cap across all users/cron sends, resets via /cron/daily-reset
+TRADE_EXPIRY_HOURS = {"scalp": 6, "regular": 48}  # per-mode max time a tracked trade can sit unresolved
 
 AUTH_FILE = os.path.join(BASE_DIR, "auth_users.json")
 USERS_FILE = os.path.join(BASE_DIR, "users_data.json")
@@ -63,6 +65,7 @@ SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
 TG_FILE = os.path.join(BASE_DIR, "telegram_users.json")
 TEMP_CHAT_FILE = os.path.join(BASE_DIR, "temp_chats.json")
 NEWS_ALERTED_FILE = os.path.join(BASE_DIR, "news_alerted.json")  # event ids already Telegram-alerted, so we don't repeat
+DAILY_COUNT_FILE = os.path.join(BASE_DIR, "daily_signal_count.json")
 
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","EURCHF","GBPCHF","EURAUD","GBPAUD","EURCAD","GBPCAD","EURNZD","GBPNZD","AUDNZD","AUDCAD","NZDCAD","AUDCHF","NZDJPY","XAUUSD","XAGUSD","XTIUSD","XBRUSD","US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200","BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
 CURRENCY_MAP = {"ZAR":{"symbol":"R","name":"Rand"},"USD":{"symbol":"$","name":"Dollar"},"EUR":{"symbol":"€","name":"Euro"},"GBP":{"symbol":"£","name":"Pound"}}
@@ -133,6 +136,7 @@ def ensure_files():
         save_json(AUTH_FILE, {"admin@agent35.com":{"email":"admin@agent35.com","name":"Master Creator","password":hash_pwd("Agent35!"),"account_size":142.0,"total_profit":-1.42,"plan_status":"ACTIVE lifetime - CREATOR","referred_by":"","expires":(datetime.now()+timedelta(days=36500)).isoformat(),"created":datetime.now().isoformat(),"reset_token":None,"reset_token_expires":None,"ref_code":"ADMIN35"}})
     for fp in [USERS_FILE, REFERRAL_FILE, REF_CODE_FILE, SETTINGS_FILE, TG_FILE, TEMP_CHAT_FILE, NEWS_ALERTED_FILE]:
         if not load_json(fp, dict): save_json(fp, {})
+    if not load_json(DAILY_COUNT_FILE, dict): save_json(DAILY_COUNT_FILE, {"date": datetime.now().strftime("%Y-%m-%d"), "count": 0})
     if not load_json(JOURNAL_FILE, list): save_json(JOURNAL_FILE, [])
     if not load_json(TRACK_FILE, dict): save_json(TRACK_FILE, {})
     if not load_json(SYSTEM_FILE, dict): save_json(SYSTEM_FILE, {"last_scan":None,"total_scans":0,"total_signals":0,"system_up_since":datetime.now().isoformat()})
@@ -154,6 +158,37 @@ def save_user_settings(email, new_settings):
 def _safe_dt(iso_str):
     try: return datetime.fromisoformat(iso_str)
     except Exception: return None
+
+def _all_telegram_chats():
+    bot=os.getenv("TELEGRAM_BOT_TOKEN"); main_chat=os.getenv("TELEGRAM_CHAT_ID")
+    tg_users=load_json(TG_FILE, dict); all_chats=[]
+    if main_chat: all_chats.append(str(main_chat))
+    for data in tg_users.values():
+        cid=str(data.get("chat_id",""))
+        if cid and cid not in all_chats: all_chats.append(cid)
+    return bot, all_chats
+
+def broadcast_telegram(text):
+    bot, chats = _all_telegram_chats()
+    if not (bot and chats): return
+    for chat_id in chats:
+        try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":text}, timeout=10)
+        except Exception: pass
+
+def get_daily_signal_count():
+    d = load_json(DAILY_COUNT_FILE, dict)
+    today = datetime.now().strftime("%Y-%m-%d")
+    if d.get("date") != today:
+        return 0  # previous day's count — self-heals even if the reset cron missed a run
+    return d.get("count", 0)
+
+def increment_daily_signal_count():
+    d = load_json(DAILY_COUNT_FILE, dict)
+    today = datetime.now().strftime("%Y-%m-%d")
+    if d.get("date") != today:
+        d = {"date": today, "count": 0}
+    d["count"] = d.get("count", 0) + 1
+    save_json(DAILY_COUNT_FILE, d)
 
 def generate_ref_code(email):
     code_file = load_json(REF_CODE_FILE, dict)
@@ -782,6 +817,8 @@ def send_signal():
     tracked=load_json(TRACK_FILE, dict)
     if len(tracked)>=MAX_TRACKED and sym not in tracked:
         return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Track Limit {MAX_TRACKED} Reached</h2><p style='color:#94a3b8'>Tracked: {', '.join(tracked.keys())}<br>Clear to allow new</p><div style='display:flex;gap:8px;justify-content:center;margin-top:16px'><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Back</a><a href='/clear-tracked' style='background:#ef4444;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Clear All</a></div></div></div>","All Signals", is_admin=email=="admin@agent35.com")
+    if get_daily_signal_count() >= MAX_SIGNALS_PER_DAY:
+        return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Daily Limit Reached</h2><p style='color:#94a3b8'>{MAX_SIGNALS_PER_DAY} signals already sent today. Resets at midnight (or via /cron/daily-reset).</p><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none;display:inline-block;margin-top:12px'>Back</a></div></div>","All Signals", is_admin=email=="admin@agent35.com")
     try:
         r=cached_analysis(sym, user_set); entry=r.get('entry',0)
         if not entry or float(entry)==0: return pro_layout(f"<div class='card' style='max-width:600px;margin:40px auto'><h3>No entry for {sym}</h3><pre style='font-size:10px'>{r}</pre></div>","All Signals", is_admin=email=="admin@agent35.com")
@@ -790,6 +827,7 @@ def send_signal():
         sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
         res=send_telegram_pro(sym, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''))
         tracked[sym]={"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode}; save_json(TRACK_FILE, tracked)
+        increment_daily_signal_count()
         msg=f"Sent {sym} Score {r.get('score')}/10 {entry} SL {sl} TP {tp} Mode {mode.upper()}"
     except Exception as e: res={"error":str(e)}; msg=f"Error {sym}: {e}"
     return pro_layout(f"<div style='max-width:700px;margin:40px auto'><div class='card'><h2 style='font-size:16px'>{msg}</h2><p style='font-size:11px;background:#0b1220;padding:10px;border-radius:8px;word-break:break-all;border:1px solid #1e293b'>{str(res)[:2000]}</p><div style='display:flex;gap:8px;margin-top:12px'><a href='/all-signals' style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700'>Back to Signals</a><a href='/dashboard' style='background:#1e293b;border:1px solid #334155;color:white;padding:10px 16px;border-radius:10px;text-decoration:none'>Dashboard</a></div></div></div>","All Signals", is_admin=email=="admin@agent35.com")
@@ -1056,19 +1094,6 @@ def cron_news_check():
     settings_all = load_json(SETTINGS_FILE, dict)
     avoid_news_active = any(not s.get("trade_news", True) for s in settings_all.values()) if settings_all else False
 
-    bot=os.getenv("TELEGRAM_BOT_TOKEN"); main_chat=os.getenv("TELEGRAM_CHAT_ID")
-    tg_users=load_json(TG_FILE, dict); all_chats=[]
-    if main_chat: all_chats.append(str(main_chat))
-    for data in tg_users.values():
-        cid=str(data.get("chat_id",""))
-        if cid and cid not in all_chats: all_chats.append(cid)
-
-    def broadcast(text):
-        if not (bot and all_chats): return
-        for chat_id in all_chats:
-            try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":text}, timeout=10)
-            except Exception: pass
-
     ALERT_WINDOW_MIN = 30
     events = nc.upcoming_high_impact(hours_ahead=2)
     newly_alerted = []
@@ -1084,7 +1109,7 @@ def cron_news_check():
               f"Forecast: {e.get('forecast') or '—'} | Previous: {e.get('previous') or '—'}\n\n"
               f"Correlated: {', '.join(correlated[:10])}{'…' if len(correlated)>10 else ''}\n\n"
               f"Expect volatility and spread widening.")
-        broadcast(text)
+        broadcast_telegram(text)
         alerted[e["id"]] = datetime.now().isoformat()
         newly_alerted.append(e["name"])
 
@@ -1107,7 +1132,7 @@ def cron_news_check():
                     closed.append(sym)
             if closed:
                 save_json(TRACK_FILE, tracked)
-                broadcast(
+                broadcast_telegram(
                     f"🚨 Avoid-News active: flagged and removed from tracking ahead of "
                     f"{e['currency']} {e['name']}: {', '.join(closed)}\n\n"
                     f"⚠️ This bot doesn't hold live broker positions — if you're actually "
@@ -1116,6 +1141,111 @@ def cron_news_check():
 
     save_json(NEWS_ALERTED_FILE, alerted)
     return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "avoid_news_active": avoid_news_active})
+
+@app.route("/cron/track-check")
+def cron_track_check():
+    """Checks each tracked (sent) signal against the latest price to see if
+    it's hit its SL or TP yet, and logs the outcome to the journal
+    automatically. Call every 5-15 min from an external cron.
+
+    LIMITATION: this uses the latest 5-minute candle's CLOSE as a stand-in
+    for live price, checked periodically — not tick-level/live bid-ask. If
+    price gapped past BOTH the SL and TP between two checks, there's no way
+    to know which was actually hit first from candle closes alone; this
+    picks whichever condition is met at the time it checks, which could
+    occasionally misjudge a trade that touched the other level first
+    intra-candle. Good enough for journaling/stats, not a substitute for
+    checking your actual broker fill.
+    """
+    if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
+    tracked = load_json(TRACK_FILE, dict)
+    now = datetime.now()
+    resolved = []
+
+    for sym in list(tracked.keys()):
+        entry = tracked[sym]
+        try:
+            sl = float(entry.get("sl")); tp = float(entry.get("tp"))
+            bias = entry.get("bias",""); risk_amt = float(entry.get("risk_amt",0) or 0); rr = float(entry.get("rr",2.5) or 2.5)
+        except (TypeError, ValueError):
+            continue
+        candles, err = eng.get_values(sym, "5min", 2)
+        if not candles:
+            continue
+        current = candles[-1]["close"]
+        is_bull = "BULLISH" in bias.upper()
+
+        outcome = None
+        if is_bull:
+            if current >= tp: outcome = "WIN"
+            elif current <= sl: outcome = "LOSS"
+        else:
+            if current <= tp: outcome = "WIN"
+            elif current >= sl: outcome = "LOSS"
+
+        if outcome:
+            pnl = round(risk_amt * rr, 2) if outcome == "WIN" else round(-risk_amt, 2)
+            journal = load_json(JOURNAL_FILE, list)
+            journal.append({
+                "time": now.strftime("%m-%d %H:%M"), "symbol": sym,
+                "status": outcome, "result": f"Auto-detected {outcome} @ {current}",
+                "pnl": pnl, "entry": entry.get("entry"), "sl": sl, "tp": tp,
+                "date": now.strftime("%Y-%m-%d"), "currency": entry.get("currency","ZAR"),
+            })
+            save_json(JOURNAL_FILE, journal[-500:])
+            del tracked[sym]
+            resolved.append({"symbol": sym, "outcome": outcome, "pnl": pnl})
+            emoji = "✅" if outcome=="WIN" else "❌"
+            broadcast_telegram(f"{emoji} {sym} {outcome} — closed @ {current}, PnL {pnl:+.2f}")
+
+    if resolved:
+        save_json(TRACK_FILE, tracked)
+    return jsonify({"resolved": resolved, "still_open": list(tracked.keys())})
+
+@app.route("/cron/check-expiry")
+def cron_check_expiry():
+    """Clears tracked trades that have sat open too long without hitting
+    SL or TP (see /cron/track-check for that), so they don't permanently
+    occupy a slot in the shared 6-max tracked limit. Expiry window is
+    mode-aware: scalp trades expire faster than regular/swing ones."""
+    if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
+    tracked = load_json(TRACK_FILE, dict)
+    now = datetime.now()
+    expired = []
+
+    for sym in list(tracked.keys()):
+        entry = tracked[sym]
+        opened = _safe_dt(entry.get("time",""))
+        mode = entry.get("mode","regular")
+        max_age_hours = TRADE_EXPIRY_HOURS.get(mode, 24)
+        if opened is None or (now - opened).total_seconds() > max_age_hours * 3600:
+            journal = load_json(JOURNAL_FILE, list)
+            journal.append({
+                "time": now.strftime("%m-%d %H:%M"), "symbol": sym, "status": "EXPIRED",
+                "result": f"Auto-expired after {max_age_hours}h with no SL/TP hit",
+                "pnl": 0, "entry": entry.get("entry"), "date": now.strftime("%Y-%m-%d"),
+            })
+            save_json(JOURNAL_FILE, journal[-500:])
+            del tracked[sym]
+            expired.append(sym)
+
+    if expired:
+        save_json(TRACK_FILE, tracked)
+        broadcast_telegram(f"⏳ Auto-expired (no SL/TP hit in time): {', '.join(expired)}")
+    return jsonify({"expired": expired, "still_tracked": list(tracked.keys())})
+
+@app.route("/cron/daily-reset")
+def cron_daily_reset():
+    """Resets the daily signal-send counter. Call once a day (e.g. 00:05 UTC).
+    Note: get_daily_signal_count() already self-heals on date change even if
+    this never fires, so a missed run isn't catastrophic — but running it
+    keeps the stored counter file tidy and gives you a clean daily total."""
+    if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
+    today = datetime.now().strftime("%Y-%m-%d")
+    prev = load_json(DAILY_COUNT_FILE, dict)
+    prev_count = prev.get("count", 0) if prev.get("date") == today else 0
+    save_json(DAILY_COUNT_FILE, {"date": today, "count": 0})
+    return jsonify({"reset": True, "date": today, "previous_count": prev_count, "limit": MAX_SIGNALS_PER_DAY})
 
 @app.route("/cron/scan")
 def cron_scan():
@@ -1133,9 +1263,11 @@ def cron_scan():
         except: pass
     tracked=cleaned
     if len(tracked)>=MAX_TRACKED: return jsonify({"error":f"Limit {MAX_TRACKED}","tracked":list(tracked.keys())})
+    if get_daily_signal_count()>=MAX_SIGNALS_PER_DAY: return jsonify({"error":f"Daily limit {MAX_SIGNALS_PER_DAY} reached","sent_today":get_daily_signal_count()})
     sent=[]; skipped=[]
     for sym in list(all_syms)[:20]:
         if len(tracked)>=MAX_TRACKED and sym not in tracked: skipped.append(f"{sym} LIMIT"); continue
+        if get_daily_signal_count()>=MAX_SIGNALS_PER_DAY: skipped.append(f"{sym} DAILY_LIMIT"); break
         try:
             sample_settings = next(iter(settings_all.values())) if settings_all else {"trade_news":True,"risk_percent":1,"rr_ratio":2.5,"lot_size":0.01,"leverage":"1:500","account_size":142,"currency":"ZAR","trading_mode":"regular"}
             r=cached_analysis(sym, sample_settings)
@@ -1144,6 +1276,7 @@ def cron_scan():
             sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), 142, 0.01, "1:500", 1, rr, 0.7, 0.35, 2.0, 10.0)
             curr_sym=get_currency_symbol(sample_settings.get("currency","ZAR"))
             send_telegram_pro(sym, r.get('score',7), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, 1, 0.01, "1:500", 142, r.get('confluence',''), curr_sym, r.get('mode','regular'), r.get('rationale',''))
+            increment_daily_signal_count()
             tracked[sym]={"time":now.isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score')}
             save_json(TRACK_FILE, tracked); sent.append(sym)
             if len(tracked)>=MAX_TRACKED: break
