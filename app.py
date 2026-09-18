@@ -50,16 +50,18 @@ else:
           f"falling back to local files under {BASE_DIR}, which will NOT "
           "survive a redeploy on most hosts.", file=sys.stderr)
 
-MAX_TRACKED = 6
+MAX_TRACKED = 6  # now PER-USER: how many taken/tracked trades one user can have open at once
 MAX_SIGNALS_PER_DAY = 20  # global cap across all users/cron sends, resets via /cron/daily-reset
-TRADE_EXPIRY_HOURS = {"scalp": 6, "regular": 48}  # per-mode max time a tracked trade can sit unresolved
+TRADE_EXPIRY_HOURS = {"scalp": 6, "regular": 48}  # per-mode max time a TAKEN trade can sit unresolved
+PENDING_EXPIRY_HOURS = 3  # how long an un-actioned (not yet TOOK/SKIP'd) signal stays valid
 
 AUTH_FILE = os.path.join(BASE_DIR, "auth_users.json")
 USERS_FILE = os.path.join(BASE_DIR, "users_data.json")
 REFERRAL_FILE = os.path.join(BASE_DIR, "referrals.json")
 REF_CODE_FILE = os.path.join(BASE_DIR, "ref_codes.json")
 JOURNAL_FILE = os.path.join(BASE_DIR, "journal.json")
-TRACK_FILE = os.path.join(BASE_DIR, "tracked_trades.json")
+TRACK_FILE = os.path.join(BASE_DIR, "tracked_trades.json")  # now keyed by signal_id, each entry owned by one user's email
+PENDING_FILE = os.path.join(BASE_DIR, "pending_signals.json")  # sent-but-not-yet-TOOK'd signals, keyed by signal_id
 SYSTEM_FILE = os.path.join(BASE_DIR, "system_status.json")
 SETTINGS_FILE = os.path.join(BASE_DIR, "user_settings.json")
 TG_FILE = os.path.join(BASE_DIR, "telegram_users.json")
@@ -134,7 +136,7 @@ def ensure_files():
     # is the active backend — these would never have seeded correctly).
     if not load_json(AUTH_FILE, dict):
         save_json(AUTH_FILE, {"admin@agent35.com":{"email":"admin@agent35.com","name":"Master Creator","password":hash_pwd("Agent35!"),"account_size":142.0,"total_profit":-1.42,"plan_status":"ACTIVE lifetime - CREATOR","referred_by":"","expires":(datetime.now()+timedelta(days=36500)).isoformat(),"created":datetime.now().isoformat(),"reset_token":None,"reset_token_expires":None,"ref_code":"ADMIN35"}})
-    for fp in [USERS_FILE, REFERRAL_FILE, REF_CODE_FILE, SETTINGS_FILE, TG_FILE, TEMP_CHAT_FILE, NEWS_ALERTED_FILE]:
+    for fp in [USERS_FILE, REFERRAL_FILE, REF_CODE_FILE, SETTINGS_FILE, TG_FILE, TEMP_CHAT_FILE, NEWS_ALERTED_FILE, PENDING_FILE]:
         if not load_json(fp, dict): save_json(fp, {})
     if not load_json(DAILY_COUNT_FILE, dict): save_json(DAILY_COUNT_FILE, {"date": datetime.now().strftime("%Y-%m-%d"), "count": 0})
     if not load_json(JOURNAL_FILE, list): save_json(JOURNAL_FILE, [])
@@ -189,6 +191,75 @@ def increment_daily_signal_count():
         d = {"date": today, "count": 0}
     d["count"] = d.get("count", 0) + 1
     save_json(DAILY_COUNT_FILE, d)
+
+# ================= PER-USER SIGNAL DELIVERY =================
+# A "pending" signal is one that's been sent to a specific user's Telegram
+# but not yet acted on. It only becomes a real tracked trade (and therefore
+# only starts generating SL/TP outcome notifications) once that SPECIFIC
+# user presses "TOOK ENTRY" on THEIR OWN message. Nobody else sees it,
+# nobody else's press affects it, and pressing SKIP (or letting it expire)
+# means it's simply discarded for that user — nothing gets tracked.
+
+def email_for_chat_id(chat_id):
+    tg_users = load_json(TG_FILE, dict)
+    for email, data in tg_users.items():
+        if str(data.get("chat_id","")) == str(chat_id):
+            return email
+    return None
+
+def get_user_chat_id(email):
+    tg_users = load_json(TG_FILE, dict)
+    return tg_users.get(email, {}).get("chat_id")
+
+def user_tracked_count(email):
+    tracked = load_json(TRACK_FILE, dict)
+    return sum(1 for v in tracked.values() if v.get("email")==email)
+
+def generate_signal_id():
+    return secrets.token_urlsafe(6)
+
+def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings):
+    """Sends one signal to one user's Telegram, and stores a pending record
+    so the webhook can find it again when they press a button. Returns
+    (ok: bool, info: dict) — info holds either the signal_id+telegram result
+    or an error reason (e.g. daily cap reached, no valid entry)."""
+    entry = r.get('entry', 0)
+    if not entry or float(entry) == 0:
+        return False, {"error": "no entry price"}
+    if get_daily_signal_count() >= MAX_SIGNALS_PER_DAY:
+        return False, {"error": "daily signal cap reached"}
+
+    rr = user_settings.get('rr_ratio', 2.5); risk_percent = user_settings.get('risk_percent', 1)
+    lot = user_settings.get('lot_size', 0.01); lev = user_settings.get('leverage', '1:500')
+    acc = user_settings.get('account_size', 142); curr_sym = get_currency_symbol(user_settings.get("currency","ZAR"))
+    mode = user_settings.get("trading_mode", "regular")
+    sl, tp, sl_dist, tp_dist, risk_amt = calculate_dynamic_sl_tp(symbol, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
+
+    signal_id = generate_signal_id()
+    res = send_telegram_pro(chat_id, signal_id, symbol, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''))
+    if isinstance(res, dict) and res.get("error"):
+        return False, {"error": res["error"]}
+
+    pending = load_json(PENDING_FILE, dict)
+    pending[signal_id] = {
+        "email": email, "chat_id": chat_id, "symbol": symbol,
+        "bias": r.get('bias'), "score": r.get('score'), "entry": entry,
+        "sl": sl, "tp": tp, "risk_amt": risk_amt, "rr": rr,
+        "currency": user_settings.get("currency","ZAR"), "mode": mode,
+        "sent_at": datetime.now().isoformat(),
+    }
+    save_json(PENDING_FILE, pending)
+    increment_daily_signal_count()
+    return True, {"signal_id": signal_id, "telegram": res}
+
+def user_has_open_or_pending(email, symbol):
+    tracked = load_json(TRACK_FILE, dict)
+    if any(v.get("email")==email and v.get("symbol")==symbol for v in tracked.values()):
+        return True
+    pending = load_json(PENDING_FILE, dict)
+    if any(v.get("email")==email and v.get("symbol")==symbol for v in pending.values()):
+        return True
+    return False
 
 def generate_ref_code(email):
     code_file = load_json(REF_CODE_FILE, dict)
@@ -267,30 +338,29 @@ def calculate_dynamic_sl_tp(symbol, entry, bias, account_size, lot_size, leverag
             sl=entry+sl_dist if is_sell else entry-sl_dist; tp=entry-tp_dist if is_sell else entry+tp_dist
             return round(sl,dp),round(tp,dp),round(sl_pips,1),round(tp_pips,1),risk_amount
 
-def send_telegram_pro(symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale=""):
+def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale=""):
+    """FIXED: now sends to ONE specific chat_id (the user who's actually
+    watching this symbol), not broadcast to every linked chat. callback_data
+    carries the unique signal_id so the webhook can attribute TOOK/SKIP to
+    exactly this pending signal and its owner, not just a bare symbol name."""
     entry_f=float(entry)
     if entry_f==0: return {"error":"No price"}
+    bot=os.getenv("TELEGRAM_BOT_TOKEN")
+    if not bot or not chat_id: return {"error":"no bot/chat"}
     signal_type="BUY" if "BULLISH" in bias.upper() else "SELL"
     dp = eng.price_decimals(symbol)
     entry_fmt=f"{entry_f:.{dp}f}"; sl_fmt=f"{float(sl):.{dp}f}"; tp_fmt=f"{float(tp):.{dp}f}"
-    bot=os.getenv("TELEGRAM_BOT_TOKEN"); main_chat=os.getenv("TELEGRAM_CHAT_ID")
-    tg_users=load_json(TG_FILE, dict); all_chats=[]
-    if main_chat: all_chats.append(str(main_chat))
-    for data in tg_users.values():
-        cid=str(data.get("chat_id",""))
-        if cid and cid not in all_chats: all_chats.append(cid)
-    if not bot or not all_chats: return {"error":"no bot/chats"}
     sast_now=(datetime.utcnow()+timedelta(hours=2)).strftime("%H:%M SAST")
     mode_emoji = "⚡" if mode_name=="scalp" else "🎯"
     strength = "🔥 A+" if score>=8 else "✅ Strong" if score>=7 else "👍 Good" if score>=6 else "⚡ Takeable"
     rationale_line = f"\n\n💡 {rationale}" if rationale else ""
     text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_percent}%){rationale_line}\n\n🔍 {confluence_text}\n\n⏰ {sast_now}"
-    keyboard={"inline_keyboard": [[{"text":"✅ TOOK ENTRY","callback_data":f"TOOK_{symbol}_{entry_fmt}"},{"text":"❌ SKIP","callback_data":f"SKIP_{symbol}"}],[{"text":"📊 Journal","url":"https://agent-35-trading-bot.onrender.com/journal"}]]}
-    results=[]
-    for chat_id in all_chats:
-        try: r=requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":text,"reply_markup":keyboard}, timeout=10); results.append(r.json())
-        except Exception as e: results.append({"error":str(e)})
-    return results
+    keyboard={"inline_keyboard": [[{"text":"✅ TOOK ENTRY","callback_data":f"TOOK_{signal_id}"},{"text":"❌ SKIP","callback_data":f"SKIP_{signal_id}"}],[{"text":"📊 Journal","url":"https://agent-35-trading-bot.onrender.com/journal"}]]}
+    try:
+        r=requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":text,"reply_markup":keyboard}, timeout=10)
+        return r.json()
+    except Exception as e:
+        return {"error":str(e)}
 
 def get_active_sessions():
     utc_hour = datetime.utcnow().hour
@@ -485,8 +555,11 @@ def home(): return redirect("/dashboard") if session.get("user") else redirect("
 @app.route("/dashboard")
 def dashboard():
     if not session.get("user"): return redirect("/login")
-    email=session.get("user"); journal=load_json(JOURNAL_FILE, list); user_settings=get_user_settings(email)
-    tg_users=load_json(TG_FILE, dict); tracked=load_json(TRACK_FILE, dict)
+    email=session.get("user"); user_settings=get_user_settings(email)
+    # FIXED: filtered to THIS user's own entries — dashboard used to show
+    # the whole system's combined journal/stats to every user.
+    journal=[j for j in load_json(JOURNAL_FILE, list) if j.get("email")==email]
+    tg_users=load_json(TG_FILE, dict); tracked_count=user_tracked_count(email)
     is_admin=email=="admin@agent35.com"; ref_count=get_ref_count_and_auto_upgrade(email)
     stats=calculate_pnl_stats(journal); curr_sym=get_currency_symbol(user_settings.get("currency","ZAR"))
     mode=user_settings.get("trading_mode","regular")
@@ -504,9 +577,9 @@ def dashboard():
     content=f"""
 <div class='main'>
 <div class='card'><div class='card-title'>Total Profit & Loss</div><div class='card-value' style='color:{pnl_color}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0b1220;border-radius:10px;padding:10px;margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px'><div><div style='font-size:9px;color:#64748b'>TODAY</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['daily']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>WEEK</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['weekly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>MONTH</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['monthly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>YEAR</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div class='card-sub'>{mode_badge}<br>Score: 5=takeable, 6=good, 7=strong, 8+=A+</div></div>
-<div class='card'><div class='card-title'>Performance</div><div class='card-value'>{stats['total_trades']} Trades • {stats['win_rate']}% WR</div><div class='card-sub'>✅ Wins: {stats['wins']} ❌ Losses: {stats['losses']} ➖ BE: {stats['be']}<br><br>Telegram: {tg_status}<br>Referrals: {ref_count}/10 free lifetime<br>Tracked: {len(tracked)}/{MAX_TRACKED} active (limit 6)</div></div>
+<div class='card'><div class='card-title'>Performance</div><div class='card-value'>{stats['total_trades']} Trades • {stats['win_rate']}% WR</div><div class='card-sub'>✅ Wins: {stats['wins']} ❌ Losses: {stats['losses']} ➖ BE: {stats['be']}<br><br>Telegram: {tg_status}<br>Referrals: {ref_count}/10 free lifetime<br>Tracked: {tracked_count}/{MAX_TRACKED} active (limit 6)</div></div>
 <div class='card'><div class='card-title'>Account Overview</div><div class='card-value'>{curr_sym}{user_settings.get('account_size',142)}</div><div class='card-sub'>Lot Size: {user_settings.get('lot_size',0.01)} • Lev {user_settings.get('leverage','1:500')}<br>Risk: {user_settings.get('risk_percent',1)}% • RR 1:{user_settings.get('rr_ratio',2.5)}<br>Currency: {user_settings.get('currency','ZAR')} {curr_sym}<br>Mode: {mode.upper()} - All strategies as ONE<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings →</a></div></div>
-<div class='card'><div class='card-title'>Quick Actions</div><div style='display:flex;flex-direction:column;gap:2px;margin-top:8px'><a href='/dashboard-scan' onclick="this.querySelector('button').innerHTML='⏳ Scanning...'; this.querySelector('button').disabled=true;"><button class='btn-primary'>🔍 Scan Market Now</button></a><a href='/test-telegram' class='btn-secondary'>📤 Test Telegram</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram</a><a href='/export-journal' class='btn-secondary'>📥 Export Journal CSV</a><a href='/clear-tracked' class='btn-secondary' style='color:#ef4444'>Clear Tracked ({len(tracked)}/{MAX_TRACKED})</a>{admin_link}</div></div>
+<div class='card'><div class='card-title'>Quick Actions</div><div style='display:flex;flex-direction:column;gap:2px;margin-top:8px'><a href='/dashboard-scan' onclick="this.querySelector('button').innerHTML='⏳ Scanning...'; this.querySelector('button').disabled=true;"><button class='btn-primary'>🔍 Scan Market Now</button></a><a href='/test-telegram' class='btn-secondary'>📤 Test Telegram</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram</a><a href='/export-journal' class='btn-secondary'>📥 Export Journal CSV</a><a href='/clear-tracked' class='btn-secondary' style='color:#ef4444'>Clear Tracked ({tracked_count}/{MAX_TRACKED})</a>{admin_link}</div></div>
 </div>
 <div style='max-width:1600px;margin:0 auto;padding:0 14px 14px'><div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px;margin-bottom:12px'><h3 style='margin:0;font-size:14px;font-weight:800'>Recent Activity - {mode_badge}</h3><span style='font-size:11px;color:#64748b;background:#0b1220;padding:5px 10px;border-radius:20px'>{stats['wins']}W / {stats['losses']}L • {stats['win_rate']}% WR</span></div><table><tr><th>Time</th><th>Symbol</th><th>Status</th><th>Result</th><th>PnL</th></tr>{rows}</table></div></div>
 """
@@ -553,7 +626,12 @@ def dashboard_scan():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"; user_settings=get_user_settings(email)
     symbols_to_scan=user_settings.get("symbols", ALL_SYMBOLS[:12]); mode=user_settings.get("trading_mode","regular")
-    tracked=load_json(TRACK_FILE, dict)
+    # FIXED: was checking `s not in tracked` against a dict now keyed by
+    # signal_id (never equal to a symbol string), so this always evaluated
+    # true, AND len(tracked) was the whole system's count, not this user's —
+    # meaning any user's page could show "Limit reached" for everyone,
+    # everywhere, based on strangers' tracked trades. Now scoped to email.
+    my_tracked_count = user_tracked_count(email)
     rows=""
     for s in symbols_to_scan[:30]:
         try:
@@ -561,7 +639,8 @@ def dashboard_scan():
             entry_display=f"{float(entry):.{eng.price_decimals(s)}f}" if entry else "0"
             color="#10b981" if score>=7 else "#f59e0b" if score>=5 else "#ef4444"
             if r.get('signal'):
-                if len(tracked)>=MAX_TRACKED and s not in tracked: signal_btn=f"<span class='pill' style='background:rgba(239,68,68,0.15);color:#ef4444'>Limit {MAX_TRACKED}</span>"
+                if my_tracked_count>=MAX_TRACKED and not user_has_open_or_pending(email, s): signal_btn=f"<span class='pill' style='background:rgba(239,68,68,0.15);color:#ef4444'>Limit {MAX_TRACKED}</span>"
+                elif user_has_open_or_pending(email, s): signal_btn=f"<span class='pill' style='background:rgba(245,158,11,0.15);color:#f59e0b'>Already sent</span>"
                 else: signal_btn=f"<a href='/send-signal?symbol={s}' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:11px'>Send {score}/10</a>"
             else: signal_btn=f"<span style='color:#64748b;font-size:10px'>{r.get('reason','')[:44]}</span>"
             rows+=f"<tr><td style='font-weight:700'>{s}<div style='font-size:9px;color:#64748b'>{entry_display}</div></td><td><span class='pill' style='background:{color}22;color:{color};border:1px solid {color}44'>{score}/10</span></td><td>{bias}</td><td>{'✅ SEND' if r.get('signal') else '⏳ Wait'}</td><td>{signal_btn}</td></tr>"
@@ -573,7 +652,7 @@ def dashboard_scan():
                 rows+=f"<tr><td>{s}</td><td colspan=4 style='color:#ef4444;font-size:10px'>{err_msg[:50]}</td></tr>"
     mode_badge = "⚡ SCALP MODE" if mode=="scalp" else "🎯 REGULAR MODE"
     content=f"""<div style='max-width:1600px;margin:0 auto;padding:14px'>
-<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold 5+ sends. Choose: 5=takeable, 6=good, 7=strong, 8+=A+. Tracked {len(tracked)}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
+<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold 5+ sends. Choose: 5=takeable, 6=good, 7=strong, 8+=A+. Your tracked: {my_tracked_count}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
 <table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div>"""
     return pro_layout(content,"All Signals", is_admin=is_admin)
 
@@ -629,7 +708,10 @@ not a directional prediction before the number even prints; that's a guess dress
 @app.route("/journal")
 def journal_page():
     if not session.get("user"): return redirect("/login")
-    email=session.get("user"); is_admin=email=="admin@agent35.com"; journal=load_json(JOURNAL_FILE, list)
+    email=session.get("user"); is_admin=email=="admin@agent35.com"
+    # FIXED: was loading the WHOLE system's journal for anyone logged in —
+    # scoped to this user's own entries now, same as /dashboard.
+    journal=[j for j in load_json(JOURNAL_FILE, list) if j.get("email")==email]
     user_set=get_user_settings(email); curr_sym=get_currency_symbol(user_set.get("currency","ZAR"))
     stats=calculate_pnl_stats(journal); period=request.args.get("period","all"); now=datetime.now()
     if period=="today": filtered=[j for j in journal if j.get("date")==now.strftime("%Y-%m-%d")]
@@ -761,22 +843,22 @@ def creator_dashboard():
     is_authorized = (email=="admin@agent35.com") or (secret_param and CREATOR_SECRET and secret_param==CREATOR_SECRET)
     if not is_authorized:
         return pro_layout("<div style='max-width:600px;margin:80px auto;text-align:center'><div class='card'><h2>🔒 Access Denied</h2><p style='color:#64748b;font-size:13px'>Creator panel requires admin login.</p></div></div>","Master", is_admin=False)
-    users=load_json(USERS_FILE); auth=load_json(AUTH_FILE); journal=load_json(JOURNAL_FILE, list); tracked=load_json(TRACK_FILE, dict); system=load_json(SYSTEM_FILE, dict); stats=calculate_pnl_stats(journal)
+    users=load_json(USERS_FILE); auth=load_json(AUTH_FILE); journal=load_json(JOURNAL_FILE, list); tracked=load_json(TRACK_FILE, dict); pending_signals=load_json(PENDING_FILE, dict); system=load_json(SYSTEM_FILE, dict); stats=calculate_pnl_stats(journal)
     pending={k:v for k,v in users.items() if v.get("status")=="pending"}
     pending_rows="".join([f"<tr><td style='font-family:monospace;font-size:10px'>{ref}</td><td>{pay.get('user','')[:24]}</td><td>{pay.get('plan','yearly')}</td><td>R{pay.get('price','')}</td><td><a href='/creator/action?act=approve_payment&ref={ref}&secret={secret_param}' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:11px'>Approve</a> <a href='/creator/action?act=reject&ref={ref}&secret={secret_param}' style='background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Reject</a></td></tr>" for ref,pay in pending.items()]) or "<tr><td colspan=5 style='text-align:center;color:#64748b;padding:16px'>No pending payments ✅</td></tr>"
     user_rows="".join([f"<tr><td style='font-size:10px'>{e[:24]}</td><td style='font-size:10px'>{info.get('plan_status','')[:18]}</td><td style='font-size:10px'>{info.get('ref_code','')}</td><td style='font-size:10px'>{str(info.get('expires',''))[:10]}</td></tr>" for e,info in list(auth.items())[-15:]])
     content=f"""<div style='max-width:1600px;margin:0 auto;padding:14px'>
-<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><h1 style='font-size:20px;font-weight:900;margin:0'>👑 Creator Master Panel - V24 Unified 2 Modes</h1><div style='display:flex;gap:6px;flex-wrap:wrap'><span class='pro-badge'>Users: {len(auth)}</span><span class='pro-badge'>Pending: {len(pending)}</span><span class='pro-badge'>Trades: {len(journal)}</span><span class='pro-badge'>Tracked: {len(tracked)}/{MAX_TRACKED}</span></div></div>
+<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><h1 style='font-size:20px;font-weight:900;margin:0'>👑 Creator Master Panel - V24 Unified 2 Modes</h1><div style='display:flex;gap:6px;flex-wrap:wrap'><span class='pro-badge'>Users: {len(auth)}</span><span class='pro-badge'>Pending: {len(pending)}</span><span class='pro-badge'>Trades: {len(journal)}</span><span class='pro-badge'>Tracked (all users): {len(tracked)}</span><span class='pro-badge'>Awaiting TOOK/SKIP: {len(pending_signals)}</span></div></div>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px'>
 <div class='card'><div class='card-title'>Pending Payments</div><div class='card-value' style='font-size:20px;color:#f59e0b'>{len(pending)}</div></div>
 <div class='card'><div class='card-title'>Total Users</div><div class='card-value' style='font-size:20px'>{len(auth)}</div></div>
 <div class='card'><div class='card-title'>Total PnL</div><div class='card-value' style='font-size:18px;color:{"#10b981" if stats['total_pnl']>=0 else "#ef4444"}'>R{stats['total_pnl']:.2f}</div></div>
 <div class='card'><div class='card-title'>System Scans</div><div class='card-value' style='font-size:20px'>{system.get('total_scans',0)}</div><div style='font-size:10px;color:#64748b'>Last: {str(system.get('last_scan','Never'))[:16]}</div></div>
 </div>
-<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0;font-size:14px;font-weight:800'>Pending Payments - Approve / Reject</h3><div style='display:flex;gap:6px'><a href='/backup-now' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Force Backup</a><a href='/clear-tracked?secret={secret_param}' style='background:#ef4444;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a><a href='/health' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Health</a></div></div><table><tr><th>Ref ID</th><th>Email</th><th>Plan</th><th>Price</th><th>Action</th></tr>{pending_rows}</table></div>
+<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0;font-size:14px;font-weight:800'>Pending Payments - Approve / Reject</h3><div style='display:flex;gap:6px'><a href='/backup-now' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Force Backup</a><a href='/clear-tracked?scope=all&secret={secret_param}' style='background:#ef4444;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked (all users)</a><a href='/health' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Health</a></div></div><table><tr><th>Ref ID</th><th>Email</th><th>Plan</th><th>Price</th><th>Action</th></tr>{pending_rows}</table></div>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-top:12px'>
 <div class='table-card'><h3 style='margin:0 0 12px;font-size:14px'>Recent Users (15)</h3><table><tr><th>Email</th><th>Plan</th><th>Ref Code</th><th>Expires</th></tr>{user_rows}</table></div>
-<div class='card'><h3 style='margin:0 0 10px;font-size:14px'>Tracked Trades {len(tracked)}/{MAX_TRACKED}</h3><div style='font-size:11px;color:#cbd5e1;line-height:1.6'>{'<br>'.join([f"{k}: {v.get('bias')} {v.get('entry')} Score {v.get('score')}/10" for k,v in tracked.items()]) if tracked else "No tracked trades - clean"}</div><div style='margin-top:12px'><a href='/dashboard-scan' style='background:#10b981;color:white;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:700'>View Signals</a></div></div>
+<div class='card'><h3 style='margin:0 0 10px;font-size:14px'>Tracked Trades, All Users ({len(tracked)})</h3><div style='font-size:11px;color:#cbd5e1;line-height:1.6;max-height:300px;overflow-y:auto'>{'<br>'.join([f"{v.get('symbol','?')} ({v.get('email','?')[:20]}): {v.get('bias')} {v.get('entry')} Score {v.get('score')}/10" for v in tracked.values()]) if tracked else "No tracked trades - clean"}</div><div style='margin-top:12px'><a href='/dashboard-scan' style='background:#10b981;color:white;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:700'>View Signals</a></div></div>
 </div>
 </div>"""
     return pro_layout(content,"Master", is_admin=True)
@@ -806,31 +888,73 @@ def creator_action():
 @app.route("/clear-tracked")
 def clear_tracked():
     if not session.get("user") and not request.args.get("secret"): return redirect("/login")
-    save_json(TRACK_FILE, {}); secret=request.args.get("secret","")
-    if secret: return redirect(f"/creator?secret={secret}")
+    email = session.get("user","")
+    secret=request.args.get("secret","")
+    is_authorized_admin = (email=="admin@agent35.com") or (secret and CREATOR_SECRET and secret==CREATOR_SECRET)
+    if request.args.get("scope")=="all" and is_authorized_admin:
+        # Admin panel's global "Clear Tracked" button only — explicit
+        # scope=all is required so a plain /clear-tracked (what a regular
+        # user's own dashboard link sends) can never accidentally wipe
+        # everyone's trades just because the requester happens to be admin.
+        save_json(TRACK_FILE, {})
+        if secret: return redirect(f"/creator?secret={secret}")
+        return redirect("/creator")
+    if email:
+        # FIXED: used to wipe TRACK_FILE for every user on the system,
+        # regardless of who clicked it. Now only removes this user's own
+        # tracked entries (and their own pending, unconfirmed signals).
+        tracked = load_json(TRACK_FILE, dict)
+        tracked = {sid:v for sid,v in tracked.items() if v.get("email")!=email}
+        save_json(TRACK_FILE, tracked)
+        pending = load_json(PENDING_FILE, dict)
+        pending = {sid:v for sid,v in pending.items() if v.get("email")!=email}
+        save_json(PENDING_FILE, pending)
     return redirect("/dashboard")
 
 @app.route("/send-signal")
 def send_signal():
     if not session.get("user"): return redirect("/login")
     sym=request.args.get("symbol","EURUSD"); email=session.get("user"); user_set=get_user_settings(email)
-    tracked=load_json(TRACK_FILE, dict)
-    if len(tracked)>=MAX_TRACKED and sym not in tracked:
-        return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Track Limit {MAX_TRACKED} Reached</h2><p style='color:#94a3b8'>Tracked: {', '.join(tracked.keys())}<br>Clear to allow new</p><div style='display:flex;gap:8px;justify-content:center;margin-top:16px'><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Back</a><a href='/clear-tracked' style='background:#ef4444;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Clear All</a></div></div></div>","All Signals", is_admin=email=="admin@agent35.com")
+
+    if user_tracked_count(email) >= MAX_TRACKED and not user_has_open_or_pending(email, sym):
+        return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Your Track Limit ({MAX_TRACKED}) Reached</h2><p style='color:#94a3b8'>You have {MAX_TRACKED} trades already tracked. Clear one to open a new slot.</p><div style='display:flex;gap:8px;justify-content:center;margin-top:16px'><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Back</a><a href='/clear-tracked' style='background:#ef4444;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Clear Mine</a></div></div></div>","All Signals", is_admin=email=="admin@agent35.com")
     if get_daily_signal_count() >= MAX_SIGNALS_PER_DAY:
-        return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Daily Limit Reached</h2><p style='color:#94a3b8'>{MAX_SIGNALS_PER_DAY} signals already sent today. Resets at midnight (or via /cron/daily-reset).</p><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none;display:inline-block;margin-top:12px'>Back</a></div></div>","All Signals", is_admin=email=="admin@agent35.com")
+        return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Daily Limit Reached</h2><p style='color:#94a3b8'>{MAX_SIGNALS_PER_DAY} signals already sent today system-wide. Resets at midnight (or via /cron/daily-reset).</p><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none;display:inline-block;margin-top:12px'>Back</a></div></div>","All Signals", is_admin=email=="admin@agent35.com")
+
     try:
         r=cached_analysis(sym, user_set); entry=r.get('entry',0)
         if not entry or float(entry)==0: return pro_layout(f"<div class='card' style='max-width:600px;margin:40px auto'><h3>No entry for {sym}</h3><pre style='font-size:10px'>{r}</pre></div>","All Signals", is_admin=email=="admin@agent35.com")
-        rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
-        curr_sym=get_currency_symbol(user_set.get("currency","ZAR")); mode=user_set.get("trading_mode","regular")
-        sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
-        res=send_telegram_pro(sym, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''))
-        tracked[sym]={"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode}; save_json(TRACK_FILE, tracked)
-        increment_daily_signal_count()
-        msg=f"Sent {sym} Score {r.get('score')}/10 {entry} SL {sl} TP {tp} Mode {mode.upper()}"
+
+        tg_users = load_json(TG_FILE, dict)
+        chat_id = tg_users.get(email, {}).get("chat_id")
+
+        if chat_id:
+            # Normal path: send to Telegram with TOOK/SKIP buttons — it only
+            # becomes a tracked trade once THIS user presses TOOK on it.
+            ok, info = dispatch_signal_to_user(email, chat_id, sym, r, user_set)
+            if ok:
+                msg = f"Sent {sym} to your Telegram — press TOOK ENTRY there to start tracking it"
+            else:
+                msg = f"Couldn't send {sym}: {info.get('error')}"
+            res = info
+        else:
+            # No Telegram linked: clicking Send here IS the confirmation
+            # (there's no button for them to press elsewhere), so track it
+            # immediately, attributed to this user.
+            rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
+            mode=user_set.get("trading_mode","regular")
+            sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
+            tracked=load_json(TRACK_FILE, dict)
+            signal_id = generate_signal_id()
+            tracked[signal_id]={"email":email,"chat_id":None,"symbol":sym,"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode}
+            save_json(TRACK_FILE, tracked)
+            increment_daily_signal_count()
+            msg=f"Tracked {sym} directly (no Telegram linked — link one in Settings to use TOOK/SKIP confirmation)"
+            res={"sl":sl,"tp":tp}
     except Exception as e: res={"error":str(e)}; msg=f"Error {sym}: {e}"
     return pro_layout(f"<div style='max-width:700px;margin:40px auto'><div class='card'><h2 style='font-size:16px'>{msg}</h2><p style='font-size:11px;background:#0b1220;padding:10px;border-radius:8px;word-break:break-all;border:1px solid #1e293b'>{str(res)[:2000]}</p><div style='display:flex;gap:8px;margin-top:12px'><a href='/all-signals' style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700'>Back to Signals</a><a href='/dashboard' style='background:#1e293b;border:1px solid #334155;color:white;padding:10px 16px;border-radius:10px;text-decoration:none'>Dashboard</a></div></div></div>","All Signals", is_admin=email=="admin@agent35.com")
+
+
 
 @app.route("/export-journal")
 def export_journal():
@@ -841,14 +965,17 @@ def export_journal():
 
 @app.route("/test-telegram")
 def test_telegram():
-    email=session.get("user") or "admin@agent35.com"; user_set=get_user_settings(email)
+    if not session.get("user"): return redirect("/login")
+    email=session.get("user"); user_set=get_user_settings(email)
+    chat_id = get_user_chat_id(email)
+    if not chat_id:
+        return pro_layout("<div style='max-width:600px;margin:40px auto'><div class='card'><h2>Link Telegram first</h2><p style='color:#94a3b8'>Go to <a href='/link-telegram' style='color:#10b981'>Link Telegram</a> before testing.</p></div></div>","Dashboard", is_admin=email=="admin@agent35.com")
     r=cached_analysis("GBPUSD", user_set); entry=r.get('entry',0)
-    if not entry or float(entry)==0: entry=1.35057; r={"score":8,"bias":"BEARISH","confluence":"Test unified strategy - all 5 methods combined as ONE score 8/10 A+","rationale":"This is a test message — daily and 4H trend aligned bearish; price in premium zone; bearish order block reacted to.","details":{}}
-    rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
-    curr_sym=get_currency_symbol(user_set.get("currency","ZAR")); mode=user_set.get("trading_mode","regular")
-    sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp("GBPUSD", entry, r.get('bias','BEARISH'), acc, lot, lev, risk_percent, rr)
-    res=send_telegram_pro("GBPUSD", r.get('score',8), r.get('bias','BEARISH'), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence','Test'), curr_sym, mode, r.get('rationale',''))
-    return pro_layout(f"<div style='max-width:700px;margin:40px auto'><div class='card'><h2 style='font-size:15px'>Test Sent - GBPUSD {entry} Score {r.get('score')}/10 {mode.upper()}</h2><p style='font-size:11px;background:#0b1220;padding:12px;border-radius:10px;border:1px solid #1e293b;word-break:break-all'>{str(res)[:2000]}</p><a href='/dashboard' style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700;display:inline-block;margin-top:10px'>Back to Dashboard</a></div></div>","Dashboard", is_admin=email=="admin@agent35.com")
+    if not entry or float(entry)==0:
+        entry=1.35057; r={"score":8,"bias":"BEARISH","entry":entry,"confluence":"Test unified strategy - all 5 methods combined as ONE score 8/10 A+","rationale":"This is a test message — daily and 4H trend aligned bearish; price in premium zone; bearish order block reacted to."}
+    ok, info = dispatch_signal_to_user(email, chat_id, "GBPUSD", r, user_set)
+    msg = f"Test sent to your Telegram (GBPUSD @ {entry})" if ok else f"Test failed: {info.get('error')}"
+    return pro_layout(f"<div style='max-width:700px;margin:40px auto'><div class='card'><h2 style='font-size:15px'>{msg}</h2><p style='font-size:11px;background:#0b1220;padding:12px;border-radius:10px;border:1px solid #1e293b;word-break:break-all'>{str(info)[:2000]}</p><a href='/dashboard' style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700;display:inline-block;margin-top:10px'>Back to Dashboard</a></div></div>","Dashboard", is_admin=email=="admin@agent35.com")
 
 @app.route("/telegram/webhook", methods=["POST"])
 def telegram_webhook():
@@ -864,18 +991,48 @@ def telegram_webhook():
             try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"AGENT 35 PRO - Your Chat ID: {chat_id}\nCopy and paste in Dashboard > Link Telegram\n\nUnified Strategy - 2 Modes - Score 5+ sends"}, timeout=5)
             except: pass
     if "callback_query" in data:
+        # FIXED: callback_data now carries a unique signal_id (TOOK_<id> /
+        # SKIP_<id>) instead of a bare symbol name, so this looks up exactly
+        # ONE pending signal — the one THIS chat's press refers to — rather
+        # than a shared global entry any chat's button could have affected.
         cb=data["callback_query"]; cb_data=cb.get("data",""); cb_id=cb.get("id"); chat_id=cb["message"]["chat"]["id"]; user_name=cb["from"].get("first_name","User")
-        journal=load_json(JOURNAL_FILE, list); tracked=load_json(TRACK_FILE, dict); text="OK"
-        if cb_data.startswith("TOOK_"):
-            parts=cb_data.split("_"); sym=parts[1]; entry=parts[2] if len(parts)>2 else ""
-            risk_amt=0; rr=2.5; sl=0; tp=0; curr="ZAR"; mode=""
-            if sym in tracked: risk_amt=tracked[sym].get("risk_amt",0); rr=tracked[sym].get("rr",2.5); sl=tracked[sym].get("sl",0); tp=tracked[sym].get("tp",0); curr=tracked[sym].get("currency","ZAR"); mode=tracked[sym].get("mode","")
-            journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":sym,"status":"TOOK","result":f"Taken by {user_name} {mode} Score {tracked.get(sym,{}).get('score','')}/10","pnl":0,"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"date":datetime.now().strftime("%Y-%m-%d"),"currency":curr})
-            save_json(JOURNAL_FILE, journal[-500:]); text=f"TOOK {sym} {entry}"
-        elif cb_data.startswith("SKIP_"):
-            sym=cb_data.split("_")[1]
-            journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":sym,"status":"MISS","result":f"Skipped by {user_name}","pnl":0,"date":datetime.now().strftime("%Y-%m-%d")})
-            save_json(JOURNAL_FILE, journal[-500:]); text=f"SKIP {sym}"
+        text="OK"
+        owner_email = email_for_chat_id(chat_id)
+
+        if cb_data.startswith("TOOK_") or cb_data.startswith("SKIP_"):
+            signal_id = cb_data.split("_", 1)[1]
+            pending = load_json(PENDING_FILE, dict)
+            entry = pending.get(signal_id)
+
+            if not entry:
+                text = "This signal has expired or was already actioned."
+            elif str(entry.get("chat_id")) != str(chat_id):
+                # Defensive: a signal_id should only ever be actionable by
+                # the chat it was sent to. This should never trigger in
+                # normal use, but guards against a stray/forged callback.
+                text = "This signal isn't yours to action."
+            elif cb_data.startswith("TOOK_"):
+                tracked = load_json(TRACK_FILE, dict)
+                tracked[signal_id] = {
+                    "email": entry["email"], "chat_id": entry["chat_id"], "symbol": entry["symbol"],
+                    "time": datetime.now().isoformat(), "bias": entry["bias"], "entry": entry["entry"],
+                    "sl": entry["sl"], "tp": entry["tp"], "risk_amt": entry["risk_amt"], "rr": entry["rr"],
+                    "score": entry["score"], "currency": entry["currency"], "mode": entry["mode"],
+                }
+                save_json(TRACK_FILE, tracked)
+                del pending[signal_id]; save_json(PENDING_FILE, pending)
+
+                journal=load_json(JOURNAL_FILE, list)
+                journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":entry["symbol"],"status":"TOOK","result":f"Taken by {user_name} {entry['mode']} Score {entry['score']}/10","pnl":0,"entry":entry["entry"],"sl":entry["sl"],"tp":entry["tp"],"risk_amt":entry["risk_amt"],"rr":entry["rr"],"date":datetime.now().strftime("%Y-%m-%d"),"currency":entry["currency"],"email":entry["email"]})
+                save_json(JOURNAL_FILE, journal[-500:])
+                text=f"TOOK {entry['symbol']} {entry['entry']} — now tracking, you'll get a result when it hits SL/TP"
+            else:  # SKIP
+                del pending[signal_id]; save_json(PENDING_FILE, pending)
+                journal=load_json(JOURNAL_FILE, list)
+                journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":entry["symbol"],"status":"MISS","result":f"Skipped by {user_name}","pnl":0,"date":datetime.now().strftime("%Y-%m-%d"),"email":entry.get("email")})
+                save_json(JOURNAL_FILE, journal[-500:])
+                text=f"SKIP {entry['symbol']}"
+
         if bot:
             try:
                 requests.post(f"https://api.telegram.org/bot{bot}/answerCallbackQuery", json={"callback_query_id":cb_id,"text":text}, timeout=5)
@@ -1073,16 +1230,11 @@ def pay_submit():
 def cron_news_check():
     """Call this on a schedule (every 5-10 min) from an external cron —
     same as /cron/scan. Sends a Telegram heads-up ~30min before any
-    high-impact event, and flags/removes correlated tracked trades if
-    avoid-news is active anywhere in the system.
-
-    IMPORTANT LIMITATION: tracked_trades is one shared list for the whole
-    app (not per-user), same as everywhere else in this system. So "avoid
-    news" here means: if ANY user has it enabled in Settings, correlated
-    trades get flagged/removed for EVERYONE's tracked list, not just that
-    user's. There's no per-user trade isolation to do this more precisely
-    without restructuring tracked_trades to be keyed by user — flag this
-    to your users if it matters for them.
+    high-impact event, but ONLY to users whose OWN watchlist contains a
+    correlated symbol — not a broadcast to everyone. Also auto-flags/closes
+    a user's OWN tracked trades on a correlated symbol, but only if THAT
+    user (the trade's owner) personally has Avoid News enabled — not "any
+    user in the system," which was the bug this replaced.
     """
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
 
@@ -1092,11 +1244,12 @@ def cron_news_check():
     alerted = {k:v for k,v in alerted.items() if _safe_dt(v) and _safe_dt(v) > cutoff}
 
     settings_all = load_json(SETTINGS_FILE, dict)
-    avoid_news_active = any(not s.get("trade_news", True) for s in settings_all.values()) if settings_all else False
+    tg_users = load_json(TG_FILE, dict)
 
     ALERT_WINDOW_MIN = 30
     events = nc.upcoming_high_impact(hours_ahead=2)
     newly_alerted = []
+    flagged_total = []
 
     for e in events:
         mins = nc.minutes_until(e)
@@ -1104,49 +1257,75 @@ def cron_news_check():
             continue
 
         correlated = sorted([s for s in ALL_SYMBOLS if e["currency"] in nc.currencies_for_symbol(s)])
-        text=(f"⚠️ HIGH-IMPACT NEWS in {int(mins)}min\n\n"
+        alert_text=(f"⚠️ HIGH-IMPACT NEWS in {int(mins)}min\n\n"
               f"{e['currency']} — {e['name']}\n"
               f"Forecast: {e.get('forecast') or '—'} | Previous: {e.get('previous') or '—'}\n\n"
               f"Correlated: {', '.join(correlated[:10])}{'…' if len(correlated)>10 else ''}\n\n"
               f"Expect volatility and spread widening.")
-        broadcast_telegram(text)
+
+        # Alert only users whose OWN watchlist actually overlaps this event's
+        # correlated symbols — not everyone.
+        bot = os.getenv("TELEGRAM_BOT_TOKEN")
+        for user_email, tg_info in tg_users.items():
+            chat_id = tg_info.get("chat_id")
+            if not chat_id: continue
+            user_settings = settings_all.get(user_email, {})
+            user_watchlist = set(user_settings.get("symbols", []))
+            if not user_watchlist & set(correlated):
+                continue  # this event doesn't touch anything this user watches
+            if bot:
+                try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":alert_text}, timeout=10)
+                except Exception: pass
+
         alerted[e["id"]] = datetime.now().isoformat()
         newly_alerted.append(e["name"])
 
-        if avoid_news_active:
-            tracked = load_json(TRACK_FILE, dict)
-            closed = []
-            for sym in list(tracked.keys()):
-                if sym in correlated:
-                    entry = tracked[sym]
-                    journal = load_json(JOURNAL_FILE, list)
-                    journal.append({
-                        "time": datetime.now().strftime("%m-%d %H:%M"),
-                        "symbol": sym, "status": "NEWS CLOSE",
-                        "result": f"Auto-flagged ahead of {e['currency']} {e['name']}",
-                        "pnl": 0, "entry": entry.get("entry"),
-                        "date": datetime.now().strftime("%Y-%m-%d"),
-                    })
-                    save_json(JOURNAL_FILE, journal[-500:])
-                    del tracked[sym]
-                    closed.append(sym)
-            if closed:
-                save_json(TRACK_FILE, tracked)
-                broadcast_telegram(
-                    f"🚨 Avoid-News active: flagged and removed from tracking ahead of "
-                    f"{e['currency']} {e['name']}: {', '.join(closed)}\n\n"
+        # Auto-flag/close: only a user's OWN tracked trades, only if THAT
+        # user's own trade_news setting is off — not a system-wide check.
+        tracked = load_json(TRACK_FILE, dict)
+        closed_this_event = []
+        for signal_id in list(tracked.keys()):
+            entry = tracked[signal_id]
+            sym = entry.get("symbol")
+            owner_email = entry.get("email")
+            if sym not in correlated or not owner_email:
+                continue
+            owner_settings = settings_all.get(owner_email, {})
+            if owner_settings.get("trade_news", True):
+                continue  # this trade's owner is fine trading through news
+            journal = load_json(JOURNAL_FILE, list)
+            journal.append({
+                "time": datetime.now().strftime("%m-%d %H:%M"),
+                "symbol": sym, "status": "NEWS CLOSE",
+                "result": f"Auto-flagged ahead of {e['currency']} {e['name']}",
+                "pnl": 0, "entry": entry.get("entry"),
+                "date": datetime.now().strftime("%Y-%m-%d"), "email": owner_email,
+            })
+            save_json(JOURNAL_FILE, journal[-500:])
+            owner_chat = entry.get("chat_id")
+            del tracked[signal_id]
+            closed_this_event.append(sym)
+            flagged_total.append(sym)
+            if owner_chat and bot:
+                try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":owner_chat,"text":(
+                    f"🚨 Avoid-News is on: flagged and removed from your tracking ahead of "
+                    f"{e['currency']} {e['name']}: {sym}\n\n"
                     f"⚠️ This bot doesn't hold live broker positions — if you're actually "
-                    f"in these trades on your platform, close or hedge them yourself before the news."
-                )
+                    f"in this trade on your platform, close or hedge it yourself before the news."
+                )}, timeout=10)
+                except Exception: pass
+        if closed_this_event:
+            save_json(TRACK_FILE, tracked)
 
     save_json(NEWS_ALERTED_FILE, alerted)
-    return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "avoid_news_active": avoid_news_active})
+    return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "auto_flagged": flagged_total})
 
 @app.route("/cron/track-check")
 def cron_track_check():
-    """Checks each tracked (sent) signal against the latest price to see if
-    it's hit its SL or TP yet, and logs the outcome to the journal
-    automatically. Call every 5-15 min from an external cron.
+    """Checks each user's tracked (TOOK'd) signal against the latest price
+    to see if it's hit its SL or TP yet, logs the outcome to the journal,
+    and notifies ONLY that trade's owner — not a broadcast. Call every
+    5-15 min from an external cron.
 
     LIMITATION: this uses the latest 5-minute candle's CLOSE as a stand-in
     for live price, checked periodically — not tick-level/live bid-ask. If
@@ -1162,8 +1341,9 @@ def cron_track_check():
     now = datetime.now()
     resolved = []
 
-    for sym in list(tracked.keys()):
-        entry = tracked[sym]
+    for signal_id in list(tracked.keys()):
+        entry = tracked[signal_id]
+        sym = entry.get("symbol")
         try:
             sl = float(entry.get("sl")); tp = float(entry.get("tp"))
             bias = entry.get("bias",""); risk_amt = float(entry.get("risk_amt",0) or 0); rr = float(entry.get("rr",2.5) or 2.5)
@@ -1191,48 +1371,78 @@ def cron_track_check():
                 "status": outcome, "result": f"Auto-detected {outcome} @ {current}",
                 "pnl": pnl, "entry": entry.get("entry"), "sl": sl, "tp": tp,
                 "date": now.strftime("%Y-%m-%d"), "currency": entry.get("currency","ZAR"),
+                "email": entry.get("email"),
             })
             save_json(JOURNAL_FILE, journal[-500:])
-            del tracked[sym]
-            resolved.append({"symbol": sym, "outcome": outcome, "pnl": pnl})
+            del tracked[signal_id]
+            resolved.append({"symbol": sym, "outcome": outcome, "pnl": pnl, "email": entry.get("email")})
             emoji = "✅" if outcome=="WIN" else "❌"
-            broadcast_telegram(f"{emoji} {sym} {outcome} — closed @ {current}, PnL {pnl:+.2f}")
+            owner_chat = entry.get("chat_id")
+            if owner_chat:
+                bot=os.getenv("TELEGRAM_BOT_TOKEN")
+                if bot:
+                    try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":owner_chat,"text":f"{emoji} {sym} {outcome} — closed @ {current}, PnL {pnl:+.2f}"}, timeout=10)
+                    except Exception: pass
 
     if resolved:
         save_json(TRACK_FILE, tracked)
-    return jsonify({"resolved": resolved, "still_open": list(tracked.keys())})
+    return jsonify({"resolved": resolved, "still_open": len(tracked)})
 
 @app.route("/cron/check-expiry")
 def cron_check_expiry():
-    """Clears tracked trades that have sat open too long without hitting
-    SL or TP (see /cron/track-check for that), so they don't permanently
-    occupy a slot in the shared 6-max tracked limit. Expiry window is
-    mode-aware: scalp trades expire faster than regular/swing ones."""
+    """Clears (a) TAKEN trades that have sat open too long without hitting
+    SL or TP (mode-aware: scalp expires faster than regular), and
+    (b) PENDING signals nobody actioned (no TOOK/SKIP press) within a few
+    hours, so they don't stay actionable indefinitely. Notifies only the
+    specific owner of whatever got cleared — not a broadcast."""
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
-    tracked = load_json(TRACK_FILE, dict)
     now = datetime.now()
-    expired = []
 
-    for sym in list(tracked.keys()):
-        entry = tracked[sym]
+    tracked = load_json(TRACK_FILE, dict)
+    expired = []
+    for signal_id in list(tracked.keys()):
+        entry = tracked[signal_id]
         opened = _safe_dt(entry.get("time",""))
         mode = entry.get("mode","regular")
         max_age_hours = TRADE_EXPIRY_HOURS.get(mode, 24)
         if opened is None or (now - opened).total_seconds() > max_age_hours * 3600:
             journal = load_json(JOURNAL_FILE, list)
             journal.append({
-                "time": now.strftime("%m-%d %H:%M"), "symbol": sym, "status": "EXPIRED",
+                "time": now.strftime("%m-%d %H:%M"), "symbol": entry.get("symbol"), "status": "EXPIRED",
                 "result": f"Auto-expired after {max_age_hours}h with no SL/TP hit",
                 "pnl": 0, "entry": entry.get("entry"), "date": now.strftime("%Y-%m-%d"),
+                "email": entry.get("email"),
             })
             save_json(JOURNAL_FILE, journal[-500:])
-            del tracked[sym]
-            expired.append(sym)
-
+            owner_chat = entry.get("chat_id")
+            del tracked[signal_id]
+            expired.append(entry.get("symbol"))
+            if owner_chat:
+                bot=os.getenv("TELEGRAM_BOT_TOKEN")
+                if bot:
+                    try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":owner_chat,"text":f"⏳ {entry.get('symbol')} auto-expired (no SL/TP hit in {max_age_hours}h)"}, timeout=10)
+                    except Exception: pass
     if expired:
         save_json(TRACK_FILE, tracked)
-        broadcast_telegram(f"⏳ Auto-expired (no SL/TP hit in time): {', '.join(expired)}")
-    return jsonify({"expired": expired, "still_tracked": list(tracked.keys())})
+
+    pending = load_json(PENDING_FILE, dict)
+    pending_expired = []
+    for signal_id in list(pending.keys()):
+        entry = pending[signal_id]
+        sent_at = _safe_dt(entry.get("sent_at",""))
+        if sent_at is None or (now - sent_at).total_seconds() > PENDING_EXPIRY_HOURS * 3600:
+            owner_chat = entry.get("chat_id")
+            del pending[signal_id]
+            pending_expired.append(entry.get("symbol"))
+            if owner_chat:
+                bot=os.getenv("TELEGRAM_BOT_TOKEN")
+                if bot:
+                    try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":owner_chat,"text":f"⌛ Signal for {entry.get('symbol')} expired unactioned — no longer trackable."}, timeout=10)
+                    except Exception: pass
+    if pending_expired:
+        save_json(PENDING_FILE, pending)
+
+    return jsonify({"expired_tracked": expired, "expired_pending": pending_expired})
 
 @app.route("/cron/daily-reset")
 def cron_daily_reset():
@@ -1249,45 +1459,54 @@ def cron_daily_reset():
 
 @app.route("/cron/scan")
 def cron_scan():
+    """FIXED: scans EACH linked user's own watchlist using THEIR OWN
+    settings, and only sends a signal to them for symbols THEY actually
+    watch — no more grabbing one arbitrary user's settings and broadcasting
+    the result to everyone. Users without a linked Telegram are skipped
+    here (nothing to send a TOOK/SKIP button to); they can still use the
+    dashboard's manual Send button, which tracks immediately for them."""
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
     system=load_json(SYSTEM_FILE, dict); system["last_scan"]=datetime.now().isoformat(); system["total_scans"]=system.get("total_scans",0)+1; save_json(SYSTEM_FILE, system)
-    settings_all=load_json(SETTINGS_FILE, dict); all_syms=set()
-    for s in settings_all.values(): all_syms.update(s.get("symbols",[]))
-    if not all_syms: all_syms=set(ALL_SYMBOLS[:12])
-    tracked=load_json(TRACK_FILE, dict); now=datetime.now()
-    cleaned={};
-    for k,v in tracked.items():
-        try:
-            t=datetime.fromisoformat(v.get("time","2000-01-01T00:00:00"))
-            if (now - t).total_seconds() < 86400: cleaned[k]=v
-        except: pass
-    tracked=cleaned
-    if len(tracked)>=MAX_TRACKED: return jsonify({"error":f"Limit {MAX_TRACKED}","tracked":list(tracked.keys())})
-    if get_daily_signal_count()>=MAX_SIGNALS_PER_DAY: return jsonify({"error":f"Daily limit {MAX_SIGNALS_PER_DAY} reached","sent_today":get_daily_signal_count()})
+
+    if get_daily_signal_count()>=MAX_SIGNALS_PER_DAY:
+        return jsonify({"error":f"Daily limit {MAX_SIGNALS_PER_DAY} reached","sent_today":get_daily_signal_count()})
+
+    settings_all = load_json(SETTINGS_FILE, dict)
+    tg_users = load_json(TG_FILE, dict)
     sent=[]; skipped=[]
-    for sym in list(all_syms)[:20]:
-        if len(tracked)>=MAX_TRACKED and sym not in tracked: skipped.append(f"{sym} LIMIT"); continue
-        if get_daily_signal_count()>=MAX_SIGNALS_PER_DAY: skipped.append(f"{sym} DAILY_LIMIT"); break
-        try:
-            sample_settings = next(iter(settings_all.values())) if settings_all else {"trade_news":True,"risk_percent":1,"rr_ratio":2.5,"lot_size":0.01,"leverage":"1:500","account_size":142,"currency":"ZAR","trading_mode":"regular"}
-            r=cached_analysis(sym, sample_settings)
-            if not r.get('signal'): continue
-            entry=r.get('entry'); rr=sample_settings.get('rr_ratio',2.5)
-            sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), 142, 0.01, "1:500", 1, rr, 0.7, 0.35, 2.0, 10.0)
-            curr_sym=get_currency_symbol(sample_settings.get("currency","ZAR"))
-            send_telegram_pro(sym, r.get('score',7), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, 1, 0.01, "1:500", 142, r.get('confluence',''), curr_sym, r.get('mode','regular'), r.get('rationale',''))
-            increment_daily_signal_count()
-            tracked[sym]={"time":now.isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score')}
-            save_json(TRACK_FILE, tracked); sent.append(sym)
-            if len(tracked)>=MAX_TRACKED: break
-        except: pass
-    return jsonify({"sent":sent,"skipped":skipped,"tracked":len(tracked),"limit":MAX_TRACKED,"score_threshold":5})
+
+    for email, chat_data in tg_users.items():
+        chat_id = chat_data.get("chat_id")
+        if not chat_id: continue
+        user_settings = settings_all.get(email)
+        if not user_settings: continue  # no saved settings yet for this user
+
+        if user_tracked_count(email) >= MAX_TRACKED:
+            skipped.append(f"{email} AT_LIMIT"); continue
+
+        for sym in user_settings.get("symbols", [])[:12]:
+            if get_daily_signal_count() >= MAX_SIGNALS_PER_DAY:
+                skipped.append("DAILY_LIMIT_REACHED"); break
+            if user_tracked_count(email) >= MAX_TRACKED: break
+            if user_has_open_or_pending(email, sym): continue
+            try:
+                r = cached_analysis(sym, user_settings)
+                if not r.get('signal'): continue
+                ok, info = dispatch_signal_to_user(email, chat_id, sym, r, user_settings)
+                if ok: sent.append(f"{email}:{sym}")
+                else: skipped.append(f"{email}:{sym} {info.get('error')}")
+            except Exception as e:
+                skipped.append(f"{email}:{sym} ERROR:{e}")
+        if get_daily_signal_count() >= MAX_SIGNALS_PER_DAY:
+            break
+
+    return jsonify({"sent":sent,"skipped":skipped,"daily_count":get_daily_signal_count(),"daily_limit":MAX_SIGNALS_PER_DAY})
 
 @app.route("/health")
 def health():
     test=cached_analysis("BTCUSD", {"trade_news":True,"currency":"ZAR","trading_mode":"regular"})
     tracked=load_json(TRACK_FILE, dict)
-    return jsonify({"ok":True,"version":"V24 - forgot password, security fixes, unified UI, scan caching","symbols":len(ALL_SYMBOLS),"tracked":f"{len(tracked)}/{MAX_TRACKED}","btc_test":test,"threshold":5,"modes":["regular","scalp"]})
+    return jsonify({"ok":True,"version":"V24 - per-user signal delivery & tracking","symbols":len(ALL_SYMBOLS),"tracked_total_all_users":len(tracked),"per_user_limit":MAX_TRACKED,"btc_test":test,"threshold":5,"modes":["regular","scalp"]})
 
 @app.route("/debug-signal")
 def debug_signal():
