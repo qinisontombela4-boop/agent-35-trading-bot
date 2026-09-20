@@ -60,15 +60,25 @@ def get_values(symbol, interval, outputsize=50):
 # fetched twice in one call to full_multi_tf_analysis. Saves API quota and
 # guarantees h1_ob and multi_ob score off the SAME 1h candles, not two
 # separately-fetched (and possibly slightly different) sets. ----
-def get_values_cached(cache, symbol, interval, outputsize=50):
+def get_values_cached(cache, symbol, interval, outputsize=50, historical=None):
+    # BACKTEST SUPPORT: if `historical` provides pre-fetched candles for this
+    # interval, use those instead of calling the live API — this is what lets
+    # the backtester reuse this EXACT function (and therefore the exact same
+    # scoring logic) instead of a separate reimplementation that could drift
+    # from what's actually trading live.
+    if historical and interval in historical:
+        candles = historical[interval]
+        return (candles[-outputsize:] if outputsize else candles), None
     key=(symbol, interval, outputsize)
     if key in cache: return cache[key]
     result = get_values(symbol, interval, outputsize)
     cache[key] = result
     return result
 
-def is_market_open(symbol):
-    now_utc = datetime.utcnow(); weekday = now_utc.weekday(); hour = now_utc.hour
+def is_market_open(symbol, as_of=None):
+    # BACKTEST SUPPORT: as_of lets a backtest ask "was the market open at
+    # THIS simulated point in time" instead of always checking right now.
+    now_utc = as_of or datetime.utcnow(); weekday = now_utc.weekday(); hour = now_utc.hour
     crypto = ["BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
     if symbol in crypto: return True, ""
     if weekday==5: return False, "Closed - Saturday"
@@ -113,8 +123,8 @@ def atr(candles, period=14):
     recent = trs[-period:]
     return sum(recent) / len(recent)
 
-def get_htf_bias(symbol, cache):
-    candles,_=get_values_cached(cache, symbol,"1day",50)
+def get_htf_bias(symbol, cache, historical=None):
+    candles,_=get_values_cached(cache, symbol,"1day",50, historical)
     if not candles or len(candles)<25: return "NEUTRAL",50,None
     ema5=ema(candles,5); ema20=ema(candles,20)
     if not ema5 or not ema20: return "NEUTRAL",50,candles
@@ -124,8 +134,8 @@ def get_htf_bias(symbol, cache):
     premium=((current-daily_low)/rng)*100 if rng!=0 else 50
     return bias,premium,candles
 
-def check_4h_alignment(symbol, daily_bias, cache):
-    candles,_=get_values_cached(cache, symbol,"4h",50)
+def check_4h_alignment(symbol, daily_bias, cache, historical=None):
+    candles,_=get_values_cached(cache, symbol,"4h",50, historical)
     if not candles or len(candles)<25: return False,"NEUTRAL"
     ema5=ema(candles,5); ema20=ema(candles,20)
     if not ema5 or not ema20: return False,"NEUTRAL"
@@ -284,13 +294,13 @@ def build_rationale(symbol, final_bias, score, daily_bias, aligned_4h, bias_4h, 
 
 # ---- FIXED: reuses the already-fetched 1h candles instead of re-fetching,
 # and passes bias through so it doesn't count an opposite-direction OB. ----
-def detect_multi_tf_ob(symbol, bias, cache, h1_candles=None):
+def detect_multi_tf_ob(symbol, bias, cache, h1_candles=None, historical=None):
     timeframes = ["4h","2h","1h"]; ob_found = False; ob_details = []; total_score = 0
     for tf in timeframes:
         if tf == "1h" and h1_candles is not None:
             candles = h1_candles
         else:
-            candles,_ = get_values_cached(cache, symbol, tf, 50)
+            candles,_ = get_values_cached(cache, symbol, tf, 50, historical)
         if not candles or len(candles) < 20: continue
         found, zone, score = detect_order_block(candles, bias)
         if found: ob_found = True; ob_details.append(f"{tf.upper()} {zone}"); total_score += score
@@ -314,24 +324,44 @@ def is_news_time(symbol, user_settings):
         return True, f"NEWS BLOCKED - {event['currency']} {event['name']} ({when})"
     return False, ""
 
+DEFAULT_WEIGHTS = {
+    # Multipliers applied to each scoring category. 1.0 = current/default
+    # behavior. Override via full_multi_tf_analysis(..., weights={...}) —
+    # backtest.py and optimize_weights.py use this to test variations
+    # against real historical data without editing this file by hand.
+    "daily_bias": 1.0, "h4_align": 1.0, "zone": 1.0, "rsi_pullback": 1.0,
+    "structure": 1.0, "h1_fvg": 1.0, "m5_fvg": 1.0,
+    "h1_ob": 1.0, "m5_ob": 1.0, "multi_ob": 1.0,
+    "h1_sweep": 1.0, "m5_sweep": 1.0, "h1_pattern": 1.0, "m5_pattern": 1.0,
+    "min_score": 5,  # the qualification threshold itself is tunable too
+}
+
 # ================= V24 UNIFIED ENGINE - ONE STRATEGY, 2 MODES =================
-def full_multi_tf_analysis(symbol, user_settings=None):
+def full_multi_tf_analysis(symbol, user_settings=None, historical=None, as_of=None, weights=None):
+    """historical: optional dict {"1day":[...], "4h":[...], "1h":[...], "5min":[...]}
+    of pre-fetched candles, used by the backtester instead of live API calls —
+    this is the SAME function the live bot calls, so backtest and live never
+    diverge in logic. as_of: optional datetime the backtest is simulating
+    "now" as, so market-hours checks are evaluated historically correctly.
+    weights: optional dict overriding DEFAULT_WEIGHTS' multipliers — lets a
+    backtest/optimizer test scoring variations without editing this file."""
     if user_settings is None: user_settings={"trade_news":True,"trading_mode":"regular","currency":"ZAR"}
     mode = user_settings.get("trading_mode","regular") # regular or scalp
     min_rr = user_settings.get("min_risk_reward", 1.5)
     cache = {}  # per-call fetch cache: guarantees no duplicate API calls or double-counted candles
+    w = {**DEFAULT_WEIGHTS, **(weights or {})}
 
-    is_open, closed_reason = is_market_open(symbol)
+    is_open, closed_reason = is_market_open(symbol, as_of)
     if not is_open:
         return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"mode":mode}
     blocked,reason=is_news_time(symbol, user_settings)
     if blocked:
         return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":reason,"confluence":reason,"details":{"news_blocked":True},"mode":mode}
 
-    daily_bias,premium_pct,daily_candles=get_htf_bias(symbol, cache)
-    aligned_4h,bias_4h=check_4h_alignment(symbol,daily_bias, cache)
-    h1_candles,_=get_values_cached(cache, symbol,"1h",40)
-    m5_candles,_=get_values_cached(cache, symbol,"5min",50)
+    daily_bias,premium_pct,daily_candles=get_htf_bias(symbol, cache, historical)
+    aligned_4h,bias_4h=check_4h_alignment(symbol,daily_bias, cache, historical)
+    h1_candles,_=get_values_cached(cache, symbol,"1h",40, historical)
+    m5_candles,_=get_values_cached(cache, symbol,"5min",50, historical)
     if not h1_candles or len(h1_candles)<20:
         return {"symbol":symbol,"signal":False,"score":0,"bias":daily_bias,"entry":0,"premium_pct":premium_pct,"reason":"No H1 data","confluence":"No H1","details":{},"mode":mode}
 
@@ -372,30 +402,32 @@ def full_multi_tf_analysis(symbol, user_settings=None):
     h1_ob, h1_ob_zone, h1_ob_score = detect_order_block(h1_candles, final_bias)
     if m5_candles and len(m5_candles) >= 20:
         m5_ob, _, m5_ob_score = detect_order_block(m5_candles, final_bias)
-    multi_ob, multi_ob_details, multi_ob_score = detect_multi_tf_ob(symbol, final_bias, cache, h1_candles=h1_candles)
+    multi_ob, multi_ob_details, multi_ob_score = detect_multi_tf_ob(symbol, final_bias, cache, h1_candles=h1_candles, historical=historical)
 
     # SCORING - ALL STRATEGIES COMBINED AS ONE
     score=0; parts=[]
 
-    if daily_bias!="NEUTRAL": score+=2; parts.append(f"Daily {daily_bias}")
-    if aligned_4h: score+=2; parts.append(f"4H {bias_4h} aligned")
-    if daily_bias=="BULLISH" and premium_pct<=35: score+=3; parts.append(f"Discount {premium_pct:.0f}%")
-    elif daily_bias=="BEARISH" and premium_pct>=65: score+=3; parts.append(f"Premium {premium_pct:.0f}%")
-    elif 35 < premium_pct < 65: score+=1; parts.append(f"Mid {premium_pct:.0f}%")
+    if daily_bias!="NEUTRAL": score+=2*w["daily_bias"]; parts.append(f"Daily {daily_bias}")
+    if aligned_4h: score+=2*w["h4_align"]; parts.append(f"4H {bias_4h} aligned")
+    zone = "none"
+    if daily_bias=="BULLISH" and premium_pct<=35: score+=3*w["zone"]; parts.append(f"Discount {premium_pct:.0f}%"); zone="discount"
+    elif daily_bias=="BEARISH" and premium_pct>=65: score+=3*w["zone"]; parts.append(f"Premium {premium_pct:.0f}%"); zone="premium"
+    elif 35 < premium_pct < 65: score+=1*w["zone"]; parts.append(f"Mid {premium_pct:.0f}%"); zone="mid"
+    rsi_pullback = False
     if ema5_h1 and ema20_h1:
-        if final_bias=="BULLISH" and 40<=rsi_h1<=55: score+=2; parts.append(f"RSI {rsi_h1:.0f} BUY pullback")
-        elif final_bias=="BEARISH" and 45<=rsi_h1<=60: score+=2; parts.append(f"RSI {rsi_h1:.0f} SELL pullback")
-    if bos_bull or breakout_bull: score+=2; parts.append("BOS/Break High")
-    if bos_bear or breakout_bear: score+=2; parts.append("BOS/Break Low")
-    if h1_fvg: score+=2; parts.append("H1 FVG")
-    if m5_fvg: score+=1; parts.append("M5 FVG")
-    if h1_ob: score+=h1_ob_score; parts.append(f"H1 {h1_ob_zone}")
-    if m5_ob: score+=m5_ob_score; parts.append(f"M5 OB")
-    if multi_ob: score+=multi_ob_score; parts.append(f"MTF {multi_ob_details}")
-    if h1_sweep: score+=h1_sweep_score; parts.append(f"H1 Sweep")
-    if m5_sweep: score+=m5_sweep_score; parts.append(f"M5 Sweep")
-    if h1_patterns: score+=h1_pat_score; parts.append(f"H1 {','.join(h1_patterns)}")
-    if m5_patterns: score+=m5_pat_score; parts.append(f"M5 {','.join(m5_patterns)}")
+        if final_bias=="BULLISH" and 40<=rsi_h1<=55: score+=2*w["rsi_pullback"]; parts.append(f"RSI {rsi_h1:.0f} BUY pullback"); rsi_pullback=True
+        elif final_bias=="BEARISH" and 45<=rsi_h1<=60: score+=2*w["rsi_pullback"]; parts.append(f"RSI {rsi_h1:.0f} SELL pullback"); rsi_pullback=True
+    if bos_bull or breakout_bull: score+=2*w["structure"]; parts.append("BOS/Break High")
+    if bos_bear or breakout_bear: score+=2*w["structure"]; parts.append("BOS/Break Low")
+    if h1_fvg: score+=2*w["h1_fvg"]; parts.append("H1 FVG")
+    if m5_fvg: score+=1*w["m5_fvg"]; parts.append("M5 FVG")
+    if h1_ob: score+=h1_ob_score*w["h1_ob"]; parts.append(f"H1 {h1_ob_zone}")
+    if m5_ob: score+=m5_ob_score*w["m5_ob"]; parts.append(f"M5 OB")
+    if multi_ob: score+=multi_ob_score*w["multi_ob"]; parts.append(f"MTF {multi_ob_details}")
+    if h1_sweep: score+=h1_sweep_score*w["h1_sweep"]; parts.append(f"H1 Sweep")
+    if m5_sweep: score+=m5_sweep_score*w["m5_sweep"]; parts.append(f"M5 Sweep")
+    if h1_patterns: score+=h1_pat_score*w["h1_pattern"]; parts.append(f"H1 {','.join(h1_patterns)}")
+    if m5_patterns: score+=m5_pat_score*w["m5_pattern"]; parts.append(f"M5 {','.join(m5_patterns)}")
 
     score = min(score, 10)
 
@@ -413,7 +445,7 @@ def full_multi_tf_analysis(symbol, user_settings=None):
             (ema9_m5>ema21_m5 and final_bias=="BULLISH") or
             (ema9_m5<ema21_m5 and final_bias=="BEARISH")
         ))
-        is_signal = score>=5 and has_pattern and m5_bias_ok and 20<=rsi_m5<=80
+        is_signal = score>=w["min_score"] and has_pattern and m5_bias_ok and 20<=rsi_m5<=80
         if not is_signal:
             if score<5: reason=f"Scalp Score {score}/10 - need 5+"
             elif not has_pattern: reason=f"Scalp Score {score}/10 no pattern"
@@ -423,9 +455,9 @@ def full_multi_tf_analysis(symbol, user_settings=None):
             reason=f"Scalp {score}/10 STRONG {final_bias} {'OB' if has_ob else 'Sweep' if has_sweep else 'EMA'}"
     else:
         if is_crypto:
-            is_signal = score>=5 and (has_ob or has_sweep or bos_bull or bos_bear or breakout_bull or breakout_bear) and has_pattern
+            is_signal = score>=w["min_score"] and (has_ob or has_sweep or bos_bull or bos_bear or breakout_bull or breakout_bear) and has_pattern
         else:
-            is_signal = score>=5 and (has_ob or has_sweep) and has_pattern
+            is_signal = score>=w["min_score"] and (has_ob or has_sweep) and has_pattern
         if not is_signal:
             if score<5: reason=f"Regular Score {score}/10 - need 5+"
             elif not (has_ob or has_sweep): reason=f"Regular {score}/10 no OB/Sweep"
@@ -482,5 +514,15 @@ def full_multi_tf_analysis(symbol, user_settings=None):
         "rationale":rationale,
         "confluence":" | ".join(parts) if parts else "No confluence",
         "details":{"candles":h1_patterns+m5_patterns,"sweep":has_sweep,"fvg":h1_fvg or m5_fvg,"ob":has_ob,"ob_details":multi_ob_details,"rsi_h1":round(rsi_h1,1),"rsi_m5":round(rsi_m5,1),"bos":bos_bull or bos_bear,"breakout":breakout_bull or breakout_bear},
-        "mode":mode
+        "mode":mode,
+        # Structured factor flags — for backtest analysis to read reliably,
+        # instead of parsing them back out of the "confluence" text string.
+        "factors": {
+            "daily_bias": daily_bias != "NEUTRAL", "h4_aligned": aligned_4h, "zone": zone,
+            "rsi_pullback": rsi_pullback, "bos_or_breakout": bool(bos_bull or bos_bear or breakout_bull or breakout_bear),
+            "h1_fvg": h1_fvg, "m5_fvg": m5_fvg, "h1_ob": h1_ob, "m5_ob": m5_ob, "multi_ob": multi_ob,
+            "h1_sweep": h1_sweep, "m5_sweep": m5_sweep,
+            "h1_pattern": ",".join(h1_patterns) if h1_patterns else None,
+            "m5_pattern": ",".join(m5_patterns) if m5_patterns else None,
+        },
     }
