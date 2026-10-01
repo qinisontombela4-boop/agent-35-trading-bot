@@ -19,8 +19,9 @@ import sys, json
 from datetime import datetime
 
 FACTOR_KEYS = [
-    "daily_bias", "h4_aligned", "rsi_pullback", "bos_or_breakout",
-    "h1_fvg", "m5_fvg", "h1_ob", "m5_ob", "multi_ob", "h1_sweep", "m5_sweep",
+    "AMD", "SMC", "ICT", "Wyckoff", "Supply&Demand",
+    "Volume Profile", "Breakout+Retest", "Trend Following",
+    "Mean Reversion", "Liquidity Sweep",
 ]
 
 
@@ -59,7 +60,7 @@ def analyze(trades):
     print(f"Chronological split: train={train_n} trades ({train_wr}% WR), test={test_n} trades ({test_wr}% WR)")
     print("(If these two numbers are wildly different, the strategy's edge may not be stable — treat conclusions below cautiously.)\n")
 
-    print(f"{'FACTOR':<18}{'WITH it':<16}{'WITHOUT it':<16}{'EDGE':<10}{'HOLDS OUT-OF-SAMPLE?'}")
+    print(f"{'STRATEGY':<18}{'WITH it':<16}{'WITHOUT it':<16}{'EDGE':<10}{'HOLDS OUT-OF-SAMPLE?'}")
     print("-" * 80)
     suggestions = []
     for key in FACTOR_KEYS:
