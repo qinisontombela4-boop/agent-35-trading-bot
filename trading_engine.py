@@ -1,5 +1,5 @@
 import os, requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 import news_calendar
 
 def get_keys():
@@ -38,7 +38,7 @@ def td_request(symbol, interval, outputsize=50):
     td_symbol=SYMBOL_MAP.get(symbol,symbol); last_error=None
     for _ in range(len(KEYS)):
         key=get_next_key()
-        url=f"https://api.twelvedata.com/time_series?symbol={td_symbol}&interval={interval}&outputsize={outputsize}&apikey={key}"
+        url=f"https://api.twelvedata.com/time_series?symbol={td_symbol}&interval={interval}&outputsize={outputsize}&timezone=UTC&apikey={key}"
         try:
             r=requests.get(url,timeout=12).json()
             if "code" in r and r["code"]==429: last_error=r; continue
@@ -52,7 +52,7 @@ def get_values(symbol, interval, outputsize=50):
     if "values" not in data: return None, data
     vals=data["values"]; vals.reverse(); candles=[]
     for v in vals:
-        try: candles.append({"open":float(v["open"]),"high":float(v["high"]),"low":float(v["low"]),"close":float(v["close"]),"time":v.get("datetime","")})
+        try: candles.append({"open":float(v["open"]),"high":float(v["high"]),"low":float(v["low"]),"close":float(v["close"]),"time":v.get("datetime",""),"volume":float(v.get("volume") or 0)})
         except: continue
     return candles, None
 
@@ -71,6 +71,10 @@ def get_values_cached(cache, symbol, interval, outputsize=50, historical=None):
         return (candles[-outputsize:] if outputsize else candles), None
     key=(symbol, interval, outputsize)
     if key in cache: return cache[key]
+    # reuse an earlier, larger fetch of the same symbol+interval (no extra API request)
+    for (s, i, o), (cached_candles, _err) in list(cache.items()):
+        if s == symbol and i == interval and cached_candles and o >= outputsize:
+            return cached_candles[-outputsize:], None
     result = get_values(symbol, interval, outputsize)
     cache[key] = result
     return result
@@ -199,9 +203,15 @@ def find_swing_points(candles, lookback=2):
     for i in range(lookback, n - lookback):
         window = candles[i-lookback:i+lookback+1]
         c = candles[i]
-        if c["high"] == max(k["high"] for k in window):
+        left = candles[i-lookback:i]
+        # Strictly higher than everything to the LEFT, >= everything to the right:
+        # if two adjacent candles share an identical extreme (a flat top/bottom),
+        # only the FIRST is the pivot. Without this, one turning point was
+        # reported as two swings - corrupting HH/HL checks and fabricating
+        # "equal highs/lows" liquidity pools out of a single pivot.
+        if c["high"] == max(k["high"] for k in window) and c["high"] > max(k["high"] for k in left):
             swings.append({"index": i, "candle": c, "kind": "high"})
-        if c["low"] == min(k["low"] for k in window):
+        if c["low"] == min(k["low"] for k in window) and c["low"] < min(k["low"] for k in left):
             swings.append({"index": i, "candle": c, "kind": "low"})
     return swings
 
@@ -489,270 +499,589 @@ def is_news_time(symbol, user_settings):
         return True, f"NEWS BLOCKED - {event['currency']} {event['name']} ({when})"
     return False, ""
 
-DEFAULT_WEIGHTS = {
-    # Multipliers applied to each scoring category. 1.0 = current/default
-    # behavior. Override via full_multi_tf_analysis(..., weights={...}) —
-    # backtest.py and optimize_weights.py use this to test variations
-    # against real historical data without editing this file by hand.
-    "daily_bias": 1.0, "h4_align": 1.0, "zone": 1.0, "rsi_pullback": 1.0,
-    "structure": 1.0, "h1_fvg": 1.0, "m5_fvg": 1.0,
-    "h1_ob": 1.0, "m5_ob": 1.0, "multi_ob": 1.0,
-    "h1_sweep": 1.0, "m5_sweep": 1.0, "h1_pattern": 1.0, "m5_pattern": 1.0,
-    "min_score": 5,  # the qualification threshold itself is tunable too
-}
+# ================= 10-STRATEGY CONFLUENCE ENGINE =================
+# Each of the ten strategies below is evaluated INDEPENDENTLY and returns
+# either a direction ("BULLISH"/"BEARISH") or nothing. The confluence
+# score is simply how many strategies agree on the same direction.
+# Anything under `min_score` (default 5) is not sent to the user.
+#
+# HONEST CAVEATS baked into the design:
+#  - These aren't ten independent opinions. AMD, Wyckoff, SMC, ICT and the
+#    Liquidity Sweep model can all be triggered by the SAME sweep event, so
+#    a single stop-hunt can legitimately earn several votes at once. The
+#    backtester (backtest.py / analyze_backtest.py) is how you find out
+#    whether "5+ aligned" actually has an edge — don't assume it does.
+#  - Volume Profile uses real volume when the data feed provides it
+#    (crypto, some indices) and falls back to a time-at-price (TPO) profile
+#    when it doesn't (spot forex has no real volume).
+#  - ICT's SMT divergence needs a second correlated instrument's feed and
+#    is NOT implemented; ICT votes on Asia-sweep + killzone MSS + OTE only.
+#  - "Buy/Sell Power flip" (from the Power Channel indicator) is an
+#    approximation: dominance of buying vs selling candle-body pressure
+#    flipping across two consecutive M5 windows.
 
-# ================= V24 UNIFIED ENGINE - ONE STRATEGY, 2 MODES =================
+STRATEGY_NAMES = [
+    "AMD", "SMC", "ICT", "Wyckoff", "Supply&Demand",
+    "Volume Profile", "Breakout+Retest", "Trend Following",
+    "Mean Reversion", "Liquidity Sweep",
+]
+
+DEFAULT_WEIGHTS = {name: 1.0 for name in STRATEGY_NAMES}
+DEFAULT_WEIGHTS.update({
+    "min_score": 5,        # strategies that must line up before a signal is sent
+    "max_opposing": 1,     # if more than this many strategies vote the OTHER way, skip
+    "zone_veto": True,     # never buy in premium / sell in discount unless a zone-appropriate OB backs it
+})
+
+# ---------------- shared helpers ----------------
+
+def _fmt_score(s):
+    s = round(s, 1)
+    return int(s) if s == int(s) else s
+
+def _dt(c):
+    t = c.get("time") if isinstance(c, dict) else None
+    if isinstance(t, datetime): return t
+    if isinstance(t, str):
+        for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d"):
+            try: return datetime.strptime(t, fmt)
+            except ValueError: pass
+    return None
+
+def _ny(dt_utc):
+    try:
+        from zoneinfo import ZoneInfo
+        return dt_utc.replace(tzinfo=timezone.utc).astimezone(ZoneInfo("America/New_York"))
+    except Exception:
+        return dt_utc - timedelta(hours=4)  # EDT approximation if tz data is unavailable
+
+def killzone_name(dt_utc):
+    """ICT killzones in New York time: London 03:00-06:00, NY open 08:00-11:00."""
+    if dt_utc is None: return None
+    h = _ny(dt_utc).hour
+    if 3 <= h < 6: return "London killzone"
+    if 8 <= h < 11: return "NY killzone"
+    return None
+
+def adx(candles, period=14):
+    """Wilder's ADX. Below ~20 = no trend (range), above ~25 = trending."""
+    n = len(candles)
+    if n < period * 2 + 1: return None
+    plus_dm, minus_dm, tr = [], [], []
+    for i in range(1, n):
+        up = candles[i]["high"] - candles[i-1]["high"]
+        dn = candles[i-1]["low"] - candles[i]["low"]
+        plus_dm.append(up if (up > dn and up > 0) else 0.0)
+        minus_dm.append(dn if (dn > up and dn > 0) else 0.0)
+        h, l, pc = candles[i]["high"], candles[i]["low"], candles[i-1]["close"]
+        tr.append(max(h - l, abs(h - pc), abs(l - pc)))
+    def dx(a, p, m):
+        if a == 0: return 0.0
+        pdi, mdi = 100 * p / a, 100 * m / a
+        s = pdi + mdi
+        return 0.0 if s == 0 else 100 * abs(pdi - mdi) / s
+    a_s, p_s, m_s = sum(tr[:period]), sum(plus_dm[:period]), sum(minus_dm[:period])
+    dxs = [dx(a_s, p_s, m_s)]
+    for i in range(period, len(tr)):
+        a_s = a_s - a_s / period + tr[i]
+        p_s = p_s - p_s / period + plus_dm[i]
+        m_s = m_s - m_s / period + minus_dm[i]
+        dxs.append(dx(a_s, p_s, m_s))
+    if len(dxs) < period: return None
+    val = sum(dxs[:period]) / period
+    for d in dxs[period:]:
+        val = (val * (period - 1) + d) / period
+    return val
+
+def volume_profile(candles, bins=24):
+    """Volume Profile / Market Profile. Uses real volume if >=80% of bars
+    carry it, otherwise counts time-at-price (TPO). Returns POC, value
+    area (VAH/VAL) and high/low-volume nodes."""
+    if not candles: return None
+    lo = min(c["low"] for c in candles); hi = max(c["high"] for c in candles)
+    if hi <= lo: return None
+    vols = [(c.get("volume", 0) or 0) for c in candles]
+    use_vol = sum(1 for v in vols if v > 0) >= 0.8 * len(candles)
+    mean_vol = (sum(vols) / len(vols)) if use_vol else 1.0
+    bw = (hi - lo) / bins
+    prof = [0.0] * bins
+    for c, v in zip(candles, vols):
+        wgt = (v if v > 0 else mean_vol) if use_vol else 1.0
+        b0 = min(bins - 1, int((c["low"] - lo) / bw)); b1 = min(bins - 1, int((c["high"] - lo) / bw))
+        share = wgt / (b1 - b0 + 1)
+        for b in range(b0, b1 + 1): prof[b] += share
+    total = sum(prof); mean = total / bins
+    poc_i = max(range(bins), key=lambda i: prof[i])
+    lo_i = hi_i = poc_i; acc = prof[poc_i]
+    while acc < 0.7 * total and (lo_i > 0 or hi_i < bins - 1):
+        below = prof[lo_i - 1] if lo_i > 0 else -1
+        above = prof[hi_i + 1] if hi_i < bins - 1 else -1
+        if above >= below: hi_i += 1; acc += prof[hi_i]
+        else: lo_i -= 1; acc += prof[lo_i]
+    center = lambda i: lo + (i + 0.5) * bw
+    hvns = [center(i) for i in range(1, bins - 1)
+            if prof[i] > 1.25 * mean and prof[i] >= prof[i-1] and prof[i] >= prof[i+1]]
+    lvns = [center(i) for i in range(1, bins - 1)
+            if prof[i] < 0.6 * mean and prof[i] <= prof[i-1] and prof[i] <= prof[i+1]]
+    return {"poc": center(poc_i), "vah": lo + (hi_i + 1) * bw, "val": lo + lo_i * bw,
+            "hvns": hvns, "lvns": lvns, "uses_volume": use_vol}
+
+def recent_fvg(candles, direction, max_age=30, after_index=0):
+    """Most recent unfilled fair value gap in `direction` (3-candle imbalance)."""
+    n = len(candles)
+    for i in range(n - 1, max(2, n - max_age) - 1, -1):
+        if i < after_index: break
+        a, c = candles[i - 2], candles[i]
+        later = candles[i + 1:]
+        if direction == "BULLISH" and a["high"] < c["low"]:
+            if not later or min(k["low"] for k in later) > a["high"]:
+                return {"index": i, "top": c["low"], "bottom": a["high"]}
+        if direction == "BEARISH" and a["low"] > c["high"]:
+            if not later or max(k["high"] for k in later) < a["low"]:
+                return {"index": i, "top": a["low"], "bottom": c["high"]}
+    return None
+
+def _bull_pat(pats): return any(p in pats for p in ("Bull Engulf", "Hammer"))
+def _bear_pat(pats): return any(p in pats for p in ("Bear Engulf", "Hang Man"))
+
+def power_flip(m5):
+    """Approximation of a buy/sell 'power' flip: candle-body pressure
+    dominance switching between two consecutive 8-bar windows."""
+    if len(m5) < 20: return None
+    def powers(seg):
+        return (sum(max(c["close"] - c["open"], 0) for c in seg),
+                sum(max(c["open"] - c["close"], 0) for c in seg))
+    pb, ps = powers(m5[-16:-8]); nb, ns = powers(m5[-8:])
+    if ps > pb and nb > ns: return "BULLISH"
+    if pb > ps and ns > nb: return "BEARISH"
+    return None
+
+def find_fresh_zone(candles, direction, atr, max_back=60):
+    """Untouched demand (bullish) / supply (bearish) zone: the last opposite
+    candle before an imbalanced move of >=1.2 ATR that price has not
+    revisited since."""
+    n = len(candles)
+    if not atr: return None
+    for i in range(n - 4, max(n - max_back, 2), -1):
+        c = candles[i]
+        if direction == "BULLISH" and c["close"] < c["open"]:
+            imp = max(k["close"] for k in candles[i+1:i+4]) - c["high"]
+            if imp >= 1.2 * atr and all(k["low"] > c["high"] for k in candles[i+4:n-2]):
+                return (c["low"], c["high"])
+        if direction == "BEARISH" and c["close"] > c["open"]:
+            imp = c["low"] - min(k["close"] for k in candles[i+1:i+4])
+            if imp >= 1.2 * atr and all(k["high"] < c["low"] for k in candles[i+4:n-2]):
+                return (c["low"], c["high"])
+    return None
+
+# ---------------- the ten strategies ----------------
+# Each takes the shared context dict `x` and returns (direction|None, note).
+
+def strat_amd(x):
+    """Accumulation box -> sweep of one side (manipulation) -> reclaim ->
+    retest of the box's Point of Control -> distribution move."""
+    h1, atr, price = x["h1"], x["atr_h1"], x["price"]
+    if not atr or len(h1) < 40: return None, ""
+    for post in range(1, 9):
+        for box_len in (12, 18, 24):
+            box = h1[-(post + box_len):-post]
+            if len(box) < box_len: continue
+            bh = max(c["high"] for c in box); bl = min(c["low"] for c in box)
+            height = bh - bl
+            if height <= 0 or height > 4.0 * atr: continue             # must be a tight, sideways box
+            if abs(box[-1]["close"] - box[0]["open"]) > 0.5 * height: continue   # no drift
+            prof = volume_profile(box, bins=12)
+            if not prof: continue
+            poc = prof["poc"]
+            for c in h1[-post:]:
+                if c["low"] < bl and c["close"] > bl and price > bl and abs(price - poc) <= 0.3 * height:
+                    return "BULLISH", f"box {bl:.5g}-{bh:.5g} lows swept, reclaimed, PoC {poc:.5g} retested"
+                if c["high"] > bh and c["close"] < bh and price < bh and abs(price - poc) <= 0.3 * height:
+                    return "BEARISH", f"box {bl:.5g}-{bh:.5g} highs swept, reclaimed, PoC {poc:.5g} retested"
+    return None, ""
+
+def strat_smc(x):
+    """HTF order block (that swept liquidity first) -> LTF BOS/CHoCH -> LTF FVG."""
+    m5 = x["m5"]
+    for d in ("BULLISH", "BEARISH"):
+        tfs = []
+        for tf, cand, rng in (("H1", x["h1"], x["h1_range"]), ("H4", x["h4"], x["h4_range"])):
+            if len(cand) < 20: continue
+            found, _z, _s, bounds = detect_order_block(cand, d)
+            if found and ob_in_zone(bounds, d, rng): tfs.append(tf)
+        if not tfs: continue
+        swept = any(ev and ev["direction"] == d for ev in (x["h1_sweep"], x["m5_sweep"]))
+        if not swept: continue
+        evs = [e for e in x["m5_events"] if e["direction"] == d and e["index"] >= len(m5) - 30]
+        if not evs: continue
+        ev = evs[-1]
+        fvg = recent_fvg(m5, d, max_age=30, after_index=max(ev["index"] - 1, 2))
+        if not fvg: continue
+        return d, f"{'/'.join(tfs)} order block after liquidity sweep, M5 {ev['kind']} + FVG"
+    return None, ""
+
+def strat_ict(x):
+    """ICT 2022 model: killzone active -> Asia range swept -> M5 market
+    structure shift inside a killzone -> price in the 62-79% OTE zone."""
+    now = x["now"]
+    kz = killzone_name(now)
+    if not kz: return None, ""
+    day = now.date() if now.hour >= 5 else (now - timedelta(days=1)).date()
+    asia_start = datetime(day.year, day.month, day.day, 0, 0)
+    asia_end = asia_start + timedelta(hours=5)
+    stream = []
+    for src in (x["h1"], x["m5"]):
+        for c in src:
+            t = _dt(c)
+            if t: stream.append((t, c))
+    stream.sort(key=lambda p: p[0])
+    asia = [c for t, c in stream if asia_start <= t < asia_end]
+    if len(asia) < 3: return None, ""
+    ah = max(c["high"] for c in asia); al = min(c["low"] for c in asia)
+    sweep_t = None; d = None
+    for t, c in stream:
+        if t < asia_end: continue
+        if c["low"] < al and c["close"] > al: sweep_t, d = t, "BULLISH"
+        elif c["high"] > ah and c["close"] < ah: sweep_t, d = t, "BEARISH"
+    if not d: return None, ""
+    ev = None
+    for e in x["m5_events"]:
+        et = _dt(e["candle"])
+        if e["direction"] == d and et and et >= sweep_t and killzone_name(et) and e["index"] >= len(x["m5"]) - 60:
+            ev = e
+    if not ev: return None, ""
+    after = [c for t, c in stream if t >= sweep_t]
+    price = x["price"]
+    if d == "BULLISH":
+        s = min(c["low"] for c in after); hgh = max(c["high"] for c in after)
+        if hgh <= s: return None, ""
+        r = (hgh - price) / (hgh - s)
+    else:
+        s = max(c["high"] for c in after); low = min(c["low"] for c in after)
+        if s <= low: return None, ""
+        r = (price - low) / (s - low)
+    if 0.62 <= r <= 0.79:
+        return d, f"{kz}: Asia {'low' if d=='BULLISH' else 'high'} swept, MSS, OTE {r*100:.0f}% retrace"
+    return None, ""
+
+def strat_wyckoff(x):
+    """Spring/Upthrust + Test -> Last Point of Support/Supply, after a
+    prior markdown/markup into a trading range."""
+    h1, atr = x["h1"], x["atr_h1"]
+    if not atr or len(h1) < 90: return None, ""
+    base = h1[-60:-6]
+    rh = max(c["high"] for c in base); rl = min(c["low"] for c in base)
+    height = rh - rl
+    if height <= 0 or height > 10 * atr: return None, ""     # must actually be a range
+    prior = h1[-90:-60]
+    prior_avg = sum(c["close"] for c in prior) / len(prior)
+    mid = (rh + rl) / 2
+    tail = h1[-6:]
+    def quieter(a, spring):
+        va, vs = a.get("volume", 0) or 0, spring.get("volume", 0) or 0
+        if va > 0 and vs > 0: return va < vs
+        return (a["high"] - a["low"]) < (spring["high"] - spring["low"])
+    for idx, c in enumerate(tail[:-1]):
+        after = tail[idx + 1:]
+        if prior_avg > mid and c["low"] < rl and c["close"] > rl:
+            test = any(a["low"] > c["low"] and a["low"] <= rl + 0.35 * height and quieter(a, c) for a in after)
+            if test and tail[-1]["close"] > rl + 0.15 * height and x["price"] > c["close"]:
+                return "BULLISH", f"spring below {rl:.5g}, quiet higher-low test, last point of support"
+        if prior_avg < mid and c["high"] > rh and c["close"] < rh:
+            test = any(a["high"] < c["high"] and a["high"] >= rh - 0.35 * height and quieter(a, c) for a in after)
+            if test and tail[-1]["close"] < rh - 0.15 * height and x["price"] < c["close"]:
+                return "BEARISH", f"upthrust above {rh:.5g}, quiet lower-high test, last point of supply"
+    return None, ""
+
+def strat_supply_demand(x):
+    """Fresh zone + buy/sell power flip + engulfing candle."""
+    h1, atr, price = x["h1"], x["atr_h1"], x["price"]
+    if not atr: return None, ""
+    flip = power_flip(x["m5"])
+    if not flip: return None, ""
+    pats = set(x["m5_patterns"]) | set(x["h1_patterns"])
+    for d in ("BULLISH", "BEARISH"):
+        if flip != d: continue
+        if d == "BULLISH" and "Bull Engulf" not in pats: continue
+        if d == "BEARISH" and "Bear Engulf" not in pats: continue
+        zone = find_fresh_zone(h1, d, atr)
+        if not zone or not ob_in_zone(zone, d, x["h1_range"]): continue
+        zl, zh = zone
+        if zl - 0.2 * atr <= price <= zh + 0.2 * atr:
+            kind = "demand" if d == "BULLISH" else "supply"
+            return d, f"fresh {kind} zone {zl:.5g}-{zh:.5g}, power flip, engulfing"
+    return None, ""
+
+def strat_volume_profile(x):
+    """Return to a High Volume Node / POC with a rejection candle."""
+    prof, atr, price = x["profile"], x["atr_h1"], x["price"]
+    if not prof or not atr: return None, ""
+    tol = 0.35 * atr
+    nodes = [("POC", prof["poc"])] + [("HVN", h) for h in prof["hvns"]]
+    hit = [(n, l) for n, l in nodes if abs(price - l) <= tol]
+    if not hit: return None, ""
+    name, level = hit[0]
+    pats = set(x["m5_patterns"]) | set(x["h1_patterns"])
+    src = "volume" if prof["uses_volume"] else "time-at-price"
+    if _bull_pat(pats) and price <= prof["poc"] + tol:
+        return "BULLISH", f"rejection at {name} {level:.5g} ({src} profile), buying at/below fair value"
+    if _bear_pat(pats) and price >= prof["poc"] - tol:
+        return "BEARISH", f"rejection at {name} {level:.5g} ({src} profile), selling at/above fair value"
+    return None, ""
+
+def strat_breakout_retest(x):
+    """Clean breakout (>70% body, volume-confirmed if available) of a range,
+    then a RETEST of the broken level - not the first break."""
+    h1, atr, price = x["h1"], x["atr_h1"], x["price"]
+    n = len(h1)
+    if not atr or n < 50: return None, ""
+    for b in range(n - 9, n - 1):
+        base = h1[b - 30:b]
+        if len(base) < 30: continue
+        rh = max(k["high"] for k in base); rl = min(k["low"] for k in base)
+        if rh - rl > 8 * atr: continue                      # not a range
+        c = h1[b]; rng = c["high"] - c["low"]
+        if rng <= 0 or abs(c["close"] - c["open"]) / rng <= 0.7: continue
+        vols = [(k.get("volume", 0) or 0) for k in base]
+        if sum(1 for v in vols if v > 0) >= 0.8 * len(base) and (c.get("volume", 0) or 0) > 0:
+            if c["volume"] <= 1.2 * (sum(vols) / len(vols)): continue
+        after = h1[b + 1:]
+        if c["close"] > rh and c["close"] > c["open"]:
+            if any(a["low"] <= rh + 0.25 * atr and a["close"] > rh - 0.1 * atr for a in after) \
+               and price > rh and price - rh <= 1.2 * atr:
+                return "BULLISH", f"strong breakout above {rh:.5g}, retest held"
+        if c["close"] < rl and c["close"] < c["open"]:
+            if any(a["high"] >= rl - 0.25 * atr and a["close"] < rl + 0.1 * atr for a in after) \
+               and price < rl and rl - price <= 1.2 * atr:
+                return "BEARISH", f"strong breakdown below {rl:.5g}, retest rejected"
+    return None, ""
+
+def strat_trend_following(x):
+    """50/200 EMA + HH/HL (or LH/LL), pullback to the 21 EMA, BOS in trend direction."""
+    h1, atr, price = x["h1"], x["atr_h1"], x["price"]
+    n = len(h1)
+    if not atr or n < 205: return None, ""
+    e21, e50, e200 = ema(h1, 21), ema(h1, 50), ema(h1, 200)
+    if None in (e21, e50, e200): return None, ""
+    highs = [s for s in x["h1_swings"] if s["kind"] == "high"][-2:]
+    lows = [s for s in x["h1_swings"] if s["kind"] == "low"][-2:]
+    if len(highs) < 2 or len(lows) < 2: return None, ""
+    hh = highs[1]["candle"]["high"] > highs[0]["candle"]["high"]
+    hl = lows[1]["candle"]["low"] > lows[0]["candle"]["low"]
+    lh = highs[1]["candle"]["high"] < highs[0]["candle"]["high"]
+    ll = lows[1]["candle"]["low"] < lows[0]["candle"]["low"]
+    recent = h1[-10:]   # the EMA touch comes BEFORE the BOS, so look back a little further
+    bos = [e for e in x["h1_events"] if e["index"] >= n - 12]
+    daily = x["daily_bias"]
+    if e50 > e200 and price > e200 and hh and hl and daily != "BEARISH":
+        touched = min(c["low"] for c in recent) <= e21 + 0.4 * atr and h1[-1]["close"] > e21 - 0.4 * atr
+        if touched and any(e["direction"] == "BULLISH" for e in bos):
+            return "BULLISH", "uptrend (50>200 EMA, HH/HL), pullback to 21 EMA, bullish BOS"
+    if e50 < e200 and price < e200 and lh and ll and daily != "BULLISH":
+        touched = max(c["high"] for c in recent) >= e21 - 0.4 * atr and h1[-1]["close"] < e21 + 0.4 * atr
+        if touched and any(e["direction"] == "BEARISH" for e in bos):
+            return "BEARISH", "downtrend (50<200 EMA, LH/LL), pullback to 21 EMA, bearish BOS"
+    return None, ""
+
+def strat_mean_reversion(x):
+    """RSI extreme at HTF support/resistance, only when ADX < 20 (no trend)."""
+    h1, atr, price = x["h1"], x["atr_h1"], x["price"]
+    a = x["adx_h1"]
+    if not atr or a is None or a >= 20: return None, ""
+    r = x["rsi_h1"]
+    h4, d1 = x["h4"], x["d1"]
+    if len(h4) < 20: return None, ""
+    res = [max(c["high"] for c in h4[-40:])] + [z["price"] for z in x["h4_liq"] if z["kind"] == "buy_side"]
+    sup = [min(c["low"] for c in h4[-40:])] + [z["price"] for z in x["h4_liq"] if z["kind"] == "sell_side"]
+    if d1:
+        res.append(max(c["high"] for c in d1[-20:])); sup.append(min(c["low"] for c in d1[-20:]))
+    if r > 70 and any(lv - 0.8 * atr <= price <= lv + 0.5 * atr for lv in res):
+        return "BEARISH", f"RSI {r:.0f} overbought at HTF resistance, ADX {a:.0f} (ranging)"
+    if r < 30 and any(lv - 0.5 * atr <= price <= lv + 0.8 * atr for lv in sup):
+        return "BULLISH", f"RSI {r:.0f} oversold at HTF support, ADX {a:.0f} (ranging)"
+    return None, ""
+
+def strat_liquidity_sweep(x):
+    """Equal highs/lows taken by a wick, then an immediate reversal candle."""
+    for label, ev, cand, recent in (("M5", x["m5_sweep"], x["m5"], 8), ("H1", x["h1_sweep"], x["h1"], 3)):
+        if not ev or ev["index"] < len(cand) - recent: continue
+        d = ev["direction"]
+        for k in range(ev["index"], len(cand)):
+            pats, _ = detect_candle(cand[:k + 1])
+            if d == "BULLISH" and any(p in pats for p in ("Hammer", "Bull Engulf", "Doji")):
+                return d, f"{label} equal lows swept, reversal candle ({', '.join(pats)})"
+            if d == "BEARISH" and any(p in pats for p in ("Hang Man", "Bear Engulf", "Doji")):
+                return d, f"{label} equal highs swept, reversal candle ({', '.join(pats)})"
+    return None, ""
+
+STRATEGY_FUNCS = [
+    ("AMD", strat_amd), ("SMC", strat_smc), ("ICT", strat_ict), ("Wyckoff", strat_wyckoff),
+    ("Supply&Demand", strat_supply_demand), ("Volume Profile", strat_volume_profile),
+    ("Breakout+Retest", strat_breakout_retest), ("Trend Following", strat_trend_following),
+    ("Mean Reversion", strat_mean_reversion), ("Liquidity Sweep", strat_liquidity_sweep),
+]
+
+def build_confluence_rationale(direction, score, aligned):
+    """Plain-language summary: which strategies lined up and why."""
+    if not aligned: return "No strategies aligned."
+    parts = "; ".join(f"{name}: {note}" for name, note in aligned)
+    return f"{_fmt_score(score)}/10 strategies agree on a {direction.lower()} setup. {parts}."
+
+# ================= ORCHESTRATION =================
 def full_multi_tf_analysis(symbol, user_settings=None, historical=None, as_of=None, weights=None):
     """historical: optional dict {"1day":[...], "4h":[...], "1h":[...], "5min":[...]}
-    of pre-fetched candles, used by the backtester instead of live API calls —
+    of pre-fetched candles, used by the backtester instead of live API calls -
     this is the SAME function the live bot calls, so backtest and live never
-    diverge in logic. as_of: optional datetime the backtest is simulating
-    "now" as, so market-hours checks are evaluated historically correctly.
-    weights: optional dict overriding DEFAULT_WEIGHTS' multipliers — lets a
-    backtest/optimizer test scoring variations without editing this file."""
-    if user_settings is None: user_settings={"trade_news":True,"trading_mode":"regular","currency":"ZAR"}
-    mode = user_settings.get("trading_mode","regular") # regular or scalp
+    diverge. as_of: the datetime a backtest is simulating as "now".
+    weights: optional overrides of DEFAULT_WEIGHTS (per-strategy vote
+    multipliers, min_score, max_opposing, zone_veto)."""
+    if user_settings is None: user_settings = {"trade_news": True, "trading_mode": "regular", "currency": "ZAR"}
+    mode = user_settings.get("trading_mode", "regular")
     min_rr = user_settings.get("min_risk_reward", 1.5)
-    cache = {}  # per-call fetch cache: guarantees no duplicate API calls or double-counted candles
+    cache = {}
     w = {**DEFAULT_WEIGHTS, **(weights or {})}
+    now = as_of or datetime.utcnow()
+
+    def _out(reason, score=0, bias="NEUTRAL", entry=0, pct=50, details=None, extra=None):
+        base = {"symbol": symbol, "signal": False, "score": score, "bias": bias, "bias_4h": "NEUTRAL",
+                "entry": entry, "premium_pct": pct, "reason": reason, "rationale": reason,
+                "confluence": reason, "details": details or {}, "mode": mode}
+        if extra: base.update(extra)
+        return base
 
     is_open, closed_reason = is_market_open(symbol, as_of)
     if not is_open:
-        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":closed_reason,"confluence":closed_reason,"details":{"market_closed":True},"mode":mode}
-    blocked,reason=is_news_time(symbol, user_settings)
+        return _out(closed_reason, details={"market_closed": True})
+    blocked, news_reason = is_news_time(symbol, user_settings)
     if blocked:
-        return {"symbol":symbol,"signal":False,"score":0,"bias":"NEUTRAL","entry":0,"premium_pct":50,"reason":reason,"confluence":reason,"details":{"news_blocked":True},"mode":mode}
+        return _out(news_reason, details={"news_blocked": True})
 
-    daily_bias,premium_pct,daily_candles=get_htf_bias(symbol, cache, historical)
-    aligned_4h,bias_4h=check_4h_alignment(symbol,daily_bias, cache, historical)
-    h1_candles,_=get_values_cached(cache, symbol,"1h",100, historical)
-    m5_candles,_=get_values_cached(cache, symbol,"5min",100, historical)
-    if not h1_candles or len(h1_candles)<30:
-        return {"symbol":symbol,"signal":False,"score":0,"bias":daily_bias,"entry":0,"premium_pct":premium_pct,"reason":"No H1 data","confluence":"No H1","details":{},"mode":mode}
+    d1, _e = get_values_cached(cache, symbol, "1day", 100, historical)
+    h4, _e = get_values_cached(cache, symbol, "4h", 100, historical)
+    h1, _e = get_values_cached(cache, symbol, "1h", 250, historical)
+    m5, _e = get_values_cached(cache, symbol, "5min", 100, historical)
+    d1, h4 = d1 or [], h4 or []
+    if not h1 or len(h1) < 30:
+        return _out("No H1 data")
+    # existing helpers, reused as-is (same cache keys as the fetches above -> no extra API calls)
+    daily_bias, _daily_pct, _dc = get_htf_bias(symbol, cache, historical)
+    aligned_4h, bias_4h = check_4h_alignment(symbol, daily_bias, cache, historical)
+    m5 = m5 or []
+    price = m5[-1]["close"] if m5 else h1[-1]["close"]
 
-    # ---- H1 STRUCTURE, DEALING RANGE, LIQUIDITY ----
-    # This is the core of the fix: the H1 dealing range determines whether
-    # CURRENT PRICE is in a discount (favorable to buy) or premium
-    # (favorable to sell) zone. That gets used as a HARD requirement below,
-    # not just a scoring bonus — a setup can no longer rack up enough
-    # trend-following points to fire while price sits at the top of an
-    # extended move with nothing above it but liquidity to grab.
-    h1_swings = find_swing_points(h1_candles, lookback=2)
-    h1_events = detect_structure_events(h1_candles, h1_swings)
-    last_h1_event = h1_events[-1] if h1_events else None
-    bos_bull = bool(last_h1_event and last_h1_event["direction"]=="BULLISH")
-    bos_bear = bool(last_h1_event and last_h1_event["direction"]=="BEARISH")
-    breakout_bull, breakout_bear = bos_bull, bos_bear  # kept for compatibility with build_rationale/details below
+    # ---- shared structure / context, computed once and handed to every strategy ----
+    h1_swings = find_swing_points(h1, lookback=2)
+    h1_events = detect_structure_events(h1, h1_swings)
+    h1_range = compute_dealing_range(h1_swings, lookback_swings=8, candles=h1)
+    h4_swings = find_swing_points(h4, lookback=2) if h4 else []
+    h4_range = compute_dealing_range(h4_swings, lookback_swings=8, candles=h4) if h4 else None
+    h1_liq = find_liquidity_zones(h1_swings, tolerance_pct=0.0008)
+    h4_liq = find_liquidity_zones(h4_swings, tolerance_pct=0.0012) if h4 else []
+    m5_swings = find_swing_points(m5, lookback=2) if m5 else []
+    m5_events = detect_structure_events(m5, m5_swings) if m5 else []
+    m5_liq = find_liquidity_zones(m5_swings, tolerance_pct=0.001) if m5 else []
+    h1_patterns, _p1 = detect_candle(h1)
+    m5_patterns, _p2 = detect_candle(m5) if m5 else ([], 0)
+    atr_h1 = atr(h1, 14); atr_m5 = atr(m5, 14) if m5 else None
+    h1_zone = zone_of(h1_range, price)
+    h1_pct = fib_level(h1_range, price) * 100 if h1_range else 50
 
-    h1_range = compute_dealing_range(h1_swings, lookback_swings=8, candles=h1_candles)
-    current_price = h1_candles[-1]["close"]
-    h1_zone = zone_of(h1_range, current_price)
-    h1_premium_pct = fib_level(h1_range, current_price)*100 if h1_range else 50
-    recent_high = h1_range["high"] if h1_range else max(c["high"] for c in h1_candles[-21:-1])
-    recent_low = h1_range["low"] if h1_range else min(c["low"] for c in h1_candles[-21:-1])
+    x = {
+        "symbol": symbol, "now": now, "price": price,
+        "d1": d1, "h4": h4, "h1": h1, "m5": m5,
+        "daily_bias": daily_bias, "bias_4h": bias_4h, "aligned_4h": aligned_4h,
+        "atr_h1": atr_h1, "atr_m5": atr_m5,
+        "rsi_h1": rsi(h1, 14), "adx_h1": adx(h1, 14),
+        "h1_swings": h1_swings, "h1_events": h1_events, "h1_range": h1_range, "h1_liq": h1_liq,
+        "h4_range": h4_range, "h4_liq": h4_liq,
+        "m5_swings": m5_swings, "m5_events": m5_events, "m5_liq": m5_liq,
+        "h1_sweep": check_sweep(h1_liq, h1, lookback_bars=20),
+        "m5_sweep": check_sweep(m5_liq, m5, lookback_bars=30) if m5 else None,
+        "h1_patterns": h1_patterns, "m5_patterns": m5_patterns,
+        "profile": volume_profile(h1[-100:]),
+    }
 
-    h1_liquidity = find_liquidity_zones(h1_swings, tolerance_pct=0.0008)
-    h1_sweep_event = check_sweep(h1_liquidity, h1_candles, lookback_bars=20)
-    h1_sweep = bool(h1_sweep_event)
+    # ---- every strategy votes independently ----
+    votes, errors = {}, {}
+    for name, fn in STRATEGY_FUNCS:
+        try: votes[name] = fn(x)
+        except Exception as e:
+            votes[name] = (None, ""); errors[name] = f"{type(e).__name__}: {e}"
 
-    ema5_h1=ema(h1_candles,5); ema20_h1=ema(h1_candles,20); rsi_h1=rsi(h1_candles,14)
-    atr_h1=atr(h1_candles,14)
-    h1_patterns,h1_pat_score=detect_candle(h1_candles)
-    h1_fvg=detect_fvg(h1_candles)
+    bull = [n for n in STRATEGY_NAMES if votes[n][0] == "BULLISH"]
+    bear = [n for n in STRATEGY_NAMES if votes[n][0] == "BEARISH"]
+    bs = sum(w.get(n, 1.0) for n in bull); rs = sum(w.get(n, 1.0) for n in bear)
+    if bs > rs:   direction, agree, score, opposing = "BULLISH", bull, bs, len(bear)
+    elif rs > bs: direction, agree, score, opposing = "BEARISH", bear, rs, len(bull)
+    else:         direction, agree, score, opposing = None, [], max(bs, rs), len(bull)
+    score_disp = _fmt_score(score)
 
-    # ---- M5 STRUCTURE, LIQUIDITY, SWEEP+CHoCH (the "sniper" entry trigger) ----
-    m5_pat_score=0; m5_sweep=False; m5_fvg=False; m5_ob=False; m5_ob_score=0; m5_patterns=[]; ema9_m5=None; ema21_m5=None; rsi_m5=50; atr_m5=None
-    m5_choch = False; m5_sweep_direction = None
-    if m5_candles and len(m5_candles)>=30:
-        ema9_m5=ema(m5_candles,9); ema21_m5=ema(m5_candles,21); rsi_m5=rsi(m5_candles,14)
-        atr_m5=atr(m5_candles,14)
-        m5_patterns,m5_pat_score=detect_candle(m5_candles)
-        m5_fvg=detect_fvg(m5_candles)
-        m5_swings = find_swing_points(m5_candles, lookback=2)
-        m5_events = detect_structure_events(m5_candles, m5_swings)
-        m5_liquidity = find_liquidity_zones(m5_swings, tolerance_pct=0.001)
-        m5_sweep_event = check_sweep(m5_liquidity, m5_candles, lookback_bars=15)
-        m5_sweep = bool(m5_sweep_event)
-        m5_sweep_direction = m5_sweep_event["direction"] if m5_sweep_event else None
-        last_m5_event = m5_events[-1] if m5_events else None
-        if last_m5_event and last_m5_event["kind"] == "CHoCH":
-            m5_choch = True
-            m5_choch_direction = last_m5_event["direction"]
-        else:
-            m5_choch_direction = None
+    # ---- the safety veto: don't buy the premium / sell the discount ----
+    # (unless a zone-appropriate order block/fresh zone backs the trade -
+    # SMC and Supply&Demand only vote when they have one)
+    veto = False
+    if w["zone_veto"] and direction and h1_range:
+        backed = any(n in agree for n in ("SMC", "Supply&Demand"))
+        if direction == "BULLISH" and h1_zone == "premium" and not backed: veto = True
+        if direction == "BEARISH" and h1_zone == "discount" and not backed: veto = True
+
+    m5_trigger = (bool(m5_patterns) and
+                  ((direction == "BULLISH" and any(p in m5_patterns for p in ("Bull Engulf", "Hammer", "Doji"))) or
+                   (direction == "BEARISH" and any(p in m5_patterns for p in ("Bear Engulf", "Hang Man", "Doji")))))
+
+    is_signal = False
+    if direction is None:
+        reason = "No strategy alignment" if score == 0 else f"Conflict: {len(bull)} bullish vs {len(bear)} bearish strategies"
+    elif score < w["min_score"]:
+        reason = f"{score_disp}/10 strategies aligned {direction} - need {w['min_score']}+"
+    elif opposing > w["max_opposing"]:
+        reason = f"{score_disp}/10 aligned {direction} but {opposing} strategies vote the other way"
+    elif veto:
+        reason = f"{score_disp}/10 {direction} but price in {h1_zone} ({h1_pct:.0f}%) with no zone-backed order block - refusing to chase"
+    elif mode == "scalp" and not m5_trigger:
+        reason = f"{score_disp}/10 aligned {direction}; scalp mode waiting for an M5 trigger candle"
     else:
-        m5_choch_direction = None
+        is_signal = True
+        reason = f"{score_disp}/10 strategies aligned {direction}: {', '.join(agree)}"
 
-    # DETERMINE BIAS - unified (computed BEFORE order-block detection, since
-    # OB detection needs to know which direction to look for)
-    bias_votes = []
-    if daily_bias!="NEUTRAL": bias_votes += [daily_bias]*2  # HTF trend weighted more heavily
-    if bias_4h!="NEUTRAL": bias_votes += [bias_4h]*2
-    if ema5_h1 and ema20_h1:
-        bias_votes.append("BULLISH" if ema5_h1>ema20_h1 else "BEARISH")
-    if ema9_m5 and ema21_m5:
-        bias_votes.append("BULLISH" if ema9_m5>ema21_m5 else "BEARISH")
-    if bos_bull: bias_votes.append("BULLISH")
-    if bos_bear: bias_votes.append("BEARISH")
-    final_bias = max(set(bias_votes), key=bias_votes.count) if bias_votes else "NEUTRAL"
-
-    # Order blocks - direction-aware and de-duplicated against the shared
-    # 1h candle set (no separate re-fetch, no double count)
-    h1_ob, h1_ob_zone, h1_ob_score, h1_ob_bounds = detect_order_block(h1_candles, final_bias)
-    m5_ob_bounds = None
-    if m5_candles and len(m5_candles) >= 20:
-        m5_ob, _, m5_ob_score, m5_ob_bounds = detect_order_block(m5_candles, final_bias)
-    multi_ob, multi_ob_details, multi_ob_score = detect_multi_tf_ob(symbol, final_bias, cache, h1_candles=h1_candles, historical=historical)
-
-    # ---- HARD GATES (this is the actual fix) ----
-    # An order block only counts toward the gate if it's actually SITTING in
-    # a zone appropriate to its direction (discount/equilibrium for a bullish
-    # reaction, premium/equilibrium for bearish) — see ob_in_zone()'s own
-    # docstring for why. Without this, an order block detected right up near
-    # a fresh high could still wrongly validate a bullish entry into premium,
-    # which is exactly the USDCHF scenario this rewrite exists to prevent.
-    h1_ob_valid = bool(h1_ob and ob_in_zone(h1_ob_bounds, final_bias, h1_range))
-    m5_ob_valid = bool(m5_ob and ob_in_zone(m5_ob_bounds, final_bias, h1_range))
-    # multi_ob spans 4h/2h/1h timeframes at mixed scales — not meaningfully
-    # checkable against the single H1 dealing range, so it stays a scoring
-    # bonus only and is deliberately excluded from the hard gate below.
-
-    # A bullish setup is only eligible if price is in the H1 discount zone,
-    # OR it's reacting from a direction-matched, ZONE-VALIDATED order block
-    # (which can sit near equilibrium and still be valid — a strict
-    # discount-only rule would miss legitimate OB reactions). What it can
-    # NEVER do anymore is qualify purely from trend-following points while
-    # sitting in premium with nothing above it but liquidity to sweep —
-    # exactly the USDCHF scenario this replaces.
-    has_ob = h1_ob_valid or m5_ob_valid
-    in_favorable_zone = (final_bias=="BULLISH" and h1_zone=="discount") or (final_bias=="BEARISH" and h1_zone=="premium")
-    zone_gate_passed = in_favorable_zone or has_ob
-
-    # The M5 "sniper" trigger: a liquidity sweep followed by a Change of
-    # Character, BOTH confirming the SAME direction as the HTF bias — this
-    # is what separates "the market is reversing right now" from "a candle
-    # pattern happened to appear." Regular/sniper mode requires this
-    # explicitly; scalp mode accepts a fresh M5 order block reaction as a
-    # faster (but still zone-gated) alternative.
-    sniper_trigger = bool(m5_sweep and m5_sweep_direction==final_bias and m5_choch and m5_choch_direction==final_bias)
-
-    zone = h1_zone  # for the factors dict / backward-compatible naming below
-    has_sweep = h1_sweep or m5_sweep
-    has_pattern = h1_pat_score>=2 or m5_pat_score>=2
-    rsi_pullback = False
-    if final_bias=="BULLISH" and 40<=rsi_h1<=55: rsi_pullback = True
-    elif final_bias=="BEARISH" and 45<=rsi_h1<=60: rsi_pullback = True
-
-    # SCORING - now reflects the SAME structural factors that gate the
-    # signal, so a high score actually means high-quality confluence
-    # rather than an unrelated checklist total.
-    score=0; parts=[]
-    if daily_bias!="NEUTRAL": score+=2*w["daily_bias"]; parts.append(f"Daily {daily_bias}")
-    if aligned_4h: score+=2*w["h4_align"]; parts.append(f"4H {bias_4h} aligned")
-    if in_favorable_zone: score+=3*w["zone"]; parts.append(f"{h1_zone.title()} {h1_premium_pct:.0f}%")
-    elif h1_zone == "equilibrium": score+=1*w["zone"]; parts.append(f"Equilibrium {h1_premium_pct:.0f}%")
-    if rsi_pullback: score+=2*w["rsi_pullback"]; parts.append(f"RSI {rsi_h1:.0f} pullback")
-    if (bos_bull and final_bias=="BULLISH") or (bos_bear and final_bias=="BEARISH"):
-        score+=2*w["structure"]; parts.append("H1 BOS")
-    if h1_fvg: score+=2*w["h1_fvg"]; parts.append("H1 FVG")
-    if m5_fvg: score+=1*w["m5_fvg"]; parts.append("M5 FVG")
-    if h1_ob_valid: score+=h1_ob_score*w["h1_ob"]; parts.append(f"H1 {h1_ob_zone}")
-    if m5_ob_valid: score+=m5_ob_score*w["m5_ob"]; parts.append("M5 OB")
-    if multi_ob: score+=multi_ob_score*w["multi_ob"]; parts.append(f"MTF {multi_ob_details}")
-    if h1_sweep: score+=3*w["h1_sweep"]; parts.append("H1 Sweep")
-    if m5_sweep and m5_sweep_direction==final_bias: score+=3*w["m5_sweep"]; parts.append("M5 Sweep")
-    if sniper_trigger: score+=3*w.get("sniper_trigger",1.0); parts.append("M5 Sweep+CHoCH")
-    if h1_patterns: score+=h1_pat_score*w["h1_pattern"]; parts.append(f"H1 {','.join(h1_patterns)}")
-    if m5_patterns: score+=m5_pat_score*w["m5_pattern"]; parts.append(f"M5 {','.join(m5_patterns)}")
-    score = min(score, 10)
-
-    entry = m5_candles[-1]["close"] if m5_candles and len(m5_candles)>0 else h1_candles[-1]["close"] if h1_candles else 0
-
-    if mode=="scalp":
-        m5_bias_ok = bool(ema9_m5 and ema21_m5 and (
-            (ema9_m5>ema21_m5 and final_bias=="BULLISH") or
-            (ema9_m5<ema21_m5 and final_bias=="BEARISH")
-        ))
-        trigger_ok = sniper_trigger or (m5_ob_valid and zone_gate_passed)
-        is_signal = zone_gate_passed and trigger_ok and score>=w["min_score"] and has_pattern and m5_bias_ok and 20<=rsi_m5<=80
-        if not is_signal:
-            if not zone_gate_passed: reason=f"Scalp: {final_bias} but price in {h1_zone} ({h1_premium_pct:.0f}%), no OB reaction"
-            elif not trigger_ok: reason=f"Scalp: zone OK, waiting for M5 sweep+CHoCH or fresh OB"
-            elif score<w["min_score"]: reason=f"Scalp Score {score}/10 - need {w['min_score']}+"
-            elif not has_pattern: reason=f"Scalp Score {score}/10 no pattern"
-            elif not m5_bias_ok: reason=f"Scalp Score {score}/10 M5 EMA not aligned with {final_bias}"
-            else: reason=f"Scalp Score {score}/10 Wait RSI {rsi_m5:.0f}"
-        else:
-            reason=f"Scalp {score}/10 STRONG {final_bias} in {h1_zone}, {'sweep+CHoCH' if sniper_trigger else 'OB reaction'}"
-    else:
-        is_signal = zone_gate_passed and sniper_trigger and score>=w["min_score"] and has_pattern
-        if not is_signal:
-            if not zone_gate_passed: reason=f"Regular: {final_bias} but price in {h1_zone} ({h1_premium_pct:.0f}%), no OB reaction — refusing to chase"
-            elif not sniper_trigger: reason=f"Regular: zone OK, waiting for M5 liquidity sweep + CHoCH confirming {final_bias}"
-            elif score<w["min_score"]: reason=f"Regular Score {score}/10 - need {w['min_score']}+"
-            elif not has_pattern: reason=f"Regular {score}/10 no engulf/hammer"
-            else: reason=f"Regular {score}/10 Wait"
-        else:
-            if score>=8: strength="🔥 8-10 A+ Setup"
-            elif score>=7: strength="✅ 7 Strong"
-            elif score>=6: strength="👍 6 Good"
-            else: strength="⚡ Takeable"
-            reason=f"Regular {score}/10 {strength} {final_bias} sniper entry in {h1_zone}"
-
-    # ---- stop-loss / take-profit / R:R, gated on min_rr ----
-    stop_loss = None; take_profit = None; risk_reward = None
+    entry = price
+    stop_loss = take_profit = risk_reward = None
     if is_signal and entry:
-        ref_atr = atr_m5 if mode == "scalp" and atr_m5 else atr_h1
+        ref_atr = atr_m5 if (mode == "scalp" and atr_m5) else atr_h1
         if ref_atr:
             buffer = ref_atr * 1.2
-            if final_bias == "BULLISH":
-                struct_low = min(recent_low, h1_candles[-1]["low"])
-                stop_loss = min(entry - buffer, struct_low - buffer * 0.25)
-                risk = entry - stop_loss
-                take_profit = entry + risk * min_rr
+            rec_high = h1_range["high"] if h1_range else max(c["high"] for c in h1[-21:-1])
+            rec_low = h1_range["low"] if h1_range else min(c["low"] for c in h1[-21:-1])
+            if direction == "BULLISH":
+                stop_loss = min(entry - buffer, min(rec_low, h1[-1]["low"]) - buffer * 0.25)
+                risk = entry - stop_loss; take_profit = entry + risk * min_rr
             else:
-                struct_high = max(recent_high, h1_candles[-1]["high"])
-                stop_loss = max(entry + buffer, struct_high + buffer * 0.25)
-                risk = stop_loss - entry
-                take_profit = entry - risk * min_rr
+                stop_loss = max(entry + buffer, max(rec_high, h1[-1]["high"]) + buffer * 0.25)
+                risk = stop_loss - entry; take_profit = entry - risk * min_rr
             risk_reward = min_rr
             if risk <= 0:
                 stop_loss = take_profit = risk_reward = None
-                is_signal = False
-                reason = "Rejected: invalid SL distance"
+                is_signal = False; reason = "Rejected: invalid SL distance"
 
-    rationale = build_rationale(symbol, final_bias, score, daily_bias, aligned_4h, bias_4h, h1_premium_pct,
-                                 rsi_h1, bos_bull, bos_bear, breakout_bull, breakout_bear,
-                                 h1_fvg, m5_fvg, h1_ob_valid, h1_ob_zone, m5_ob_valid, multi_ob, multi_ob_details,
-                                 h1_sweep, m5_sweep, h1_patterns, m5_patterns)
-    if sniper_trigger:
-        rationale = f"Liquidity swept then a change of character confirmed {final_bias.lower()} on the 5-minute. " + rationale
+    aligned_notes = [(n, votes[n][1]) for n in agree]
+    rationale = build_confluence_rationale(direction, score, aligned_notes) if direction else reason
+    bias = direction or "NEUTRAL"
 
     return {
-        "symbol":symbol,
-        "signal":is_signal,
-        "score":score,
-        "bias":final_bias,
-        "bias_4h":bias_4h,
-        "entry":entry,
-        "stop_loss":stop_loss,
-        "take_profit":take_profit,
-        "risk_reward":risk_reward,
-        "premium_pct":h1_premium_pct,
-        "reason":reason,
-        "rationale":rationale,
-        "confluence":" | ".join(parts) if parts else "No confluence",
-        "details":{"candles":h1_patterns+m5_patterns,"sweep":has_sweep,"fvg":h1_fvg or m5_fvg,"ob":has_ob,"ob_details":multi_ob_details,"rsi_h1":round(rsi_h1,1),"rsi_m5":round(rsi_m5,1),"bos":bos_bull or bos_bear,"breakout":breakout_bull or breakout_bear,"zone_gate_passed":zone_gate_passed,"sniper_trigger":sniper_trigger},
-        "mode":mode,
-        # Structured factor flags — for backtest analysis to read reliably,
-        # instead of parsing them back out of the "confluence" text string.
-        "factors": {
-            "daily_bias": daily_bias != "NEUTRAL", "h4_aligned": aligned_4h, "zone": zone,
-            "rsi_pullback": rsi_pullback, "bos_or_breakout": bool(bos_bull or bos_bear),
-            "h1_fvg": h1_fvg, "m5_fvg": m5_fvg, "h1_ob": h1_ob, "m5_ob": m5_ob, "multi_ob": multi_ob,
-            "h1_sweep": h1_sweep, "m5_sweep": m5_sweep, "sniper_trigger": sniper_trigger,
-            "zone_gate_passed": zone_gate_passed,
-            "h1_pattern": ",".join(h1_patterns) if h1_patterns else None,
-            "m5_pattern": ",".join(m5_patterns) if m5_patterns else None,
+        "symbol": symbol, "signal": is_signal, "score": score_disp, "bias": bias,
+        "bias_4h": bias_4h, "entry": entry, "stop_loss": stop_loss, "take_profit": take_profit,
+        "risk_reward": risk_reward, "premium_pct": h1_pct, "reason": reason, "rationale": rationale,
+        "confluence": " | ".join(agree) if agree else "No confluence",
+        "details": {
+            "votes": {n: votes[n][0] for n in STRATEGY_NAMES},
+            "notes": {n: votes[n][1] for n in STRATEGY_NAMES if votes[n][0]},
+            "opposing": opposing, "zone": h1_zone, "zone_veto_blocked": veto,
+            "rsi_h1": round(x["rsi_h1"], 1), "adx_h1": round(x["adx_h1"], 1) if x["adx_h1"] is not None else None,
+            "candles": h1_patterns + m5_patterns, "strategy_errors": errors,
         },
+        "mode": mode,
+        # per-strategy flags (True = this strategy voted WITH the signal direction),
+        # for the backtest analyzer to read reliably.
+        "factors": {**{n: (votes[n][0] == direction and direction is not None) for n in STRATEGY_NAMES},
+                    "zone": h1_zone, "zone_veto_blocked": veto},
     }
