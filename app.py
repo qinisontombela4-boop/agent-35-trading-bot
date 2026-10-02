@@ -51,7 +51,7 @@ else:
           "survive a redeploy on most hosts.", file=sys.stderr)
 
 MAX_TRACKED = 6  # now PER-USER: how many taken/tracked trades one user can have open at once
-MAX_SIGNALS_PER_DAY = 20  # global cap across all users/cron sends, resets via /cron/daily-reset
+MAX_SIGNALS_PER_DAY = 20  # PER-USER cap, resets via /cron/daily-reset or the date rollover
 TRADE_EXPIRY_HOURS = {"scalp": 6, "regular": 48}  # per-mode max time a TAKEN trade can sit unresolved
 PENDING_EXPIRY_HOURS = 3  # how long an un-actioned (not yet TOOK/SKIP'd) signal stays valid
 
@@ -177,19 +177,27 @@ def broadcast_telegram(text):
         try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":text}, timeout=10)
         except Exception: pass
 
-def get_daily_signal_count():
+def get_daily_signal_count(email):
+    # FIXED: now per-user. Was a single system-wide counter shared by every
+    # user — one busy morning across a handful of users could exhaust the
+    # whole day's budget by mid-morning, silencing everyone (including users
+    # who personally sent zero signals) until midnight UTC. That was exactly
+    # the "no signals after 10:30 SAST" bug.
     d = load_json(DAILY_COUNT_FILE, dict)
+    user_entry = d.get(email, {})
     today = datetime.now().strftime("%Y-%m-%d")
-    if d.get("date") != today:
+    if user_entry.get("date") != today:
         return 0  # previous day's count — self-heals even if the reset cron missed a run
-    return d.get("count", 0)
+    return user_entry.get("count", 0)
 
-def increment_daily_signal_count():
+def increment_daily_signal_count(email):
     d = load_json(DAILY_COUNT_FILE, dict)
     today = datetime.now().strftime("%Y-%m-%d")
-    if d.get("date") != today:
-        d = {"date": today, "count": 0}
-    d["count"] = d.get("count", 0) + 1
+    user_entry = d.get(email, {})
+    if user_entry.get("date") != today:
+        user_entry = {"date": today, "count": 0}
+    user_entry["count"] = user_entry.get("count", 0) + 1
+    d[email] = user_entry
     save_json(DAILY_COUNT_FILE, d)
 
 # ================= PER-USER SIGNAL DELIVERY =================
@@ -226,7 +234,7 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings):
     entry = r.get('entry', 0)
     if not entry or float(entry) == 0:
         return False, {"error": "no entry price"}
-    if get_daily_signal_count() >= MAX_SIGNALS_PER_DAY:
+    if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
         return False, {"error": "daily signal cap reached"}
 
     rr = user_settings.get('rr_ratio', 2.5); risk_percent = user_settings.get('risk_percent', 1)
@@ -249,7 +257,7 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings):
         "sent_at": datetime.now().isoformat(),
     }
     save_json(PENDING_FILE, pending)
-    increment_daily_signal_count()
+    increment_daily_signal_count(email)
     return True, {"signal_id": signal_id, "telegram": res}
 
 def user_has_open_or_pending(email, symbol):
@@ -918,8 +926,8 @@ def send_signal():
 
     if user_tracked_count(email) >= MAX_TRACKED and not user_has_open_or_pending(email, sym):
         return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Your Track Limit ({MAX_TRACKED}) Reached</h2><p style='color:#94a3b8'>You have {MAX_TRACKED} trades already tracked. Clear one to open a new slot.</p><div style='display:flex;gap:8px;justify-content:center;margin-top:16px'><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Back</a><a href='/clear-tracked' style='background:#ef4444;color:white;padding:10px 18px;border-radius:10px;text-decoration:none'>Clear Mine</a></div></div></div>","All Signals", is_admin=email=="admin@agent35.com")
-    if get_daily_signal_count() >= MAX_SIGNALS_PER_DAY:
-        return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Daily Limit Reached</h2><p style='color:#94a3b8'>{MAX_SIGNALS_PER_DAY} signals already sent today system-wide. Resets at midnight (or via /cron/daily-reset).</p><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none;display:inline-block;margin-top:12px'>Back</a></div></div>","All Signals", is_admin=email=="admin@agent35.com")
+    if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
+        return pro_layout(f"<div style='max-width:600px;margin:60px auto;text-align:center'><div class='card'><h2>Daily Limit Reached</h2><p style='color:#94a3b8'>You've hit your {MAX_SIGNALS_PER_DAY}-signal daily limit. Resets at midnight (or via /cron/daily-reset).</p><a href='/all-signals' style='background:#10b981;color:white;padding:10px 18px;border-radius:10px;text-decoration:none;display:inline-block;margin-top:12px'>Back</a></div></div>","All Signals", is_admin=email=="admin@agent35.com")
 
     try:
         r=cached_analysis(sym, user_set); entry=r.get('entry',0)
@@ -948,7 +956,7 @@ def send_signal():
             signal_id = generate_signal_id()
             tracked[signal_id]={"email":email,"chat_id":None,"symbol":sym,"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode}
             save_json(TRACK_FILE, tracked)
-            increment_daily_signal_count()
+            increment_daily_signal_count(email)
             msg=f"Tracked {sym} directly (no Telegram linked — link one in Settings to use TOOK/SKIP confirmation)"
             res={"sl":sl,"tp":tp}
     except Exception as e: res={"error":str(e)}; msg=f"Error {sym}: {e}"
@@ -1446,16 +1454,16 @@ def cron_check_expiry():
 
 @app.route("/cron/daily-reset")
 def cron_daily_reset():
-    """Resets the daily signal-send counter. Call once a day (e.g. 00:05 UTC).
-    Note: get_daily_signal_count() already self-heals on date change even if
-    this never fires, so a missed run isn't catastrophic — but running it
-    keeps the stored counter file tidy and gives you a clean daily total."""
+    """Resets every user's daily signal-send counter. Call once a day (e.g.
+    00:05 UTC). Note: get_daily_signal_count() already self-heals per-user
+    on date change even if this never fires, so a missed run isn't
+    catastrophic — but running it keeps the stored file tidy."""
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
     today = datetime.now().strftime("%Y-%m-%d")
     prev = load_json(DAILY_COUNT_FILE, dict)
-    prev_count = prev.get("count", 0) if prev.get("date") == today else 0
-    save_json(DAILY_COUNT_FILE, {"date": today, "count": 0})
-    return jsonify({"reset": True, "date": today, "previous_count": prev_count, "limit": MAX_SIGNALS_PER_DAY})
+    prev_counts = {email: v.get("count",0) for email, v in prev.items() if v.get("date")==today}
+    save_json(DAILY_COUNT_FILE, {})  # every user's count self-heals to 0 on next read anyway
+    return jsonify({"reset": True, "date": today, "previous_counts": prev_counts, "limit": MAX_SIGNALS_PER_DAY})
 
 @app.route("/cron/scan")
 def cron_scan():
@@ -1464,16 +1472,18 @@ def cron_scan():
     watch — no more grabbing one arbitrary user's settings and broadcasting
     the result to everyone. Users without a linked Telegram are skipped
     here (nothing to send a TOOK/SKIP button to); they can still use the
-    dashboard's manual Send button, which tracks immediately for them."""
+    dashboard's manual Send button, which tracks immediately for them.
+
+    Daily signal cap is PER-USER (see get_daily_signal_count) — one user
+    hitting their limit only stops THEIR sends for the rest of the day, it
+    no longer stops the scan for everyone else. That was the bug behind
+    signals going silent system-wide partway through the day."""
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
     system=load_json(SYSTEM_FILE, dict); system["last_scan"]=datetime.now().isoformat(); system["total_scans"]=system.get("total_scans",0)+1; save_json(SYSTEM_FILE, system)
 
-    if get_daily_signal_count()>=MAX_SIGNALS_PER_DAY:
-        return jsonify({"error":f"Daily limit {MAX_SIGNALS_PER_DAY} reached","sent_today":get_daily_signal_count()})
-
     settings_all = load_json(SETTINGS_FILE, dict)
     tg_users = load_json(TG_FILE, dict)
-    sent=[]; skipped=[]
+    sent=[]; skipped=[]; daily_counts={}
 
     for email, chat_data in tg_users.items():
         chat_id = chat_data.get("chat_id")
@@ -1483,10 +1493,12 @@ def cron_scan():
 
         if user_tracked_count(email) >= MAX_TRACKED:
             skipped.append(f"{email} AT_LIMIT"); continue
+        if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
+            skipped.append(f"{email} DAILY_LIMIT_REACHED"); continue
 
         for sym in user_settings.get("symbols", [])[:12]:
-            if get_daily_signal_count() >= MAX_SIGNALS_PER_DAY:
-                skipped.append("DAILY_LIMIT_REACHED"); break
+            if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
+                skipped.append(f"{email} DAILY_LIMIT_REACHED"); break
             if user_tracked_count(email) >= MAX_TRACKED: break
             if user_has_open_or_pending(email, sym): continue
             try:
@@ -1497,10 +1509,9 @@ def cron_scan():
                 else: skipped.append(f"{email}:{sym} {info.get('error')}")
             except Exception as e:
                 skipped.append(f"{email}:{sym} ERROR:{e}")
-        if get_daily_signal_count() >= MAX_SIGNALS_PER_DAY:
-            break
+        daily_counts[email] = get_daily_signal_count(email)
 
-    return jsonify({"sent":sent,"skipped":skipped,"daily_count":get_daily_signal_count(),"daily_limit":MAX_SIGNALS_PER_DAY})
+    return jsonify({"sent":sent,"skipped":skipped,"daily_counts":daily_counts,"daily_limit_per_user":MAX_SIGNALS_PER_DAY})
 
 @app.route("/health")
 def health():
@@ -1525,13 +1536,36 @@ def debug_signal():
     except Exception as e:
         r = {"error": str(e)}
     details = r.get("details", {})
-    rows = "".join([f"<tr><td style='color:#94a3b8'>{k}</td><td style='font-weight:700'>{v}</td></tr>" for k,v in r.items() if k != "details"])
-    detail_rows = "".join([f"<tr><td style='color:#94a3b8'>{k}</td><td style='font-weight:700'>{v}</td></tr>" for k,v in details.items()])
-    content=f"""<div style='max-width:800px;margin:0 auto;padding:14px'>
+    votes = details.get("votes", {})
+    notes = details.get("notes", {})
+    errors = details.get("strategy_errors", {})
+
+    top_skip = {"details", "votes", "notes", "strategy_errors"}
+    rows = "".join([f"<tr><td style='color:#94a3b8'>{k}</td><td style='font-weight:700'>{v}</td></tr>" for k,v in r.items() if k not in top_skip])
+
+    strat_rows = ""
+    for name, vote in votes.items():
+        color = "#10b981" if vote == "BULLISH" else "#ef4444" if vote == "BEARISH" else "#64748b"
+        label = vote or "—"
+        note = notes.get(name, "")
+        strat_rows += f"<tr><td style='font-weight:700'>{name}</td><td style='color:{color};font-weight:700'>{label}</td><td style='color:#94a3b8;font-size:11px'>{note}</td></tr>"
+
+    error_html = ""
+    if errors:
+        err_rows = "".join([f"<tr><td style='font-weight:700;color:#ef4444'>{name}</td><td style='color:#fca5a5'>{err}</td></tr>" for name,err in errors.items()])
+        error_html = f"""<div class='table-card' style='margin-top:12px;border:1px solid #ef444455'>
+<h3 style='font-size:13px;margin:0 0 10px;color:#ef4444'>⚠️ Strategy Errors (these strategies could NOT vote due to a crash, not just a missed setup)</h3>
+<table><tr><th>Strategy</th><th>Error</th></tr>{err_rows}</table></div>"""
+
+    other_details = "".join([f"<tr><td style='color:#94a3b8'>{k}</td><td style='font-weight:700'>{v}</td></tr>" for k,v in details.items() if k not in ("votes","notes","strategy_errors")])
+
+    content=f"""<div style='max-width:900px;margin:0 auto;padding:14px'>
 <h1 style='font-size:18px;font-weight:900'>Signal Debug - {sym}</h1>
 <p style='color:#64748b;font-size:12px'>Live (uncached) analysis. Change symbol/mode via ?symbol=XXX&mode=regular|scalp</p>
 <div class='table-card'><h3 style='font-size:13px;margin:0 0 10px'>Top-Level Result</h3><table>{rows}</table></div>
-<div class='table-card' style='margin-top:12px'><h3 style='font-size:13px;margin:0 0 10px'>Detail Breakdown</h3><table>{detail_rows if detail_rows else "<tr><td colspan=2>No details returned</td></tr>"}</table></div>
+<div class='table-card' style='margin-top:12px'><h3 style='font-size:13px;margin:0 0 10px'>Per-Strategy Votes ({sum(1 for v in votes.values() if v)}/{len(votes)} voted)</h3><table><tr><th>Strategy</th><th>Vote</th><th>Note</th></tr>{strat_rows}</table></div>
+{error_html}
+<div class='table-card' style='margin-top:12px'><h3 style='font-size:13px;margin:0 0 10px'>Other Details</h3><table>{other_details if other_details else "<tr><td colspan=2>None</td></tr>"}</table></div>
 </div>"""
     return pro_layout(content, "All Signals", is_admin=is_admin)
 
