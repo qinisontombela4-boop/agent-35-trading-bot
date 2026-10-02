@@ -528,8 +528,16 @@ STRATEGY_NAMES = [
 
 DEFAULT_WEIGHTS = {name: 1.0 for name in STRATEGY_NAMES}
 DEFAULT_WEIGHTS.update({
-    "min_score": 5,        # strategies that must line up before a signal is sent
-    "max_opposing": 1,     # if more than this many strategies vote the OTHER way, skip
+    # LOWERED from 5->2 and 1->2: in testing, several of the ten strategies
+    # individually need quite narrow conditions (Trend Following needs
+    # 200+ clean trending candles, ICT only evaluates inside a ~6hr/day
+    # killzone window, Wyckoff/AMD need specific range geometry). Requiring
+    # FIVE of them to agree simultaneously turned out to be unrealistic for
+    # live data (zero signals across 11 real hours). This is a judgment
+    # call, not a backtested number — validate it with backtest.py once you
+    # have real results, and adjust from there.
+    "min_score": 2,        # strategies that must line up before a signal is sent
+    "max_opposing": 2,     # if more than this many strategies vote the OTHER way, skip
     "zone_veto": True,     # never buy in premium / sell in discount unless a zone-appropriate OB backs it
 })
 
