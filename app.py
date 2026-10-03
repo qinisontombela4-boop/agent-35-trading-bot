@@ -46,17 +46,37 @@ MIN_SCORE = eng.DEFAULT_WEIGHTS.get("min_score", 5)
 # redeploy automatically — no backup/restore dance needed anymore.
 SUPABASE_URL = os.getenv("SUPABASE_URL", "")
 SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
-supabase = create_client(SUPABASE_URL, SUPABASE_KEY) if SUPABASE_URL and SUPABASE_KEY else None
 
-# Local-file fallback dir, used ONLY if Supabase isn't configured yet
-# (e.g. running locally without env vars set). Once SUPABASE_URL and
-# SUPABASE_SERVICE_KEY are set, this path is never touched.
+# FIXED: create_client() validates the key's FORMAT client-side and raises
+# SupabaseException immediately if it looks malformed — before this file
+# even finishes importing. Uncaught, that took the ENTIRE app down (every
+# route, every user, a flat 502) just from one bad/truncated/whitespace-
+# mangled env var value on the host, even though a working local-file
+# fallback already exists for "Supabase not configured at all". A bad
+# credential should degrade to that same fallback, loudly, not crash-loop
+# the whole service until someone notices and fixes the host's dashboard.
+supabase = None
+if SUPABASE_URL and SUPABASE_KEY:
+    try:
+        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+    except Exception as e:
+        print(f"[STARTUP] CRITICAL: SUPABASE_URL/SUPABASE_SERVICE_KEY are set but "
+              f"rejected by the Supabase client ({e}). Falling back to local files — "
+              "this means NO persistence across redeploys until the credential is "
+              "fixed. Re-copy the service_role key from Supabase dashboard > "
+              "Settings > API, with no extra whitespace/quotes, and redeploy.",
+              file=sys.stderr)
+
+# Local-file fallback dir, used if Supabase isn't configured OR its
+# credentials were rejected above (see the try/except). Once a valid
+# SUPABASE_URL and SUPABASE_SERVICE_KEY are in place, this path is never
+# touched.
 BASE_DIR = "/data" if os.path.exists("/data") else "."
 
 if supabase:
     print("[STARTUP] Supabase storage active — data persists across redeploys.", file=sys.stderr)
 else:
-    print("[STARTUP] WARNING: SUPABASE_URL / SUPABASE_SERVICE_KEY not set — "
+    print("[STARTUP] WARNING: Supabase not active — "
           f"falling back to local files under {BASE_DIR}, which will NOT "
           "survive a redeploy on most hosts.", file=sys.stderr)
 
