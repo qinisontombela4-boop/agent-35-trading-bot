@@ -84,23 +84,57 @@ def slice_as_of(all_candles, as_of, bar_duration_minutes):
 # Copied rather than imported: app.py has Flask/Supabase init side effects
 # at import time (it raises if FLASK_SECRET isn't set), so importing it here
 # would require faking a whole web app just to get a pure math function.
+#
+# KEEP THIS IN SYNC WITH app.py's calculate_dynamic_sl_tp. They diverged
+# once already (this copy never accounted for leverage at all, even as a
+# cosmetic field, while app.py at least accepted the parameter) — that's
+# exactly the live/backtest divergence this file's own design is supposed
+# to avoid. The leverage-as-margin-cap logic below is a line-for-line port
+# of app.py's; if you change one, change both.
+
+UNITS_PER_LOT = {"gold": 100, "oil": 50, "index": 10, "crypto": 10, "forex": 100000}
+
+def _parse_leverage_ratio(leverage):
+    try:
+        s = str(leverage).strip()
+        if ":" in s:
+            return max(1.0, float(s.split(":")[1]))
+        return max(1.0, float(s))
+    except Exception:
+        return 1.0
+
+def _max_lot_by_leverage(account_size, leverage, entry, units_per_lot):
+    leverage_ratio = _parse_leverage_ratio(leverage)
+    entry = float(entry) if entry else 0
+    if entry <= 0 or units_per_lot <= 0:
+        return 999.0
+    return (float(account_size) * leverage_ratio) / (units_per_lot * entry)
 
 def calculate_sl_tp(symbol, entry, bias, account_size, lot_size, risk_percent, rr_ratio,
+                     leverage="1:500",
                      spread_forex=0.7, spread_gold=0.35, spread_indices=2.0, spread_crypto=10.0):
     entry=float(entry); is_sell="BEARISH" in bias.upper()
     risk_amount=float(account_size)*(float(risk_percent)/100.0); lot_size=max(float(lot_size),0.01); rr_ratio=max(float(rr_ratio),0.1)
     dp = eng.price_decimals(symbol)
-    if symbol in ["XAUUSD","XAGUSD"]:
+
+    if symbol in ["XAUUSD","XAGUSD"]: asset_class="gold"
+    elif symbol in ["XTIUSD","XBRUSD"]: asset_class="oil"
+    elif symbol in ["US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200"]: asset_class="index"
+    elif any(x in symbol for x in ["BTC","ETH","SOL","BNB","XRP","ADA","DOGE","DOT","AVAX","LINK","MATIC","LTC"]): asset_class="crypto"
+    else: asset_class="forex"
+    max_lot = _max_lot_by_leverage(account_size, leverage, entry, UNITS_PER_LOT[asset_class])
+    lot_size = min(lot_size, max_lot) if max_lot > 0 else lot_size
+
+    if asset_class=="gold":
         sl_d=max(2.0,min(risk_amount/(lot_size*100),15.0))+spread_gold; tp_d=sl_d*rr_ratio-spread_gold
         sl=entry+sl_d if is_sell else entry-sl_d; tp=entry-tp_d if is_sell else entry+tp_d
-    elif symbol in ["XTIUSD","XBRUSD"]:
+    elif asset_class=="oil":
         sl_d=max(0.3,min(risk_amount/(lot_size*50),2.0))+spread_gold; tp_d=sl_d*rr_ratio-spread_gold
         sl=entry+sl_d if is_sell else entry-sl_d; tp=entry-tp_d if is_sell else entry+tp_d
-    elif symbol in ["US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200"]:
+    elif asset_class=="index":
         sl_p=max(30,min(risk_amount/(lot_size*10),250))+spread_indices; tp_p=sl_p*rr_ratio-spread_indices
         sl=entry+sl_p if is_sell else entry-sl_p; tp=entry-tp_p if is_sell else entry+tp_p
-    elif any(x in symbol for x in ["BTC","ETH","SOL","BNB","XRP","ADA","DOGE","DOT","AVAX","LINK","MATIC","LTC"]):
-        base = 400 if "BTC" in symbol else 40
+    elif asset_class=="crypto":
         sl_d=max(100 if "BTC" in symbol else 5, min(risk_amount/(lot_size*10), 1200 if "BTC" in symbol else 150))+spread_crypto
         tp_d=sl_d*rr_ratio-spread_crypto
         sl=entry+sl_d if is_sell else entry-sl_d; tp=entry-tp_d if is_sell else entry+tp_d
@@ -157,6 +191,7 @@ def run_backtest(symbol, daily, h4, h1, m5, user_settings, weights=None, verbose
             symbol, entry, r.get("bias",""),
             user_settings.get("account_size",142), user_settings.get("lot_size",0.01),
             user_settings.get("risk_percent",1), user_settings.get("rr_ratio",2.5),
+            user_settings.get("leverage","1:500"),
         )
         is_bull = "BULLISH" in r.get("bias","").upper()
         risk = abs(entry - sl)
