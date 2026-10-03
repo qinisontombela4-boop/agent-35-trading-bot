@@ -22,6 +22,13 @@ FACTOR_KEYS = [
     "AMD", "SMC", "ICT", "Wyckoff", "Supply&Demand",
     "Volume Profile", "Breakout+Retest", "Trend Following",
     "Mean Reversion", "Liquidity Sweep",
+    # FIXED: split_by_factor() below already has dedicated handling for the
+    # "zone" factor (premium/discount, the hard structural gate added in
+    # the rewrite) but "zone" was never actually in this list, so that
+    # handling was dead code — the single most important structural filter
+    # was never being checked for a real edge. Added so it gets analyzed
+    # like every other factor.
+    "zone",
 ]
 
 
