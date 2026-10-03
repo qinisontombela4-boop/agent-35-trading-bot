@@ -31,6 +31,16 @@ if not CREATOR_SECRET:
 import trading_engine as eng
 import news_calendar as nc
 
+# FIXED: the UI (settings, dashboard, scan page, journal, pricing, user
+# guide, even the Telegram "link your chat" message) hardcoded "Score 5+
+# sends" in ~13 separate places. When min_score was lowered to 2 in the
+# engine, every one of those copies went stale — the app was telling users
+# a signal needs 5+ while actually sending at 2+, which is exactly the kind
+# of thing that makes a system feel like it's lying to you. Reading it once
+# here and formatting it into every UI string below means this can't drift
+# out of sync with the engine again.
+MIN_SCORE = eng.DEFAULT_WEIGHTS.get("min_score", 5)
+
 # --- SUPABASE: persistent storage. Data lives in a Supabase Postgres
 # table, entirely outside Render's ephemeral disk, so it survives every
 # redeploy automatically — no backup/restore dance needed anymore.
@@ -241,10 +251,10 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings):
     lot = user_settings.get('lot_size', 0.01); lev = user_settings.get('leverage', '1:500')
     acc = user_settings.get('account_size', 142); curr_sym = get_currency_symbol(user_settings.get("currency","ZAR"))
     mode = user_settings.get("trading_mode", "regular")
-    sl, tp, sl_dist, tp_dist, risk_amt = calculate_dynamic_sl_tp(symbol, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
+    sl, tp, sl_dist, tp_dist, risk_amt, lev_info = calculate_dynamic_sl_tp(symbol, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
 
     signal_id = generate_signal_id()
-    res = send_telegram_pro(chat_id, signal_id, symbol, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''))
+    res = send_telegram_pro(chat_id, signal_id, symbol, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''), lev_info)
     if isinstance(res, dict) and res.get("error"):
         return False, {"error": res["error"]}
 
@@ -312,6 +322,47 @@ def calculate_pnl_stats(journal):
     if stats["total_trades"]>0: stats["win_rate"]=round((stats["wins"]/stats["total_trades"])*100,1)
     return stats
 
+def parse_leverage_ratio(leverage):
+    """'1:500' -> 500.0. Accepts a bare number too ('500', 500). Falls back
+    to 1x (no leverage) if it can't be parsed, which is the conservative
+    (most-restrictive) assumption."""
+    try:
+        s = str(leverage).strip()
+        if ":" in s:
+            parts = s.split(":")
+            return max(1.0, float(parts[1]))
+        return max(1.0, float(s))
+    except Exception:
+        return 1.0
+
+# Units-per-lot used consistently for both the existing $-per-lot risk
+# formulas below AND the margin/leverage check — these are deliberately the
+# SAME constants already implicit in each branch's "lot_size*N" risk math
+# (e.g. forex pip_value=lot_size*10 already assumes 1.0 lot = a standard
+# 100,000-unit lot), so leverage now constrains the same position the risk
+# math is sizing, instead of being a second, disconnected number.
+UNITS_PER_LOT = {
+    "gold": 100,       # XAUUSD/XAGUSD: 100 oz/lot
+    "oil": 50,         # XTIUSD/XBRUSD: matches the existing *50 risk constant
+    "index": 10,       # matches the existing *10 point-value constant
+    "crypto": 10,      # matches the existing *10 constant
+    "forex": 100000,   # standard lot
+}
+
+def max_lot_by_leverage(account_size, leverage, entry, units_per_lot):
+    """How large a position the account can actually margin at this
+    leverage. Margin required = lots * units_per_lot * entry / leverage;
+    solving for lots with margin == account_size gives the ceiling (using
+    the full balance as available margin is the simple, conservative
+    assumption — a real broker would also need free-margin headroom for
+    floating P&L, so this is an upper bound, not a recommendation to use
+    it all)."""
+    leverage_ratio = parse_leverage_ratio(leverage)
+    entry = float(entry) if entry else 0
+    if entry <= 0 or units_per_lot <= 0:
+        return 999.0
+    return (float(account_size) * leverage_ratio) / (units_per_lot * entry)
+
 def calculate_dynamic_sl_tp(symbol, entry, bias, account_size, lot_size, leverage, risk_percent, rr_ratio, spread_forex=0.7, spread_gold=0.35, spread_indices=2.0, spread_crypto=10.0):
     entry=float(entry); is_sell="BEARISH" in bias.upper() or "SELL" in bias.upper()
     risk_amount=float(account_size)*(float(risk_percent)/100.0); lot_size=float(lot_size) if float(lot_size)>0 else 0.01; rr_ratio=float(rr_ratio) if float(rr_ratio)>0 else 2.5
@@ -320,33 +371,53 @@ def calculate_dynamic_sl_tp(symbol, entry, bias, account_size, lot_size, leverag
     # gave the wrong decimal count for JPY pairs, indices, and any crypto
     # whose price happens to sit near that threshold.
     dp = eng.price_decimals(symbol)
-    if symbol in ["XAUUSD","XAGUSD"]:
+
+    # FIXED: leverage used to be accepted as a parameter and never once
+    # referenced in the math below — it only ever showed up cosmetically as
+    # "Lev 1:500" in the Telegram text. Now it genuinely constrains the
+    # trade: given the account size and leverage, there's a hard ceiling on
+    # how many lots can actually be margined. If the user's configured
+    # lot_size exceeds that ceiling, we size DOWN to what the leverage
+    # actually allows before computing risk — otherwise the "risk %" shown
+    # to the user would be fictional (a position their account/leverage
+    # combo can't actually hold at that size).
+    if symbol in ["XAUUSD","XAGUSD"]: asset_class="gold"
+    elif symbol in ["XTIUSD","XBRUSD"]: asset_class="oil"
+    elif symbol in ["US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200"]: asset_class="index"
+    elif any(x in symbol for x in ["BTC","ETH","SOL","BNB","XRP","ADA","DOGE","DOT","AVAX","LINK","MATIC","LTC"]): asset_class="crypto"
+    else: asset_class="forex"
+    units_per_lot = UNITS_PER_LOT[asset_class]
+    max_lot = max_lot_by_leverage(account_size, leverage, entry, units_per_lot)
+    effective_lot = min(lot_size, max_lot) if max_lot > 0 else lot_size
+    leverage_capped = effective_lot < lot_size - 1e-9
+    lot_size = effective_lot if effective_lot > 0 else lot_size
+
+    if asset_class=="gold":
         spread=float(spread_gold); sl_dollar=risk_amount/(lot_size*100) if lot_size>0 else 5.0; sl_dollar=max(2.0,min(sl_dollar,15.0)); sl_dollar+=spread; tp_dollar=sl_dollar*rr_ratio - spread
         sl=entry+sl_dollar if is_sell else entry-sl_dollar; tp=entry-tp_dollar if is_sell else entry+tp_dollar
-        return round(sl,dp),round(tp,dp),round(sl_dollar,2),round(tp_dollar,2),risk_amount
-    elif symbol in ["XTIUSD","XBRUSD"]:
+        return round(sl,dp),round(tp,dp),round(sl_dollar,2),round(tp_dollar,2),risk_amount,{"leverage_capped":leverage_capped,"effective_lot":round(lot_size,4),"max_lot":round(max_lot,4)}
+    elif asset_class=="oil":
         spread=float(spread_gold); sl_dollar=risk_amount/(lot_size*50) if lot_size>0 else 0.5; sl_dollar=max(0.3,min(sl_dollar,2.0)); sl_dollar+=spread; tp_dollar=sl_dollar*rr_ratio - spread
         sl=entry+sl_dollar if is_sell else entry-sl_dollar; tp=entry-tp_dollar if is_sell else entry+tp_dollar
-        return round(sl,dp),round(tp,dp),round(sl_dollar,2),round(tp_dollar,2),risk_amount
-    elif symbol in ["US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200"]:
+        return round(sl,dp),round(tp,dp),round(sl_dollar,2),round(tp_dollar,2),risk_amount,{"leverage_capped":leverage_capped,"effective_lot":round(lot_size,4),"max_lot":round(max_lot,4)}
+    elif asset_class=="index":
         spread=float(spread_indices); sl_points=(risk_amount/(lot_size*10)) if lot_size>0 else 80; sl_points=max(30,min(sl_points,250)); sl_points+=spread; tp_points=sl_points*rr_ratio - spread
         sl=entry+sl_points if is_sell else entry-sl_points; tp=entry-tp_points if is_sell else entry+tp_points
-        return round(sl,dp),round(tp,dp),round(sl_points,1),round(tp_points,1),risk_amount
+        return round(sl,dp),round(tp,dp),round(sl_points,1),round(tp_points,1),risk_amount,{"leverage_capped":leverage_capped,"effective_lot":round(lot_size,4),"max_lot":round(max_lot,4)}
+    elif asset_class=="crypto":
+        spread=float(spread_crypto)
+        if "BTC" in symbol: sl_d=max(100,min(risk_amount/(lot_size*10) if lot_size>0 else 400,1200))
+        else: sl_d=max(5,min(risk_amount/(lot_size*10) if lot_size>0 else 40,150))
+        sl_d+=spread; tp_d=sl_d*rr_ratio - spread; sl=entry+sl_d if is_sell else entry-sl_d; tp=entry-tp_d if is_sell else entry+tp_d
+        return round(sl,dp),round(tp,dp),round(sl_d,1),round(tp_d,1),risk_amount,{"leverage_capped":leverage_capped,"effective_lot":round(lot_size,4),"max_lot":round(max_lot,4)}
     else:
-        if any(x in symbol for x in ["BTC","ETH","SOL","BNB","XRP","ADA","DOGE","DOT","AVAX","LINK","MATIC","LTC"]):
-            spread=float(spread_crypto)
-            if "BTC" in symbol: sl_d=max(100,min(risk_amount/(lot_size*10) if lot_size>0 else 400,1200))
-            else: sl_d=max(5,min(risk_amount/(lot_size*10) if lot_size>0 else 40,150))
-            sl_d+=spread; tp_d=sl_d*rr_ratio - spread; sl=entry+sl_d if is_sell else entry-sl_d; tp=entry-tp_d if is_sell else entry+tp_d
-            return round(sl,dp),round(tp,dp),round(sl_d,1),round(tp_d,1),risk_amount
-        else:
-            spread=float(spread_forex); pip_value=lot_size*10; sl_pips=risk_amount/pip_value if pip_value!=0 else 10; sl_pips=max(5,min(sl_pips,50)); sl_pips+=spread; tp_pips=sl_pips*rr_ratio - spread
-            if "JPY" in symbol: sl_dist=sl_pips*0.01; tp_dist=tp_pips*0.01
-            else: sl_dist=sl_pips*0.0001; tp_dist=tp_pips*0.0001
-            sl=entry+sl_dist if is_sell else entry-sl_dist; tp=entry-tp_dist if is_sell else entry+tp_dist
-            return round(sl,dp),round(tp,dp),round(sl_pips,1),round(tp_pips,1),risk_amount
+        spread=float(spread_forex); pip_value=lot_size*10; sl_pips=risk_amount/pip_value if pip_value!=0 else 10; sl_pips=max(5,min(sl_pips,50)); sl_pips+=spread; tp_pips=sl_pips*rr_ratio - spread
+        if "JPY" in symbol: sl_dist=sl_pips*0.01; tp_dist=tp_pips*0.01
+        else: sl_dist=sl_pips*0.0001; tp_dist=tp_pips*0.0001
+        sl=entry+sl_dist if is_sell else entry-sl_dist; tp=entry-tp_dist if is_sell else entry+tp_dist
+        return round(sl,dp),round(tp,dp),round(sl_pips,1),round(tp_pips,1),risk_amount,{"leverage_capped":leverage_capped,"effective_lot":round(lot_size,4),"max_lot":round(max_lot,4)}
 
-def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale=""):
+def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale="", lev_info=None):
     """FIXED: now sends to ONE specific chat_id (the user who's actually
     watching this symbol), not broadcast to every linked chat. callback_data
     carries the unique signal_id so the webhook can attribute TOOK/SKIP to
@@ -362,7 +433,11 @@ def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl
     mode_emoji = "⚡" if mode_name=="scalp" else "🎯"
     strength = "🔥 A+" if score>=8 else "✅ Strong" if score>=7 else "👍 Good" if score>=6 else "⚡ Takeable"
     rationale_line = f"\n\n💡 {rationale}" if rationale else ""
-    text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_percent}%){rationale_line}\n\n🔍 {confluence_text}\n\n⏰ {sast_now}"
+    lev_info = lev_info or {}
+    lev_note = ""
+    if lev_info.get("leverage_capped"):
+        lev_note = f"\n⚠️ Lot capped to {lev_info.get('effective_lot')} — {leverage} leverage on {currency_symbol}{account_size} can't margin {lot_size} lots here"
+    text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}{lev_note}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_percent}%){rationale_line}\n\n🔍 {confluence_text}\n\n⏰ {sast_now}"
     keyboard={"inline_keyboard": [[{"text":"✅ TOOK ENTRY","callback_data":f"TOOK_{signal_id}"},{"text":"❌ SKIP","callback_data":f"SKIP_{signal_id}"}],[{"text":"📊 Journal","url":"https://agent-35-trading-bot.onrender.com/journal"}]]}
     try:
         r=requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":text,"reply_markup":keyboard}, timeout=10)
@@ -462,7 +537,7 @@ input:focus{{outline:none;border-color:var(--accent)}}
 h2{{text-align:center}}
 </style></head><body>
 <div class='auth-card'>
-<div class='auth-logo'><div class='name'>AGENT <span>35</span> PRO</div><div class='tag'>Unified Strategy • 2 Modes • Score 5+ Send</div></div>
+<div class='auth-logo'><div class='name'>AGENT <span>35</span> PRO</div><div class='tag'>Unified Strategy • 2 Modes • Score {MIN_SCORE}+ Send</div></div>
 {body_html}
 </div>
 </body></html>"""
@@ -584,7 +659,7 @@ def dashboard():
     mode_badge = "⚡ SCALP MODE - Fast M5 - 10-20/day" if mode=="scalp" else "🎯 REGULAR MODE - Swing - 2-5/day"
     content=f"""
 <div class='main'>
-<div class='card'><div class='card-title'>Total Profit & Loss</div><div class='card-value' style='color:{pnl_color}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0b1220;border-radius:10px;padding:10px;margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px'><div><div style='font-size:9px;color:#64748b'>TODAY</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['daily']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>WEEK</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['weekly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>MONTH</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['monthly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>YEAR</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div class='card-sub'>{mode_badge}<br>Score: 5=takeable, 6=good, 7=strong, 8+=A+</div></div>
+<div class='card'><div class='card-title'>Total Profit & Loss</div><div class='card-value' style='color:{pnl_color}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0b1220;border-radius:10px;padding:10px;margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px'><div><div style='font-size:9px;color:#64748b'>TODAY</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['daily']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>WEEK</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['weekly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>MONTH</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['monthly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>YEAR</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div class='card-sub'>{mode_badge}<br>Score: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+</div></div>
 <div class='card'><div class='card-title'>Performance</div><div class='card-value'>{stats['total_trades']} Trades • {stats['win_rate']}% WR</div><div class='card-sub'>✅ Wins: {stats['wins']} ❌ Losses: {stats['losses']} ➖ BE: {stats['be']}<br><br>Telegram: {tg_status}<br>Referrals: {ref_count}/10 free lifetime<br>Tracked: {tracked_count}/{MAX_TRACKED} active (limit 6)</div></div>
 <div class='card'><div class='card-title'>Account Overview</div><div class='card-value'>{curr_sym}{user_settings.get('account_size',142)}</div><div class='card-sub'>Lot Size: {user_settings.get('lot_size',0.01)} • Lev {user_settings.get('leverage','1:500')}<br>Risk: {user_settings.get('risk_percent',1)}% • RR 1:{user_settings.get('rr_ratio',2.5)}<br>Currency: {user_settings.get('currency','ZAR')} {curr_sym}<br>Mode: {mode.upper()} - All strategies as ONE<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings →</a></div></div>
 <div class='card'><div class='card-title'>Quick Actions</div><div style='display:flex;flex-direction:column;gap:2px;margin-top:8px'><a href='/dashboard-scan' onclick="this.querySelector('button').innerHTML='⏳ Scanning...'; this.querySelector('button').disabled=true;"><button class='btn-primary'>🔍 Scan Market Now</button></a><a href='/test-telegram' class='btn-secondary'>📤 Test Telegram</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram</a><a href='/export-journal' class='btn-secondary'>📥 Export Journal CSV</a><a href='/clear-tracked' class='btn-secondary' style='color:#ef4444'>Clear Tracked ({tracked_count}/{MAX_TRACKED})</a>{admin_link}</div></div>
@@ -606,24 +681,25 @@ def settings_page():
     curr=s.get('currency','ZAR'); mode=s.get('trading_mode','regular')
     currency_options="".join([f"<option value='{code}' {'selected' if curr==code else ''}>{code} - {info['symbol']} {info['name']}</option>" for code,info in CURRENCY_MAP.items()])
     content=f"""<div style='max-width:1100px;margin:0 auto;padding:14px'>
-<h1 style='font-size:20px;font-weight:900;margin-bottom:4px'>Settings - Unified Strategy</h1><p style='color:#64748b;font-size:12px;margin-top:0'>One strategy combining all 5 old strategies as one score 0-10. Choose mode only. Score 5+ sends.</p>
+<h1 style='font-size:20px;font-weight:900;margin-bottom:4px'>Settings - Unified Strategy</h1><p style='color:#64748b;font-size:12px;margin-top:0'>One strategy combining all 10 strategies as one score 0-10. Choose mode only. Score {MIN_SCORE}+ sends.</p>
 <form method='post'>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:16px'>
 <div class='card' style='border:2px solid #10b981'><div class='card-title'>Trading Mode - 2 Modes Only</div><select name='trading_mode' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #10b981'>
-<option value='regular' {'selected' if mode=='regular' else ''}>🎯 REGULAR - Swing H1/4H/Daily - 2-5/day - Score 5+ send</option>
-<option value='scalp' {'selected' if mode=='scalp' else ''}>⚡ SCALP - Fast M5 only - 10-20/day - Score 5+ send</option>
+<option value='regular' {'selected' if mode=='regular' else ''}>🎯 REGULAR - Swing H1/4H/Daily - 2-5/day - Score {MIN_SCORE}+ send</option>
+<option value='scalp' {'selected' if mode=='scalp' else ''}>⚡ SCALP - Fast M5 only - 10-20/day - Score {MIN_SCORE}+ send</option>
 </select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>
-<b>REGULAR:</b> Daily bias + 4H alignment + Discount/Premium + Sweep + Engulfing + EMA/RSI + Breakout + OB/BOS/FVG as ONE. Best for Gold/Forex/Indices. Choose: 5=takeable, 6=good, 7=strong, 8+=A+<br><br>
+<b>REGULAR:</b> Daily bias + 4H alignment + Discount/Premium + Sweep + Engulfing + EMA/RSI + Breakout + OB/BOS/FVG as ONE. Best for Gold/Forex/Indices. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+<br><br>
 <b>SCALP:</b> M5 EMA9/21 + RSI + Sweep + OB + Engulfing as ONE. Fast, more signals. Best for R142 + Crypto 24/7.
 </div></div>
 <div class='card'><div class='card-title'>Currency</div><select name='currency' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{currency_options}</select></div>
 <div class='card'><div class='card-title'>Account Size</div><input name='account_size' type='number' step='0.01' value='{s.get('account_size',142)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
 <div class='card'><div class='card-title'>Lot Size</div><input name='lot_size' type='number' step='0.01' value='{s.get('lot_size',0.01)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
 <div class='card'><div class='card-title'>Risk %</div><input name='risk_percent' type='number' step='0.1' value='{s.get('risk_percent',1)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
+<div class='card'><div class='card-title'>Leverage</div><select name='leverage' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{"".join([f"<option value='1:{lv}' {'selected' if s.get('leverage','1:500')==f'1:{lv}' else ''}>1:{lv}</option>" for lv in [10,20,30,50,100,200,400,500,1000,2000]])}</select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Caps how large a position your account can actually margin — if this is too low for your lot size, SL/TP will size the trade down automatically and flag it in the Telegram message.</div></div>
 <div class='card'><div class='card-title'>Risk Reward</div><select name='rr_ratio' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='1.5' {'selected' if str(s.get('rr_ratio'))=='1.5' else ''}>1:1.5 Scalp</option><option value='2' {'selected' if str(s.get('rr_ratio'))=='2' else ''}>1:2</option><option value='2.5' {'selected' if str(s.get('rr_ratio'))=='2.5' else ''}>1:2.5 Regular</option><option value='3' {'selected' if str(s.get('rr_ratio'))=='3' else ''}>1:3 SMC</option></select></div>
 <div class='card' style='border:2px solid #ef444455'><div class='card-title'>Avoid News</div><select name='trade_news' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='yes' {'selected' if s.get('trade_news',True) else ''}>🟢 Trade through news — no blackout</option><option value='no' {'selected' if not s.get('trade_news',True) else ''}>🔴 Avoid news — block signals + auto-flag tracked trades near high-impact events</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When set to Avoid, new signals are blocked ±15min around real high-impact events for correlated symbols, and you'll get a Telegram alert ~30min before. See the <a href='/news' style='color:#10b981'>News</a> tab for the live calendar.</div></div>
 </div>
-<div class='card' style='margin-top:12px'><div class='card-title'>Watchlist - {len(ALL_SYMBOLS)} Symbols Available - Score 5+ will be sent - Max Tracked {MAX_TRACKED}</div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;max-height:380px;overflow-y:auto;margin-top:10px;padding-right:4px'>{symbols_html}</div></div>
+<div class='card' style='margin-top:12px'><div class='card-title'>Watchlist - {len(ALL_SYMBOLS)} Symbols Available - Score {MIN_SCORE}+ will be sent - Max Tracked {MAX_TRACKED}</div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;max-height:380px;overflow-y:auto;margin-top:10px;padding-right:4px'>{symbols_html}</div></div>
 <button type='submit' class='btn-primary' style='margin-top:16px'>Save Settings - {mode.upper()} Mode</button>
 </form></div>"""
     return pro_layout(content,"Settings", is_admin=is_admin)
@@ -660,7 +736,7 @@ def dashboard_scan():
                 rows+=f"<tr><td>{s}</td><td colspan=4 style='color:#ef4444;font-size:10px'>{err_msg[:50]}</td></tr>"
     mode_badge = "⚡ SCALP MODE" if mode=="scalp" else "🎯 REGULAR MODE"
     content=f"""<div style='max-width:1600px;margin:0 auto;padding:14px'>
-<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold 5+ sends. Choose: 5=takeable, 6=good, 7=strong, 8+=A+. Your tracked: {my_tracked_count}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
+<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold {MIN_SCORE}+ sends. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+. Your tracked: {my_tracked_count}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
 <table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div>"""
     return pro_layout(content,"All Signals", is_admin=is_admin)
 
@@ -669,7 +745,14 @@ def news_page():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"; user_settings=get_user_settings(email)
     watched = set(user_settings.get("symbols", []))
-    events = nc.upcoming_high_impact(hours_ahead=72)
+
+    # Impact filter — defaults to ALL events (the user asked for the news
+    # tab to "show all the folder news", not just the trimmed high-impact
+    # subset). min_impact="None" means IMPACT_ORDER threshold 0, i.e. no
+    # filtering at all.
+    impact_filter = request.args.get("impact", "All")
+    min_impact_map = {"All": "None", "Low+": "Low", "Medium+": "Medium", "High": "High"}
+    events = nc.upcoming_high_impact(hours_ahead=72, min_impact=min_impact_map.get(impact_filter, "None"))
 
     if not nc.JBLANKED_API_KEY:
         content = f"""<div style='max-width:800px;margin:0 auto;padding:14px'>
@@ -681,18 +764,59 @@ and redeploy. Until then, no news blackout or alerts will fire.</p>
 </div></div>"""
         return pro_layout(content, "News", is_admin=is_admin)
 
+    # Who's actually exposed to each event: on the admin view, cross-
+    # reference every user's watchlist + their own "trade through news"
+    # setting (trade_news=True means no blackout — they WILL trade through
+    # it). This is visibility only, never a reason to silently override
+    # someone's own setting.
+    settings_all = load_json(SETTINGS_FILE, dict) if is_admin else {}
+
+    IMPACT_COLORS = {"High": ("rgba(239,68,68,0.15)", "#ef4444"), "Medium": ("rgba(245,158,11,0.15)", "#f59e0b"), "Low": ("rgba(100,116,139,0.15)", "#94a3b8"), "None": ("rgba(100,116,139,0.1)", "#64748b")}
+
     cards = ""
     if not events:
-        cards = "<div class='card'><p style='color:#64748b;text-align:center;padding:20px'>No high-impact events in the next 72 hours.</p></div>"
+        cards = "<div class='card'><p style='color:#64748b;text-align:center;padding:20px'>No events in the next 72 hours for this filter.</p></div>"
     for e in events:
         correlated = sorted([s for s in ALL_SYMBOLS if e["currency"] in nc.currencies_for_symbol(s)])
         watched_hit = [s for s in correlated if s in watched]
+        bg, fg = IMPACT_COLORS.get(e.get("impact","None"), IMPACT_COLORS["None"])
         highlight = "border:1px solid #ef444455;background:linear-gradient(135deg,#1a0f0f,#151e32)" if watched_hit else ""
         watch_note = f"<div style='margin-top:8px;font-size:11px;color:#fca5a5'>⚠️ Affects {len(watched_hit)} symbol(s) on your watchlist: {', '.join(watched_hit[:8])}{'…' if len(watched_hit)>8 else ''}</div>" if watched_hit else ""
+
+        # Has the real number printed yet? Only THEN do we show a surprise
+        # note (actual vs forecast) — never a pre-release directional call.
+        # A forecast-vs-previous gap is already priced in before release;
+        # it's the ACTUAL-vs-forecast surprise, once real, that can move a
+        # market, and even that is "this is why it may be volatile right
+        # now", not "buy/sell this".
+        surprise_note = ""
+        if e.get("actual") not in (None, "", "—"):
+            try:
+                actual_v = float(str(e.get("actual")).replace("%","").replace("K","").strip())
+                forecast_v = float(str(e.get("forecast")).replace("%","").replace("K","").strip())
+                diff = actual_v - forecast_v
+                if abs(diff) > 1e-9:
+                    direction_word = "above" if diff > 0 else "below"
+                    surprise_note = f"<div style='margin-top:8px;font-size:11px;color:#fbbf24'>📣 Printed {direction_word} forecast ({e.get('actual')} vs {e.get('forecast')} exp) — expect elevated volatility on correlated symbols now that this is real data, not a prediction.</div>"
+            except (TypeError, ValueError):
+                pass
+
+        # Admin-only: which of OUR users have a correlated symbol watched
+        # and have "trade through news" ON (so this event won't block them)?
+        exposed_note = ""
+        if is_admin and correlated:
+            exposed_users = []
+            for u_email, s in settings_all.items():
+                u_symbols = set(s.get("symbols", []))
+                if u_symbols & set(correlated) and s.get("trade_news", True):
+                    exposed_users.append(u_email)
+            if exposed_users:
+                exposed_note = f"<div style='margin-top:8px;font-size:11px;color:#60a5fa'>👤 Trading through this news (Avoid News OFF, symbol watched): {', '.join(exposed_users[:10])}{'…' if len(exposed_users)>10 else ''}</div>"
+
         cards += f"""<div class='card' style='{highlight}'>
 <div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
-<div><span class='pill' style='background:rgba(239,68,68,0.15);color:#ef4444'>{e['currency']} HIGH</span></div>
-<div style='color:#64748b;font-size:11px'>{nc.countdown_str(e)} • {e['time'].strftime('%a %H:%M UTC')}</div>
+<div><span class='pill' style='background:{bg};color:{fg}'>{e['currency']} {e.get('impact','').upper()}</span></div>
+<div style='color:#64748b;font-size:11px;font-weight:700'>{nc.countdown_str(e)} • {e['time'].strftime('%a %H:%M UTC')}</div>
 </div>
 <h3 style='margin:10px 0 4px;font-size:15px'>{e['name']}</h3>
 <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;font-size:11px'>
@@ -702,13 +826,21 @@ and redeploy. Until then, no news blackout or alerts will fire.</p>
 </div>
 <div style='margin-top:10px;font-size:11px;color:#64748b'>Correlated: {', '.join(correlated[:10]) if correlated else '—'}{'…' if len(correlated)>10 else ''}</div>
 {watch_note}
+{surprise_note}
+{exposed_note}
 </div>"""
+
+    def filter_btn(label):
+        active = impact_filter == label
+        style = "background:#10b981;color:white;border:1px solid #10b981" if active else "background:#151e32;border:1px solid #1e293b;color:#94a3b8"
+        return f"<a href='/news?impact={label}' style='padding:7px 14px;border-radius:20px;text-decoration:none;font-size:11px;font-weight:600;{style}'>{label}</a>"
 
     content = f"""<div style='max-width:900px;margin:0 auto;padding:14px'>
 <h1 style='font-size:20px;font-weight:900;margin:0 0 4px'>🗓️ Economic Calendar</h1>
-<p style='color:#64748b;font-size:12px;margin:0 0 16px'>Real high-impact events, next 72 hours. We show correlated symbols and volatility risk —
-not a directional prediction before the number even prints; that's a guess dressed up as data.
+<p style='color:#64748b;font-size:12px;margin:0 0 10px'>Every scheduled event, next 72 hours. We show correlated symbols, volatility risk, and (once the real number is out) the actual-vs-forecast surprise —
+never a directional call before the release; forecast-vs-previous is already priced in, so a pre-print "buy/sell" badge is a guess dressed up as data.
 {'Auto-flagging is ON: with Avoid News enabled in Settings, tracked trades on correlated symbols get flagged and you get alerted ahead of these.' if not user_settings.get('trade_news', True) else 'Avoid News is currently OFF in your settings, so these events will not block signals or flag trades for you.'}</p>
+<div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px'>{filter_btn("All")}{filter_btn("Low+")}{filter_btn("Medium+")}{filter_btn("High")}</div>
 <div style='display:grid;gap:12px'>{cards}</div>
 </div>"""
     return pro_layout(content, "News", is_admin=is_admin)
@@ -732,7 +864,7 @@ def journal_page():
     rows="".join([f"<tr><td>{j.get('time')}</td><td style='font-weight:700'>{j.get('symbol')}</td><td><span class='pill {('pill-win' if 'WIN' in j.get('result','') else 'pill-loss' if 'LOSS' in j.get('result','') else 'pill-took')}'>{j.get('status')}</span></td><td>{j.get('result')}</td><td style='font-weight:700'>{curr_sym}{j.get('pnl',0)}</td><td style='color:#64748b'>{j.get('date','')}</td></tr>" for j in reversed(filtered[-200:])])
     def get_style(p): return "background:#10b981;color:white;border:1px solid #10b981" if period==p else "background:#151e32;border:1px solid #1e293b;color:#94a3b8"
     content=f"""<div style='max-width:1400px;margin:0 auto;padding:14px'>
-<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px'><h1 style='font-size:20px;font-weight:900;margin:0'>Journal - Unified Scores 5+ Send</h1><a href='/export-journal' class='btn-secondary' style='margin:0;display:inline-block'>Export CSV</a></div>
+<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px'><h1 style='font-size:20px;font-weight:900;margin:0'>Journal - Unified Scores {MIN_SCORE}+ Send</h1><a href='/export-journal' class='btn-secondary' style='margin:0;display:inline-block'>Export CSV</a></div>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;margin:14px 0'>
 <div class='card'><div class='card-title'>Today</div><div class='card-value' style='font-size:18px;color:{"#10b981" if stats['daily']>=0 else "#ef4444"}'>{curr_sym}{stats['daily']:.2f}</div></div>
 <div class='card'><div class='card-title'>This Week</div><div class='card-value' style='font-size:18px'>{curr_sym}{stats['weekly']:.2f}</div></div>
@@ -778,13 +910,13 @@ def plans_page():
     is_admin=session.get("user")=="admin@agent35.com"; email=session.get("user","")
     user_set=get_user_settings(email or "admin@agent35.com"); curr_sym=get_currency_symbol(user_set.get("currency","ZAR"))
     content=f"""<div style='max-width:1000px;margin:0 auto;padding:14px'>
-<h1 style='font-size:22px;font-weight:900;margin:0'>Choose Your Plan</h1><p style='color:#64748b;font-size:13px;margin:6px 0 18px'>One unified strategy - 2 modes - Score 5+ sends - 55 symbols - 6 max tracked</p>
+<h1 style='font-size:22px;font-weight:900;margin:0'>Choose Your Plan</h1><p style='color:#64748b;font-size:13px;margin:6px 0 18px'>One unified strategy - 2 modes - Score {MIN_SCORE}+ sends - 55 symbols - 6 max tracked</p>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px'>
 <div class='card' style='border:1px solid #1e293b'><div style='display:flex;justify-content:space-between;align-items:center'><h3 style='margin:0;font-size:16px'>Yearly</h3><span class='pill pill-took'>Most Popular</span></div><div class='card-value' style='margin:12px 0'>{curr_sym}500 <span style='font-size:13px;color:#64748b;font-weight:500'>/ year</span></div><div style='font-size:12px;color:#94a3b8;line-height:1.6'>
 ✅ All 55 symbols (Forex, Gold, Oil, Indices, Crypto)<br>
 ✅ 2 Modes: Regular + Scalp unified<br>
 ✅ Telegram signals 24/7<br>
-✅ Score 5+ sends - you choose 5-10<br>
+✅ Score {MIN_SCORE}+ sends - you choose {MIN_SCORE}-10<br>
 ✅ Journal + Export<br>
 ✅ Up to 6 tracked trades<br>
 ✅ Cloud backup<br>
@@ -807,8 +939,8 @@ def plans_page():
 @app.route("/guide")
 def guide_page():
     is_admin=session.get("user")=="admin@agent35.com"
-    content="""<div style='max-width:900px;margin:0 auto;padding:14px'>
-<h1 style='font-size:22px;font-weight:900;margin:0'>User Guide - Unified Strategy</h1><p style='color:#64748b;font-size:13px;margin:6px 0 18px'>One strategy combining all methods as one score. 2 modes only. Score 5+ sends.</p>
+    content=f"""<div style='max-width:900px;margin:0 auto;padding:14px'>
+<h1 style='font-size:22px;font-weight:900;margin:0'>User Guide - Unified Strategy</h1><p style='color:#64748b;font-size:13px;margin:6px 0 18px'>One strategy combining all methods as one score. 2 modes only. Score {MIN_SCORE}+ sends.</p>
 <div style='display:grid;gap:12px'>
 <div class='card'><h3 style='margin:0 0 8px;font-size:14px'>🚀 Quick Start (2 min)</h3><div style='font-size:12px;color:#cbd5e1;line-height:1.7'>
 1. <b>Settings</b> → Account Size (R142), Lot (0.01), Risk 1%, RR 1:2.5<br>
@@ -816,18 +948,15 @@ def guide_page():
 3. Choose Mode: 🎯 REGULAR for beginners (swing), ⚡ SCALP for fast<br>
 4. Select 8-12 symbols max (Gold + majors)<br>
 5. <b>Link Telegram</b> → /start bot → Paste Chat ID<br>
-6. <b>Scan Now</b> → Send if Score 5+ → Take trade
+6. <b>Scan Now</b> → Send if Score {MIN_SCORE}+ → Take trade
 </div></div>
-<div class='card'><h3 style='margin:0 0 8px;font-size:14px'>🎯 One Strategy Explained - All Combined</h3><div style='font-size:12px;color:#cbd5e1;line-height:1.7'>
-<b>We combined 5 old strategies into ONE score 0-10:</b><br>
-• Premium/Discount (Daily bias) + 4H alignment +2-3 pts<br>
-• EMA 5/20 + RSI pullback +2 pts<br>
-• Breakout + BOS +2 pts<br>
-• Order Block (BTC OB fixed) +4 pts<br>
-• FVG +2 pts, Sweep +3 pts, Engulfing/Hammer +3-4 pts<br><br>
-<b>Total capped 10/10. Threshold 5+ sends.</b><br>
+<div class='card'><h3 style='margin:0 0 8px;font-size:14px'>🎯 One Strategy Explained - 10 Combined</h3><div style='font-size:12px;color:#cbd5e1;line-height:1.7'>
+<b>Ten independent strategies vote BULLISH / BEARISH / nothing on every scan:</b><br>
+AMD, SMC, ICT, Wyckoff, Supply&amp;Demand, Volume Profile, Breakout+Retest, Trend Following, Mean Reversion, Liquidity Sweep.<br><br>
+The score is simply how many of the ten agree on the same direction (0-10) — not an additive points formula. A signal only fires when {MIN_SCORE}+ strategies line up AND no more than {eng.DEFAULT_WEIGHTS.get('max_opposing')} vote the other way AND price is on the correct side (discount for buys, premium for sells) of the current dealing range — that zone check is a hard veto, not a bonus.<br><br>
+Worth knowing: several of the ten can fire off the exact same underlying event (e.g. a stop-hunt sweep can earn AMD, SMC, Wyckoff and Liquidity Sweep votes at once), so a high score means several *models* agree, not necessarily several *independent* pieces of evidence.<br><br>
 You choose which to take based on score:<br>
-<span style='background:#ef444422;color:#ef4444;padding:2px 8px;border-radius:20px;font-size:10px'>5/10 ⚡ Takeable - minimum decent</span><br>
+<span style='background:#ef444422;color:#ef4444;padding:2px 8px;border-radius:20px;font-size:10px'>{MIN_SCORE}/10 ⚡ Takeable - minimum sent</span><br>
 <span style='background:#f59e0b22;color:#f59e0b;padding:2px 8px;border-radius:20px;font-size:10px'>6/10 👍 Good - solid confluence</span><br>
 <span style='background:#10b98122;color:#10b981;padding:2px 8px;border-radius:20px;font-size:10px'>7/10 ✅ Strong - high probability</span><br>
 <span style='background:#10b981;color:white;padding:2px 8px;border-radius:20px;font-size:10px'>8-10/10 🔥 A+ - best of day</span>
@@ -951,7 +1080,7 @@ def send_signal():
             # immediately, attributed to this user.
             rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
             mode=user_set.get("trading_mode","regular")
-            sl,tp,sl_dist,tp_dist,risk_amt=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
+            sl,tp,sl_dist,tp_dist,risk_amt,lev_info=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
             tracked=load_json(TRACK_FILE, dict)
             signal_id = generate_signal_id()
             tracked[signal_id]={"email":email,"chat_id":None,"symbol":sym,"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode}
@@ -987,6 +1116,20 @@ def test_telegram():
 
 @app.route("/telegram/webhook", methods=["POST"])
 def telegram_webhook():
+    # FIXED: this endpoint had no authenticity check at all — anyone who
+    # found the URL could POST a fake callback_query. The chat_id match
+    # below already stops a forged TOOK/SKIP from hijacking someone ELSE's
+    # signal, but Telegram supports verifying the request actually came
+    # from Telegram at all: set a secret_token when you call setWebhook
+    # (https://core.telegram.org/bots/api#setwebhook) and Telegram echoes
+    # it back on every request as this header. Set TELEGRAM_WEBHOOK_SECRET
+    # to the same value you passed to setWebhook; if it's unset, this check
+    # is skipped (so existing deployments that registered the webhook
+    # without a secret_token don't suddenly start rejecting real traffic) —
+    # but you should set it.
+    expected_secret = os.getenv("TELEGRAM_WEBHOOK_SECRET")
+    if expected_secret and request.headers.get("X-Telegram-Bot-Api-Secret-Token") != expected_secret:
+        return jsonify({"error":"unauthorized"}), 401
     data=request.get_json()
     if not data: return jsonify({"ok":True})
     bot=os.getenv("TELEGRAM_BOT_TOKEN")
@@ -996,7 +1139,7 @@ def telegram_webhook():
         temp[str(chat_id)]={"first_name":from_user.get("first_name",""),"username":from_user.get("username",""),"time":datetime.now().isoformat(),"text":data["message"].get("text","")[:100]}
         save_json(TEMP_CHAT_FILE, temp)
         if bot and "/start" in data["message"].get("text",""):
-            try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"AGENT 35 PRO - Your Chat ID: {chat_id}\nCopy and paste in Dashboard > Link Telegram\n\nUnified Strategy - 2 Modes - Score 5+ sends"}, timeout=5)
+            try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"AGENT 35 PRO - Your Chat ID: {chat_id}\nCopy and paste in Dashboard > Link Telegram\n\nUnified Strategy - 2 Modes - Score {MIN_SCORE}+ sends"}, timeout=5)
             except: pass
     if "callback_query" in data:
         # FIXED: callback_data now carries a unique signal_id (TOOK_<id> /
@@ -1070,7 +1213,7 @@ def register_page():
     ref_banner = alert(f"🎁 Referred by: <b>{ref}</b>", "info") if ref else ""
     err_html = alert(err, "error") if err else ""
     body = f"""<h2 style='font-size:18px;font-weight:800;margin:0 0 4px'>Create Account</h2>
-<p style='color:#64748b;font-size:12px;margin:0 0 16px;text-align:center'>Unified strategy - 2 modes - Score 5+ send</p>
+<p style='color:#64748b;font-size:12px;margin:0 0 16px;text-align:center'>Unified strategy - 2 modes - Score {MIN_SCORE}+ send</p>
 {err_html}{ref_banner}
 <form action='/register/create' method='post'>
 <input name='email' type='email' placeholder='Email' required>
@@ -1517,7 +1660,12 @@ def cron_scan():
 def health():
     test=cached_analysis("BTCUSD", {"trade_news":True,"currency":"ZAR","trading_mode":"regular"})
     tracked=load_json(TRACK_FILE, dict)
-    return jsonify({"ok":True,"version":"V24 - per-user signal delivery & tracking","symbols":len(ALL_SYMBOLS),"tracked_total_all_users":len(tracked),"per_user_limit":MAX_TRACKED,"btc_test":test,"threshold":5,"modes":["regular","scalp"]})
+    # FIXED: "threshold" used to be a hardcoded 5, left over from before
+    # min_score was lowered to 2 — a stale value in a health/status endpoint
+    # is exactly the kind of drift that makes a running system misleading
+    # to debug. Now reads the real live value straight from the engine's
+    # own confluence config instead of a second, hand-maintained number.
+    return jsonify({"ok":True,"version":"V24 - per-user signal delivery & tracking","symbols":len(ALL_SYMBOLS),"tracked_total_all_users":len(tracked),"per_user_limit":MAX_TRACKED,"btc_test":test,"min_score":eng.DEFAULT_WEIGHTS.get("min_score"),"max_opposing":eng.DEFAULT_WEIGHTS.get("max_opposing"),"modes":["regular","scalp"]})
 
 @app.route("/debug-signal")
 def debug_signal():
