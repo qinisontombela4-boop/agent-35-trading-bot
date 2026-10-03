@@ -503,7 +503,8 @@ def is_news_time(symbol, user_settings):
 # Each of the ten strategies below is evaluated INDEPENDENTLY and returns
 # either a direction ("BULLISH"/"BEARISH") or nothing. The confluence
 # score is simply how many strategies agree on the same direction.
-# Anything under `min_score` (default 5) is not sent to the user.
+# Anything under `min_score` (currently 2 — see DEFAULT_WEIGHTS below for
+# the history of that number) is not sent to the user.
 #
 # HONEST CAVEATS baked into the design:
 #  - These aren't ten independent opinions. AMD, Wyckoff, SMC, ICT and the
