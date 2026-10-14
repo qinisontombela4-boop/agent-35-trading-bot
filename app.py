@@ -31,6 +31,11 @@ if not CREATOR_SECRET:
 import trading_engine as eng
 import news_calendar as nc
 
+if not os.getenv("CRON_SECRET"):
+    print("[WARN] CRON_SECRET is not set — the /cron/* endpoints (scan, news-check, "
+          "daily-reset…) accept requests from anyone. Set CRON_SECRET and put the "
+          "same value in your external scheduler's URLs (?secret=...).", file=sys.stderr)
+
 # FIXED: the UI (settings, dashboard, scan page, journal, pricing, user
 # guide, even the Telegram "link your chat" message) hardcoded "Score 5+
 # sends" in ~13 separate places. When min_score was lowered to 2 in the
@@ -200,6 +205,64 @@ def _all_telegram_chats():
         if cid and cid not in all_chats: all_chats.append(cid)
     return bot, all_chats
 
+def _tg_error_text(resp):
+    """Turn a Telegram API failure into a message a human can act on."""
+    code = resp.get("error_code"); desc = str(resp.get("description", "unknown error")); low = desc.lower()
+    hint = ""
+    if code == 401: hint = " — the bot token on the server is wrong or revoked (check TELEGRAM_BOT_TOKEN)"
+    elif code == 403: hint = " — the bot was blocked or you never pressed Start; open the bot in Telegram and send /start"
+    elif code == 400 and "chat not found" in low: hint = " — the linked Chat ID is wrong, or you never sent /start to THIS bot; re-link it"
+    elif code == 429: hint = " — Telegram rate limit, try again in a moment"
+    return f"Telegram rejected the message ({code}): {desc}{hint}"
+
+def telegram_post(method, payload, timeout=10):
+    """One place that talks to the Telegram Bot API. ALWAYS returns a dict:
+    {"ok": True, ...telegram response...} on success, or
+    {"ok": False, "error": "<readable reason>"} on ANY failure — including the
+    case the old code missed, where Telegram answers HTTP 200/400 with
+    {"ok": false, "description": ...} and no "error" key, which callers then
+    mistook for a successful send."""
+    bot = os.getenv("TELEGRAM_BOT_TOKEN")
+    if not bot: return {"ok": False, "error": "TELEGRAM_BOT_TOKEN is not set on the server"}
+    try:
+        r = requests.post(f"https://api.telegram.org/bot{bot}/{method}", json=payload, timeout=timeout)
+    except Exception as e:
+        return {"ok": False, "error": f"Could not reach Telegram: {e}"}
+    try: data = r.json()
+    except Exception: return {"ok": False, "error": f"Telegram returned a non-JSON reply (HTTP {r.status_code})"}
+    if not isinstance(data, dict) or not data.get("ok"):
+        return {"ok": False, "error": _tg_error_text(data if isinstance(data, dict) else {}), "telegram": data}
+    return data
+
+def telegram_diagnostics(chat_id):
+    """Step-by-step health check of the whole Telegram path. Each entry is
+    (label, ok, detail) so the page can show exactly which step breaks."""
+    steps = []
+    token_set = bool(os.getenv("TELEGRAM_BOT_TOKEN"))
+    steps.append(("Bot token set on server", token_set, "TELEGRAM_BOT_TOKEN present" if token_set else "Set TELEGRAM_BOT_TOKEN in Render > Environment"))
+    if not token_set: return steps
+    me = telegram_post("getMe", {})
+    steps.append(("Bot token valid", bool(me.get("ok")), f"@{me['result'].get('username','?')}" if me.get("ok") else me.get("error", "")))
+    wh = telegram_post("getWebhookInfo", {})
+    if wh.get("ok"):
+        info = wh.get("result", {}); url = info.get("url", "")
+        detail = url or "NO WEBHOOK SET — /start replies and TOOK/SKIP buttons won't work"
+        if info.get("last_error_message"): detail += f" | last Telegram→server error: {info['last_error_message']}"
+        steps.append(("Webhook registered", bool(url) and not info.get("last_error_message"), detail))
+    else:
+        steps.append(("Webhook registered", False, wh.get("error", "")))
+    if not chat_id:
+        steps.append(("Chat linked", False, "No Chat ID linked to your account — use Link Telegram"))
+        return steps
+    steps.append(("Chat linked", True, f"Chat ID {chat_id}"))
+    plain = telegram_post("sendMessage", {"chat_id": chat_id, "text": "✅ Agent 35 connection test — if you can read this, delivery to this chat works."})
+    steps.append(("Plain message delivered", bool(plain.get("ok")), "check your Telegram now" if plain.get("ok") else plain.get("error", "")))
+    return steps
+
+def _diagnostics_html(steps):
+    rows = "".join(f"<tr><td style='padding:6px 10px'>{'✅' if ok else '❌'}</td><td style='padding:6px 10px;font-weight:700'>{label}</td><td style='padding:6px 10px;color:{'#94a3b8' if ok else '#fca5a5'};font-size:12px;word-break:break-word'>{detail}</td></tr>" for label, ok, detail in steps)
+    return f"<table style='width:100%;margin-top:12px;background:#0b1220;border:1px solid #1e293b;border-radius:10px'>{rows}</table>"
+
 def broadcast_telegram(text):
     bot, chats = _all_telegram_chats()
     if not (bot and chats): return
@@ -256,15 +319,17 @@ def user_tracked_count(email):
 def generate_signal_id():
     return secrets.token_urlsafe(6)
 
-def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings):
+def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings, is_test=False):
     """Sends one signal to one user's Telegram, and stores a pending record
     so the webhook can find it again when they press a button. Returns
     (ok: bool, info: dict) — info holds either the signal_id+telegram result
-    or an error reason (e.g. daily cap reached, no valid entry)."""
+    or an error reason (e.g. daily cap reached, no valid entry).
+    is_test: a connection-test signal — doesn't use up the daily cap, and
+    pressing TOOK on it tracks nothing."""
     entry = r.get('entry', 0)
     if not entry or float(entry) == 0:
         return False, {"error": "no entry price"}
-    if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
+    if not is_test and get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
         return False, {"error": "daily signal cap reached"}
 
     rr = user_settings.get('rr_ratio', 2.5); risk_percent = user_settings.get('risk_percent', 1)
@@ -274,9 +339,14 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings):
     sl, tp, sl_dist, tp_dist, risk_amt, lev_info = calculate_dynamic_sl_tp(symbol, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
 
     signal_id = generate_signal_id()
-    res = send_telegram_pro(chat_id, signal_id, symbol, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''), lev_info)
-    if isinstance(res, dict) and res.get("error"):
-        return False, {"error": res["error"]}
+    try:
+        res = send_telegram_pro(chat_id, signal_id, symbol, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''), lev_info)
+    except Exception as e:
+        return False, {"error": f"Could not build/send the message: {type(e).__name__}: {e}"}
+    # Only a CONFIRMED Telegram delivery gets recorded — a failed send must
+    # not leave a phantom pending signal or burn the user's daily cap.
+    if not isinstance(res, dict) or res.get("error") or not res.get("ok"):
+        return False, {"error": (res or {}).get("error", "Telegram send failed")}
 
     pending = load_json(PENDING_FILE, dict)
     pending[signal_id] = {
@@ -285,10 +355,11 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings):
         "sl": sl, "tp": tp, "risk_amt": risk_amt, "rr": rr,
         "currency": user_settings.get("currency","ZAR"), "mode": mode,
         "sent_at": datetime.now().isoformat(),
+        "test": bool(is_test),
     }
     save_json(PENDING_FILE, pending)
-    increment_daily_signal_count(email)
-    return True, {"signal_id": signal_id, "telegram": res}
+    if not is_test: increment_daily_signal_count(email)
+    return True, {"signal_id": signal_id, "telegram": {"ok": True, "message_id": (res.get("result") or {}).get("message_id")}}
 
 def user_has_open_or_pending(email, symbol):
     tracked = load_json(TRACK_FILE, dict)
@@ -444,8 +515,8 @@ def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl
     exactly this pending signal and its owner, not just a bare symbol name."""
     entry_f=float(entry)
     if entry_f==0: return {"error":"No price"}
-    bot=os.getenv("TELEGRAM_BOT_TOKEN")
-    if not bot or not chat_id: return {"error":"no bot/chat"}
+    if not os.getenv("TELEGRAM_BOT_TOKEN"): return {"error":"TELEGRAM_BOT_TOKEN is not set on the server"}
+    if not chat_id: return {"error":"No Telegram chat linked to this account"}
     signal_type="BUY" if "BULLISH" in bias.upper() else "SELL"
     dp = eng.price_decimals(symbol)
     entry_fmt=f"{entry_f:.{dp}f}"; sl_fmt=f"{float(sl):.{dp}f}"; tp_fmt=f"{float(tp):.{dp}f}"
@@ -459,11 +530,9 @@ def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl
         lev_note = f"\n⚠️ Lot capped to {lev_info.get('effective_lot')} — {leverage} leverage on {currency_symbol}{account_size} can't margin {lot_size} lots here"
     text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}{lev_note}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_percent}%){rationale_line}\n\n🔍 {confluence_text}\n\n⏰ {sast_now}"
     keyboard={"inline_keyboard": [[{"text":"✅ TOOK ENTRY","callback_data":f"TOOK_{signal_id}"},{"text":"❌ SKIP","callback_data":f"SKIP_{signal_id}"}],[{"text":"📊 Journal","url":"https://agent-35-trading-bot.onrender.com/journal"}]]}
-    try:
-        r=requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":text,"reply_markup":keyboard}, timeout=10)
-        return r.json()
-    except Exception as e:
-        return {"error":str(e)}
+    res = telegram_post("sendMessage", {"chat_id":chat_id,"text":text,"reply_markup":keyboard})
+    if not res.get("ok"): return {"error": res.get("error", "Telegram send failed")}
+    return res
 
 def get_active_sessions():
     utc_hour = datetime.utcnow().hour
@@ -507,7 +576,13 @@ _ANALYSIS_TTL_SECONDS = 240  # ~ one 5-minute candle
 
 def cached_analysis(symbol, user_settings):
     mode = user_settings.get("trading_mode", "regular")
-    key = (symbol, mode)
+    # The analysis result depends on the user's NEWS settings too (a user with
+    # Avoid News on gets a "NEWS BLOCKED" non-signal inside a blackout; a user
+    # trading through news doesn't). Keying on (symbol, mode) alone let one
+    # user's blackout result be served to everyone else for ~4 minutes — and
+    # let a "no blackout" result leak to users who asked to avoid news.
+    key = (symbol, mode, bool(user_settings.get("trade_news", True)),
+           user_settings.get("news_blackout_before_min", 15), user_settings.get("news_blackout_after_min", 15))
     now = datetime.now()
     hit = _ANALYSIS_CACHE.get(key)
     if hit and (now - hit[0]).total_seconds() < _ANALYSIS_TTL_SECONDS:
@@ -724,6 +799,34 @@ def settings_page():
 </form></div>"""
     return pro_layout(content,"Settings", is_admin=is_admin)
 
+@app.route("/news-status")
+def news_status():
+    """Live self-test of the whole news pipeline, as JSON: forces a fresh
+    fetch, reports which source answered (or exactly why none did), event
+    counts by impact, the next few high-impact events with their UTC time,
+    and — for every symbol you watch — whether it is in a news blackout
+    RIGHT NOW. Use it to confirm the calendar works and that event times
+    match a known release (e.g. NFP is 12:30 UTC in summer, 13:30 in winter)."""
+    if not session.get("user"): return redirect("/login")
+    email=session.get("user"); user_settings=get_user_settings(email)
+    events = nc.fetch_calendar(force=True)
+    by_impact = {}
+    for e in events: by_impact[e["impact"]] = by_impact.get(e["impact"], 0) + 1
+    nxt = nc.upcoming_high_impact(hours_ahead=24*7, min_impact="High")[:8]
+    watch = user_settings.get("symbols", [])
+    blackout_now = {}
+    for s in watch:
+        blocked, ev = nc.is_in_blackout(s, minutes_before=user_settings.get("news_blackout_before_min",15), minutes_after=user_settings.get("news_blackout_after_min",15))
+        if blocked: blackout_now[s] = f"{ev['currency']} {ev['name']} @ {ev['time'].strftime('%H:%M')} UTC"
+    return jsonify({
+        "calendar": nc.status_summary(),
+        "events_by_impact": by_impact,
+        "next_high_impact": [{"currency": e["currency"], "name": e["name"], "utc": e["time"].strftime("%Y-%m-%d %H:%M"), "sast": (e["time"]+timedelta(hours=2)).strftime("%Y-%m-%d %H:%M"), "countdown": nc.countdown_str(e), "affects_your_watchlist": sorted(s for s in watch if e["currency"] in nc.currencies_for_symbol(s))} for e in nxt],
+        "your_avoid_news_setting": "ON — signals are blocked ±15min around high-impact events" if not user_settings.get("trade_news", True) else "OFF — you trade through news, nothing is blocked (change in Settings)",
+        "your_symbols_in_blackout_now": blackout_now,
+        "server_utc_now": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%S"),
+    })
+
 @app.route("/all-signals")
 @app.route("/dashboard-scan")
 def dashboard_scan():
@@ -772,17 +875,18 @@ def news_page():
     # filtering at all.
     impact_filter = request.args.get("impact", "All")
     min_impact_map = {"All": "None", "Low+": "Low", "Medium+": "Medium", "High": "High"}
-    events = nc.upcoming_high_impact(hours_ahead=72, min_impact=min_impact_map.get(impact_filter, "None"))
+    # lookback_minutes=60 keeps an event on screen (as "in progress") for an
+    # hour after it fires instead of vanishing the second it starts.
+    events = nc.upcoming_high_impact(hours_ahead=72, min_impact=min_impact_map.get(impact_filter, "None"), lookback_minutes=60)
 
-    if not nc.JBLANKED_API_KEY:
-        content = f"""<div style='max-width:800px;margin:0 auto;padding:14px'>
-<div class='card'><h2 style='margin:0 0 8px'>🗓️ Economic Calendar — Not Configured</h2>
-<p style='color:#94a3b8;font-size:13px;line-height:1.6'>The real news calendar needs a free JBlanked API key.
-Sign up at <a href='https://www.jblanked.com/api/key/' style='color:#10b981' target='_blank'>jblanked.com/api/key</a>,
-then set <code style='background:#0b1220;padding:2px 6px;border-radius:4px'>JBLANKED_API_KEY</code> as an environment variable
-and redeploy. Until then, no news blackout or alerts will fire.</p>
-</div></div>"""
-        return pro_layout(content, "News", is_admin=is_admin)
+    # The calendar now works with NO API key (free Forex Factory feed), so
+    # the old "Not Configured" dead-end is gone. What the page shows instead
+    # is the feed's real health, so an empty page always says WHY.
+    st = nc.status_summary()
+    if st["ok"]:
+        feed_banner = f"<div style='font-size:11px;color:#64748b;margin:0 0 10px'>Source: {st['source']} · {st['event_count']} events this week · updated {st['last_success_utc'][11:16]} UTC</div>"
+    else:
+        feed_banner = f"<div class='card' style='border:1px solid #ef444455;margin-bottom:12px'><div style='font-weight:800;color:#fca5a5'>⚠️ Calendar feed unavailable</div><div style='font-size:12px;color:#94a3b8;margin-top:6px;word-break:break-word'>{st['last_error'] or 'No fetch attempted yet — refresh in a moment.'}</div><div style='font-size:11px;color:#64748b;margin-top:6px'>News blackout and alerts are paused until the feed responds (retrying automatically). Details: <a href='/news-status' style='color:#10b981'>/news-status</a></div></div>"
 
     # Who's actually exposed to each event: on the admin view, cross-
     # reference every user's watchlist + their own "trade through news"
@@ -794,7 +898,7 @@ and redeploy. Until then, no news blackout or alerts will fire.</p>
     IMPACT_COLORS = {"High": ("rgba(239,68,68,0.15)", "#ef4444"), "Medium": ("rgba(245,158,11,0.15)", "#f59e0b"), "Low": ("rgba(100,116,139,0.15)", "#94a3b8"), "None": ("rgba(100,116,139,0.1)", "#64748b")}
 
     cards = ""
-    if not events:
+    if not events and st["ok"]:
         cards = "<div class='card'><p style='color:#64748b;text-align:center;padding:20px'>No events in the next 72 hours for this filter.</p></div>"
     for e in events:
         correlated = sorted([s for s in ALL_SYMBOLS if e["currency"] in nc.currencies_for_symbol(s)])
@@ -836,7 +940,7 @@ and redeploy. Until then, no news blackout or alerts will fire.</p>
         cards += f"""<div class='card' style='{highlight}'>
 <div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
 <div><span class='pill' style='background:{bg};color:{fg}'>{e['currency']} {e.get('impact','').upper()}</span></div>
-<div style='color:#64748b;font-size:11px;font-weight:700'>{nc.countdown_str(e)} • {e['time'].strftime('%a %H:%M UTC')}</div>
+<div style='color:#64748b;font-size:11px;font-weight:700'>{nc.countdown_str(e)} • {e['time'].strftime('%a %H:%M UTC')} · {(e['time']+timedelta(hours=2)).strftime('%H:%M')} SAST</div>
 </div>
 <h3 style='margin:10px 0 4px;font-size:15px'>{e['name']}</h3>
 <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;font-size:11px'>
@@ -861,6 +965,7 @@ and redeploy. Until then, no news blackout or alerts will fire.</p>
 never a directional call before the release; forecast-vs-previous is already priced in, so a pre-print "buy/sell" badge is a guess dressed up as data.
 {'Auto-flagging is ON: with Avoid News enabled in Settings, tracked trades on correlated symbols get flagged and you get alerted ahead of these.' if not user_settings.get('trade_news', True) else 'Avoid News is currently OFF in your settings, so these events will not block signals or flag trades for you.'}</p>
 <div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px'>{filter_btn("All")}{filter_btn("Low+")}{filter_btn("Medium+")}{filter_btn("High")}</div>
+{feed_banner}
 <div style='display:grid;gap:12px'>{cards}</div>
 </div>"""
     return pro_layout(content, "News", is_admin=is_admin)
@@ -1127,12 +1232,34 @@ def test_telegram():
     chat_id = get_user_chat_id(email)
     if not chat_id:
         return pro_layout("<div style='max-width:600px;margin:40px auto'><div class='card'><h2>Link Telegram first</h2><p style='color:#94a3b8'>Go to <a href='/link-telegram' style='color:#10b981'>Link Telegram</a> before testing.</p></div></div>","Dashboard", is_admin=email=="admin@agent35.com")
-    r=cached_analysis("GBPUSD", user_set); entry=r.get('entry',0)
+    # FIXED: the live analysis used to run unguarded — any data-feed hiccup
+    # (rate limit, missing Twelve Data key, network) crashed this page with a
+    # server error before Telegram was even tried. A TEST of the Telegram
+    # path shouldn't depend on the market-data path, so on any failure it
+    # falls back to a built-in sample signal.
+    try:
+        r=cached_analysis("GBPUSD", user_set); entry=r.get('entry',0)
+    except Exception:
+        r={}; entry=0
     if not entry or float(entry)==0:
         entry=1.35057; r={"score":8,"bias":"BEARISH","entry":entry,"confluence":"Test unified strategy - all 5 methods combined as ONE score 8/10 A+","rationale":"This is a test message — daily and 4H trend aligned bearish; price in premium zone; bearish order block reacted to."}
-    ok, info = dispatch_signal_to_user(email, chat_id, "GBPUSD", r, user_set)
-    msg = f"Test sent to your Telegram (GBPUSD @ {entry})" if ok else f"Test failed: {info.get('error')}"
-    return pro_layout(f"<div style='max-width:700px;margin:40px auto'><div class='card'><h2 style='font-size:15px'>{msg}</h2><p style='font-size:11px;background:#0b1220;padding:12px;border-radius:10px;border:1px solid #1e293b;word-break:break-all'>{str(info)[:2000]}</p><a href='/dashboard' style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700;display:inline-block;margin-top:10px'>Back to Dashboard</a></div></div>","Dashboard", is_admin=email=="admin@agent35.com")
+    ok, info = dispatch_signal_to_user(email, chat_id, "GBPUSD", r, user_set, is_test=True)
+    if ok:
+        msg = f"Test sent to your Telegram (GBPUSD @ {entry}) — check your chat. Pressing TOOK on a test signal tracks nothing."
+        extra = ""
+    else:
+        msg = f"Test failed: {info.get('error')}"
+        extra = "<div style='margin-top:14px;font-size:12px;color:#94a3b8'>Step-by-step check of the Telegram connection:</div>" + _diagnostics_html(telegram_diagnostics(chat_id))
+    return pro_layout(f"<div style='max-width:700px;margin:40px auto'><div class='card'><h2 style='font-size:15px'>{msg}</h2>{extra}<a href='/dashboard' style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700;display:inline-block;margin-top:14px'>Back to Dashboard</a></div></div>","Dashboard", is_admin=email=="admin@agent35.com")
+
+@app.route("/telegram-status")
+def telegram_status():
+    """Run the full Telegram health check on demand (token, bot, webhook,
+    linked chat, and a real plain-text message)."""
+    if not session.get("user"): return redirect("/login")
+    email=session.get("user"); chat_id=get_user_chat_id(email)
+    html = _diagnostics_html(telegram_diagnostics(chat_id))
+    return pro_layout(f"<div style='max-width:700px;margin:40px auto'><div class='card'><h2 style='font-size:15px'>Telegram connection check</h2>{html}<div style='display:flex;gap:8px;margin-top:14px'><a href='/test-telegram' style='background:#10b981;color:white;padding:10px 16px;border-radius:10px;text-decoration:none;font-weight:700'>Send test signal</a><a href='/link-telegram' style='background:#1e293b;border:1px solid #334155;color:white;padding:10px 16px;border-radius:10px;text-decoration:none'>Re-link chat</a></div></div></div>","Dashboard", is_admin=email=="admin@agent35.com")
 
 @app.route("/telegram/webhook", methods=["POST"])
 def telegram_webhook():
@@ -1182,6 +1309,10 @@ def telegram_webhook():
                 # the chat it was sent to. This should never trigger in
                 # normal use, but guards against a stray/forged callback.
                 text = "This signal isn't yours to action."
+            elif entry.get("test"):
+                # Connection-test signal: acknowledge, track nothing, journal nothing.
+                del pending[signal_id]; save_json(PENDING_FILE, pending)
+                text = "Test signal received ✅ — nothing was tracked."
             elif cb_data.startswith("TOOK_"):
                 tracked = load_json(TRACK_FILE, dict)
                 tracked[signal_id] = {
@@ -1414,7 +1545,6 @@ def cron_news_check():
     cutoff = datetime.now() - timedelta(days=3)
     alerted = {k:v for k,v in alerted.items() if _safe_dt(v) and _safe_dt(v) > cutoff}
 
-    settings_all = load_json(SETTINGS_FILE, dict)
     tg_users = load_json(TG_FILE, dict)
 
     ALERT_WINDOW_MIN = 30
@@ -1440,13 +1570,16 @@ def cron_news_check():
         for user_email, tg_info in tg_users.items():
             chat_id = tg_info.get("chat_id")
             if not chat_id: continue
-            user_settings = settings_all.get(user_email, {})
+            # FIXED: users who never pressed Save on Settings have no stored
+            # settings row, so they got an empty watchlist here and NEVER
+            # received a news alert. get_user_settings() applies the defaults.
+            user_settings = get_user_settings(user_email)
             user_watchlist = set(user_settings.get("symbols", []))
             if not user_watchlist & set(correlated):
                 continue  # this event doesn't touch anything this user watches
             if bot:
-                try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":alert_text}, timeout=10)
-                except Exception: pass
+                res = telegram_post("sendMessage", {"chat_id":chat_id,"text":alert_text})
+                if not res.get("ok"): print(f"[NEWS ALERT] send to {user_email} failed: {res.get('error')}", file=sys.stderr)
 
         alerted[e["id"]] = datetime.now().isoformat()
         newly_alerted.append(e["name"])
@@ -1461,7 +1594,7 @@ def cron_news_check():
             owner_email = entry.get("email")
             if sym not in correlated or not owner_email:
                 continue
-            owner_settings = settings_all.get(owner_email, {})
+            owner_settings = get_user_settings(owner_email)
             if owner_settings.get("trade_news", True):
                 continue  # this trade's owner is fine trading through news
             journal = load_json(JOURNAL_FILE, list)
@@ -1489,7 +1622,7 @@ def cron_news_check():
             save_json(TRACK_FILE, tracked)
 
     save_json(NEWS_ALERTED_FILE, alerted)
-    return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "auto_flagged": flagged_total})
+    return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "auto_flagged": flagged_total, "calendar": nc.status_summary()})
 
 @app.route("/cron/track-check")
 def cron_track_check():
@@ -1644,15 +1777,19 @@ def cron_scan():
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
     system=load_json(SYSTEM_FILE, dict); system["last_scan"]=datetime.now().isoformat(); system["total_scans"]=system.get("total_scans",0)+1; save_json(SYSTEM_FILE, system)
 
-    settings_all = load_json(SETTINGS_FILE, dict)
     tg_users = load_json(TG_FILE, dict)
     sent=[]; skipped=[]; daily_counts={}
 
     for email, chat_data in tg_users.items():
         chat_id = chat_data.get("chat_id")
         if not chat_id: continue
-        user_settings = settings_all.get(email)
-        if not user_settings: continue  # no saved settings yet for this user
+        # FIXED: this used to skip any user without a saved settings row
+        # (`if not user_settings: continue`). Linking Telegram does NOT create
+        # that row — only pressing Save on the Settings page does — so a user
+        # who linked Telegram and never touched Settings was silently skipped
+        # by every scan, forever: "connected, but nothing ever sends".
+        # get_user_settings() returns the same defaults the dashboard shows.
+        user_settings = get_user_settings(email)
 
         if user_tracked_count(email) >= MAX_TRACKED:
             skipped.append(f"{email} AT_LIMIT"); continue
@@ -1685,7 +1822,8 @@ def health():
     # is exactly the kind of drift that makes a running system misleading
     # to debug. Now reads the real live value straight from the engine's
     # own confluence config instead of a second, hand-maintained number.
-    return jsonify({"ok":True,"version":"V24 - per-user signal delivery & tracking","symbols":len(ALL_SYMBOLS),"tracked_total_all_users":len(tracked),"per_user_limit":MAX_TRACKED,"btc_test":test,"min_score":eng.DEFAULT_WEIGHTS.get("min_score"),"max_opposing":eng.DEFAULT_WEIGHTS.get("max_opposing"),"modes":["regular","scalp"]})
+    system = load_json(SYSTEM_FILE, dict)
+    return jsonify({"ok":True,"last_scan":system.get("last_scan"),"total_scans":system.get("total_scans",0),"calendar":nc.status_summary(),"cron_secret_set":bool(os.getenv("CRON_SECRET")),"telegram_token_set":bool(os.getenv("TELEGRAM_BOT_TOKEN")),"twelve_data_keys":len(eng.KEYS),"version":"V24 - per-user signal delivery & tracking","symbols":len(ALL_SYMBOLS),"tracked_total_all_users":len(tracked),"per_user_limit":MAX_TRACKED,"btc_test":test,"min_score":eng.DEFAULT_WEIGHTS.get("min_score"),"max_opposing":eng.DEFAULT_WEIGHTS.get("max_opposing"),"modes":["regular","scalp"]})
 
 @app.route("/debug-signal")
 def debug_signal():
