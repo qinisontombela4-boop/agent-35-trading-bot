@@ -1,5 +1,6 @@
 from flask import Flask, request, jsonify, session, redirect, Response
-import os, json, hashlib, requests, random, string, csv, io, sys, secrets, smtplib
+import os, json, hashlib, requests, random, string, csv, io, sys, secrets, smtplib, re, time
+import html as _html
 from email.mime.text import MIMEText
 from urllib.parse import quote
 from dotenv import load_dotenv
@@ -35,6 +36,15 @@ if not os.getenv("CRON_SECRET"):
     print("[WARN] CRON_SECRET is not set — the /cron/* endpoints (scan, news-check, "
           "daily-reset…) accept requests from anyone. Set CRON_SECRET and put the "
           "same value in your external scheduler's URLs (?secret=...).", file=sys.stderr)
+
+# app.py and news_calendar.py must be deployed TOGETHER. If only one of them
+# was uploaded, this flags it loudly on /news and /health instead of failing
+# in confusing ways (a stale "Not Configured" page, missing news, etc.).
+BUILD_ID = "2026-10-15-lean"
+NEWS_MODULE_OK = getattr(nc, "BUILD_ID", None) == BUILD_ID
+if not NEWS_MODULE_OK:
+    print(f"[WARN] news_calendar.py build is {getattr(nc,'BUILD_ID',None)!r} but app.py expects {BUILD_ID!r} — "
+          "upload BOTH app.py and news_calendar.py from the same delivery.", file=sys.stderr)
 
 # FIXED: the UI (settings, dashboard, scan page, journal, pricing, user
 # guide, even the Telegram "link your chat" message) hardcoded "Score 5+
@@ -103,6 +113,9 @@ TG_FILE = os.path.join(BASE_DIR, "telegram_users.json")
 TEMP_CHAT_FILE = os.path.join(BASE_DIR, "temp_chats.json")
 NEWS_ALERTED_FILE = os.path.join(BASE_DIR, "news_alerted.json")  # event ids already Telegram-alerted, so we don't repeat
 DAILY_COUNT_FILE = os.path.join(BASE_DIR, "daily_signal_count.json")
+NEWS_CACHE_FILE = os.path.join(BASE_DIR, "news_calendar_cache.json")  # last good calendar, survives restarts
+NEWS_CALLS_FILE = os.path.join(BASE_DIR, "news_calls.json")           # every news lean logged + its scored outcome
+TG_LINK_FILE = os.path.join(BASE_DIR, "tg_link_tokens.json")          # one-tap Telegram link tokens (30 min, single use)
 
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","EURCHF","GBPCHF","EURAUD","GBPAUD","EURCAD","GBPCAD","EURNZD","GBPNZD","AUDNZD","AUDCAD","NZDCAD","AUDCHF","NZDJPY","XAUUSD","XAGUSD","XTIUSD","XBRUSD","US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200","BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
 CURRENCY_MAP = {"ZAR":{"symbol":"R","name":"Rand"},"USD":{"symbol":"$","name":"Dollar"},"EUR":{"symbol":"€","name":"Euro"},"GBP":{"symbol":"£","name":"Pound"}}
@@ -179,6 +192,36 @@ def ensure_files():
     if not load_json(SYSTEM_FILE, dict): save_json(SYSTEM_FILE, {"last_scan":None,"total_scans":0,"total_signals":0,"system_up_since":datetime.now().isoformat()})
 ensure_files()
 
+if NEWS_MODULE_OK:
+    nc.set_persistence(lambda: load_json(NEWS_CACHE_FILE, dict), lambda d: save_json(NEWS_CACHE_FILE, d))
+
+# ---- Ghost sessions after a data reset -------------------------------------
+# A login is a signed browser cookie holding the email. If the server's data is
+# wiped (redeploy on local-file storage, a reset database), the cookie keeps
+# working for an account that no longer exists: the person looks logged in,
+# can "link Telegram", but has no account, settings or plan behind it — the
+# "it linked but I get nothing" state. Detect it and send them to re-register.
+_KNOWN_EMAILS = {"t": 0.0, "emails": set()}
+
+def _account_exists(email):
+    now = time.time()
+    if email in _KNOWN_EMAILS["emails"] and now - _KNOWN_EMAILS["t"] < 60:
+        return True
+    auth = load_json(AUTH_FILE, dict)
+    if not auth:
+        return True  # couldn't read the account list (storage hiccup) — never log everyone out on a failed read
+    _KNOWN_EMAILS.update(t=now, emails=set(auth.keys()))
+    return email in _KNOWN_EMAILS["emails"]
+
+@app.before_request
+def drop_ghost_sessions():
+    if request.path.startswith(("/cron/", "/telegram/", "/health", "/static", "/login", "/register", "/forgot", "/reset")):
+        return None
+    email = session.get("user")
+    if email and not _account_exists(email):
+        session.clear()
+        return redirect("/login?error=" + quote("Your account no longer exists on this server (its data was reset). Please register again, then re-link Telegram."))
+
 def get_user_settings(email):
     settings = load_json(SETTINGS_FILE, dict)
     default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":["London","New York"],"symbols":ALL_SYMBOLS[:10],"risk_percent":1.0,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular"}
@@ -238,6 +281,9 @@ def telegram_diagnostics(chat_id):
     """Step-by-step health check of the whole Telegram path. Each entry is
     (label, ok, detail) so the page can show exactly which step breaks."""
     steps = []
+    steps.append(("Data storage is persistent", bool(supabase),
+                  "Supabase active — users, Telegram links and settings survive redeploys" if supabase else
+                  "LOCAL FILES — every redeploy wipes users, Telegram links and settings (this is how links 'disappear'). Set SUPABASE_URL + SUPABASE_SERVICE_KEY"))
     token_set = bool(os.getenv("TELEGRAM_BOT_TOKEN"))
     steps.append(("Bot token set on server", token_set, "TELEGRAM_BOT_TOKEN present" if token_set else "Set TELEGRAM_BOT_TOKEN in Render > Environment"))
     if not token_set: return steps
@@ -258,6 +304,37 @@ def telegram_diagnostics(chat_id):
     plain = telegram_post("sendMessage", {"chat_id": chat_id, "text": "✅ Agent 35 connection test — if you can read this, delivery to this chat works."})
     steps.append(("Plain message delivered", bool(plain.get("ok")), "check your Telegram now" if plain.get("ok") else plain.get("error", "")))
     return steps
+
+_BOT_NAME = {"name": None, "t": 0.0}
+
+def get_bot_username():
+    """The bot's @username (needed for one-tap deep links). TELEGRAM_BOT_USERNAME
+    overrides; otherwise asks Telegram once an hour."""
+    env = os.getenv("TELEGRAM_BOT_USERNAME", "").lstrip("@").strip()
+    if env: return env
+    if _BOT_NAME["name"] and time.time() - _BOT_NAME["t"] < 3600: return _BOT_NAME["name"]
+    me = telegram_post("getMe", {})
+    if me.get("ok"):
+        _BOT_NAME.update(name=me["result"].get("username"), t=time.time())
+        return _BOT_NAME["name"]
+    return None
+
+def make_link_token(email):
+    """One-time token for the 'Connect with one tap' button: t.me/<bot>?start=link_<token>.
+    The webhook turns it into a verified link, so nobody copy-pastes a Chat ID wrong."""
+    tokens = load_json(TG_LINK_FILE, dict); now = datetime.now()
+    tokens = {k: v for k, v in tokens.items() if _safe_dt(v.get("expires")) and _safe_dt(v["expires"]) > now}
+    tok = secrets.token_urlsafe(9)
+    tokens[tok] = {"email": email, "expires": (now + timedelta(minutes=30)).isoformat()}
+    save_json(TG_LINK_FILE, tokens)
+    return tok
+
+def consume_link_token(tok):
+    tokens = load_json(TG_LINK_FILE, dict); v = tokens.get(tok)
+    if not v: return None
+    del tokens[tok]; save_json(TG_LINK_FILE, tokens)
+    exp = _safe_dt(v.get("expires"))
+    return v.get("email") if exp and exp > datetime.now() else None
 
 def _diagnostics_html(steps):
     rows = "".join(f"<tr><td style='padding:6px 10px'>{'✅' if ok else '❌'}</td><td style='padding:6px 10px;font-weight:700'>{label}</td><td style='padding:6px 10px;color:{'#94a3b8' if ok else '#fca5a5'};font-size:12px;word-break:break-word'>{detail}</td></tr>" for label, ok, detail in steps)
@@ -1285,9 +1362,24 @@ def telegram_webhook():
         temp=load_json(TEMP_CHAT_FILE, dict)
         temp[str(chat_id)]={"first_name":from_user.get("first_name",""),"username":from_user.get("username",""),"time":datetime.now().isoformat(),"text":data["message"].get("text","")[:100]}
         save_json(TEMP_CHAT_FILE, temp)
-        if bot and "/start" in data["message"].get("text",""):
-            try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":f"AGENT 35 PRO - Your Chat ID: {chat_id}\nCopy and paste in Dashboard > Link Telegram\n\nUnified Strategy - 2 Modes - Score {MIN_SCORE}+ sends"}, timeout=5)
-            except: pass
+        text_in = (data["message"].get("text") or "").strip()
+        if bot and text_in.startswith("/start"):
+            parts = text_in.split(maxsplit=1); payload = parts[1].strip() if len(parts) > 1 else ""
+            if payload.startswith("link_"):
+                # One-tap link: the website put a single-use token in the t.me link.
+                # Pressing Start here proves this chat can receive messages, and the
+                # chat id is captured by Telegram itself — no copy-paste to get wrong.
+                linked_email = consume_link_token(payload[5:])
+                if linked_email:
+                    tg_all = load_json(TG_FILE, dict)
+                    tg_all[linked_email] = {"chat_id": str(chat_id), "linked_at": datetime.now().isoformat(), "manual": False,
+                                            "first_name": from_user.get("first_name", ""), "username": from_user.get("username", "")}
+                    save_json(TG_FILE, tg_all)
+                    telegram_post("sendMessage", {"chat_id": chat_id, "text": f"✅ AGENT 35 PRO linked to {linked_email}.\n\nSignals and news alerts for your watchlist will arrive in this chat. You can send a test signal from the website: Link Telegram → Send test signal."}, timeout=5)
+                else:
+                    telegram_post("sendMessage", {"chat_id": chat_id, "text": f"That link expired or was already used. Open Link Telegram on the website and tap Connect again.\n\n(Manual option — your Chat ID is {chat_id})"}, timeout=5)
+            else:
+                telegram_post("sendMessage", {"chat_id": chat_id, "text": f"AGENT 35 PRO - Your Chat ID: {chat_id}\n\nEasiest: open Link Telegram on the website and tap 'Connect with one tap'.\nOr paste this Chat ID there manually.\n\nUnified Strategy - 2 Modes - Score {MIN_SCORE}+ sends"}, timeout=5)
     if "callback_query" in data:
         # FIXED: callback_data now carries a unique signal_id (TOOK_<id> /
         # SKIP_<id>) instead of a bare symbol name, so this looks up exactly
