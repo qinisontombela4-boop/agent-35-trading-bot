@@ -385,6 +385,21 @@ def email_for_chat_id(chat_id):
             return email
     return None
 
+def chat_owner_conflict(chat_id, email):
+    """If this Telegram chat is already linked to a DIFFERENT account, return that
+    account's email (else None). One chat = one account: with two accounts on one
+    chat, TOOK/SKIP presses, stop-loss alerts and tracked trades get attributed to
+    whichever account is listed first — the other person's signals look 'sent'
+    but are never theirs."""
+    for other, data in load_json(TG_FILE, dict).items():
+        if other != email and str(data.get("chat_id","")) == str(chat_id):
+            return other
+    return None
+
+def _mask_email(e):
+    n, _, d = (e or "").partition("@")
+    return (n[:2] + "***@" + d) if d else "another account"
+
 def get_user_chat_id(email):
     tg_users = load_json(TG_FILE, dict)
     return tg_users.get(email, {}).get("chat_id")
@@ -876,6 +891,114 @@ def settings_page():
 </form></div>"""
     return pro_layout(content,"Settings", is_admin=is_admin)
 
+# ================= NEWS LEAN: scoring, digest, page widgets =================
+
+def _esc(x): return _html.escape(str(x if x is not None else ""))
+
+def run_news_scoring(calls):
+    """Score every logged lean whose release was 61+ minutes ago against real
+    1-minute price candles (+5/+15/+60 min after the release). Mutates `calls`;
+    returns a list of labels scored this run."""
+    now = datetime.utcnow(); done = []
+    for call in calls.values():
+        if call.get("status") != "pending": continue
+        T = datetime.fromisoformat(call["event_time_utc"])
+        age = (now - T).total_seconds() / 60
+        if age < 61: continue
+        if age > 240:
+            call["status"] = "no_data"; call["note"] = "price history was no longer available when scoring ran"
+            continue
+        candles = {}
+        for sym in call["scored_symbols"]:
+            try: data, _err = eng.get_values(sym, "1min", int(age) + 15)
+            except Exception: data = None
+            if data: candles[sym] = data
+        call["attempts"] = call.get("attempts", 0) + 1
+        outcome = nc.score_call(call, candles) if candles else None
+        if outcome:
+            call["outcome"] = outcome; call["status"] = "scored"; call["scored_at"] = now.isoformat()
+            done.append(f"{call['currency']} {call.get('group')}")
+    return done
+
+def short_lean_line(lean, watchlist=None):
+    if not lean or lean.get("mixed") or not lean.get("symbols"): return ""
+    syms = {s: d for s, d in lean["symbols"].items() if watchlist is None or s in watchlist}
+    if not syms: return ""
+    order = {s: i for i, s in enumerate(nc.SCORE_PRIORITY)}; key = lambda s: (order.get(s, 99), s)
+    bits = []
+    for d in ("SELL", "BUY"):
+        group = sorted((s for s, x in syms.items() if x == d), key=key)
+        if group: bits.append(f"{d} " + ", ".join(group[:5]) + ("…" if len(group) > 5 else ""))
+    return f"   ↳ lean ({lean['view']}, a guess): " + " · ".join(bits)
+
+def build_digest_text(user_email, events, label, day, agg=None):
+    """Morning/evening heads-up of the day's High-impact releases, SAST, limited to
+    events that touch THIS user's watchlist. Returns '' if nothing relevant."""
+    watch = set(get_user_settings(user_email).get("symbols", []))
+    mine = [e for e in events if watch & {sym for sym in ALL_SYMBOLS if e["currency"] in nc.currencies_for_symbol(sym)}]
+    if not mine: return ""
+    leans = nc.compute_event_leans(mine); any_lean = False
+    lines = [f"📅 HIGH-IMPACT NEWS — {label} ({day.strftime('%a %d %b')}, SAST)", ""]
+    for c in nc.cluster_events(mine):
+        for e in c["events"]:
+            t = (e["time"] + timedelta(hours=2)).strftime("%H:%M")
+            nums = f"  (fcst {e.get('forecast') or '—'} | prev {e.get('previous') or '—'})" if (e.get("forecast") or e.get("previous")) else ""
+            lines.append(f"{t}  {e['currency']}  {e['name']}{nums}")
+        ls = short_lean_line(leans.get((c["currency"], c["time"])), watch)
+        if ls: lines.append(ls); any_lean = True
+    lines += ["", "Expect volatility and wider spreads around these times."]
+    if any_lean and agg is not None: lines.append(nc.track_record_text(agg))
+    return "\n".join(lines)
+
+def send_news_digest(events, label, day, tg_users, agg):
+    sent = 0
+    for user_email, info in tg_users.items():
+        chat_id = info.get("chat_id")
+        if not chat_id: continue
+        text = build_digest_text(user_email, events, label, day, agg)
+        if not text: continue
+        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": text})
+        if res.get("ok"): sent += 1
+        else: print(f"[NEWS DIGEST] send to {user_email} failed: {res.get('error')}", file=sys.stderr)
+    return sent
+
+def lean_card_html(lean, call, agg):
+    box = "margin-top:10px;padding:10px;border-radius:10px;background:#0b1220;border:1px solid #334155"
+    if lean.get("mixed"):
+        return f"<div style='{box};font-size:11px;color:#94a3b8'>📊 News lean: <b>mixed</b> — the releases at this time point in opposite directions, so there is no lean.</div>"
+    syms = lean["symbols"]; order = {s: i for i, s in enumerate(nc.SCORE_PRIORITY)}; key = lambda s: (order.get(s, 99), s)
+    sells = sorted((s for s, d in syms.items() if d == "SELL"), key=key); buys = sorted((s for s, d in syms.items() if d == "BUY"), key=key)
+    ex = lean["members"][0]
+    outcome = ""
+    if call and call.get("status") == "scored" and call.get("outcome"):
+        p = call["outcome"]["primary"]; r = call["outcome"]["symbols"][p]
+        res = {"hit": "✅ hit", "miss": "❌ miss", "flat": "➖ flat"}.get(r.get("res15"), "—")
+        mv = r.get("move15"); mv_txt = f"{mv:+.2f}%" if mv is not None else "n/a"
+        outcome = f"<div style='margin-top:8px;font-size:12px;font-weight:700'>Result: {_esc(p)} {r['dir']} → {mv_txt} after 15 min {res}{' · whipsaw (moved both ways)' if r.get('whipsaw') else ''}</div>"
+    elif call:
+        outcome = "<div style='margin-top:8px;font-size:11px;color:#64748b'>Logged — the result is scored about an hour after the release.</div>"
+    return f"""<div style='{box}'>
+<div style='font-size:11px;font-weight:800;color:#fbbf24'>📊 NEWS LEAN — experimental guess, not a signal</div>
+<div style='font-size:11px;color:#cbd5e1;margin-top:4px;line-height:1.5'>{lean['agree']} of {lean['total']} {_esc(lean['currency'])} releases point to <b>{_esc(lean['view'])}</b> (e.g. {_esc(ex['name'])}: forecast {_esc(ex['forecast'])} vs previous {_esc(ex['previous'])}).</div>
+<div style='font-size:12px;margin-top:6px'>{('<span style="color:#ef4444;font-weight:700">SELL</span> ' + ', '.join(sells[:8])) if sells else ''}{' · ' if sells and buys else ''}{('<span style="color:#10b981;font-weight:700">BUY</span> ' + ', '.join(buys[:8])) if buys else ''}</div>
+<div style='font-size:10px;color:#64748b;margin-top:6px;line-height:1.5'>{_esc(nc.track_record_text(agg, lean.get('group')))}. If the actual number misses forecast, this likely flips.</div>
+{outcome}
+</div>"""
+
+def scorecard_html(agg):
+    o = agg["overall"]
+    if not o["decided"]:
+        body = (f"<div style='font-size:11px;color:#94a3b8;margin-top:6px;line-height:1.5'>No releases scored yet ({agg['pending']} logged, waiting for the result). "
+                "Each High-impact release with a forecast-vs-previous lean is logged ~30 min before it happens and scored against the real price move 5/15/60 minutes after. "
+                "The hit rate appears here, so you can judge whether the lean has any edge before trusting it.</div>")
+    else:
+        warn = f"<div style='font-size:10px;color:#f59e0b;margin-top:4px'>Only {o['decided']} releases scored — fewer than {nc.MIN_TRUSTED_SAMPLE} is too few to trust.</div>" if o["decided"] < nc.MIN_TRUSTED_SAMPLE else ""
+        rows = "".join(f"<tr><td>{_esc(g)}</td><td>{t['hits']}/{t['decided']}</td><td>{t['hit_rate']:.0f}%</td></tr>" for g, t in agg["by_group"].items() if t["decided"])
+        recent = "".join(f"<div style='font-size:10px;color:#94a3b8'>{_esc(r['time'][5:16].replace('T',' '))} UTC · {_esc(r['currency'])} {_esc(r['group'])} · {_esc(r['symbol'])} {r['dir']} {('%+.2f%%' % r['move15']) if r['move15'] is not None else ''} {({'hit':'✅','miss':'❌','flat':'➖'}).get(r['res15'],'')}</div>" for r in agg["recent"][:5])
+        body = (f"<div style='font-size:20px;font-weight:900;margin-top:6px'>{o['hits']}/{o['decided']} <span style='font-size:13px;color:#94a3b8'>({o['hit_rate']:.0f}% hit, price +15 min after release)</span></div>{warn}"
+                f"<table style='margin-top:8px;font-size:11px'><tr><th>Release</th><th>Hits</th><th>Rate</th></tr>{rows}</table><div style='margin-top:8px'>{recent}</div>")
+    return f"<div class='card' style='margin-bottom:12px'><div style='font-size:13px;font-weight:800'>📊 News-lean scorecard</div>{body}</div>"
+
 @app.route("/news-status")
 def news_status():
     """Live self-test of the whole news pipeline, as JSON: forces a fresh
@@ -944,39 +1067,43 @@ def dashboard_scan():
 def news_page():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"; user_settings=get_user_settings(email)
+    if not NEWS_MODULE_OK:
+        return pro_layout("<div style='max-width:700px;margin:40px auto'><div class='card' style='border:1px solid #ef444455'><h2 style='font-size:15px'>⚠️ Files out of sync</h2><p style='color:#94a3b8;font-size:13px;line-height:1.6'>app.py and news_calendar.py are from different deliveries, so the calendar can't load. Upload BOTH files from the same delivery and redeploy. (Check /health: it shows each file's build.)</p></div></div>", "News", is_admin=is_admin)
     watched = set(user_settings.get("symbols", []))
 
-    # Impact filter — defaults to ALL events (the user asked for the news
-    # tab to "show all the folder news", not just the trimmed high-impact
-    # subset). min_impact="None" means IMPACT_ORDER threshold 0, i.e. no
-    # filtering at all.
-    impact_filter = request.args.get("impact", "All")
+    # Impact filter — defaults to ALL events. ("Low+" arrives as "Low " because a
+    # raw + in a URL means space; accept both so the Low+/Medium+ buttons work.)
+    impact_filter = request.args.get("impact", "All").replace(" ", "+")
     min_impact_map = {"All": "None", "Low+": "Low", "Medium+": "Medium", "High": "High"}
+    if impact_filter not in min_impact_map: impact_filter = "All"
+
+    # "Refresh now" button: forces a live fetch, at most once a minute.
+    if request.args.get("refresh") == "1":
+        last = nc.STATUS.get("last_attempt")
+        if not last or (datetime.utcnow() - last).total_seconds() > 60:
+            nc.fetch_calendar(force=True)
+
     # lookback_minutes=60 keeps an event on screen (as "in progress") for an
     # hour after it fires instead of vanishing the second it starts.
-    events = nc.upcoming_high_impact(hours_ahead=72, min_impact=min_impact_map.get(impact_filter, "None"), lookback_minutes=60)
-
-    # The calendar now works with NO API key (free Forex Factory feed), so
-    # the old "Not Configured" dead-end is gone. What the page shows instead
-    # is the feed's real health, so an empty page always says WHY.
+    events = nc.upcoming_high_impact(hours_ahead=168, min_impact=min_impact_map[impact_filter], lookback_minutes=60)
     st = nc.status_summary()
+    calls = load_json(NEWS_CALLS_FILE, dict); agg = nc.aggregate(calls)
+    leans = nc.compute_event_leans(nc.fetch_calendar())
+
+    refresh_btn = f"<a href='/news?impact={quote(impact_filter)}&refresh=1' style='color:#10b981;font-size:11px;text-decoration:none;margin-left:8px'>↻ Refresh now</a>"
     if st["ok"]:
-        feed_banner = f"<div style='font-size:11px;color:#64748b;margin:0 0 10px'>Source: {st['source']} · {st['event_count']} events this week · updated {st['last_success_utc'][11:16]} UTC</div>"
+        feed_banner = f"<div style='font-size:11px;color:#64748b;margin:0 0 10px'>Source: {_esc(st['source'])} · {st['event_count']} events this week · updated {st['last_success_utc'][11:16]} UTC{refresh_btn}</div>"
+    elif st["event_count"]:
+        feed_banner = f"<div class='card' style='border:1px solid #f59e0b55;margin-bottom:12px'><div style='font-weight:800;color:#fbbf24'>⚠️ Showing an older calendar ({_esc(st['source'])})</div><div style='font-size:12px;color:#94a3b8;margin-top:6px;word-break:break-word'>Live feed problem: {_esc(st['last_error'])}</div><div style='font-size:11px;color:#64748b;margin-top:6px'>Scheduled times rarely change, so this is still useful. Retrying automatically.{refresh_btn} · <a href='/news-status' style='color:#10b981'>details</a></div></div>"
     else:
-        feed_banner = f"<div class='card' style='border:1px solid #ef444455;margin-bottom:12px'><div style='font-weight:800;color:#fca5a5'>⚠️ Calendar feed unavailable</div><div style='font-size:12px;color:#94a3b8;margin-top:6px;word-break:break-word'>{st['last_error'] or 'No fetch attempted yet — refresh in a moment.'}</div><div style='font-size:11px;color:#64748b;margin-top:6px'>News blackout and alerts are paused until the feed responds (retrying automatically). Details: <a href='/news-status' style='color:#10b981'>/news-status</a></div></div>"
+        feed_banner = f"<div class='card' style='border:1px solid #ef444455;margin-bottom:12px'><div style='font-weight:800;color:#fca5a5'>⚠️ Calendar feed unavailable</div><div style='font-size:12px;color:#94a3b8;margin-top:6px;word-break:break-word'>{_esc(st['last_error']) or 'No fetch attempted yet — refresh in a moment.'}</div><div style='font-size:11px;color:#64748b;margin-top:6px'>News blackout and alerts are paused until the feed responds (retrying automatically).{refresh_btn} · <a href='/news-status' style='color:#10b981'>details</a></div></div>"
 
-    # Who's actually exposed to each event: on the admin view, cross-
-    # reference every user's watchlist + their own "trade through news"
-    # setting (trade_news=True means no blackout — they WILL trade through
-    # it). This is visibility only, never a reason to silently override
-    # someone's own setting.
     settings_all = load_json(SETTINGS_FILE, dict) if is_admin else {}
-
     IMPACT_COLORS = {"High": ("rgba(239,68,68,0.15)", "#ef4444"), "Medium": ("rgba(245,158,11,0.15)", "#f59e0b"), "Low": ("rgba(100,116,139,0.15)", "#94a3b8"), "None": ("rgba(100,116,139,0.1)", "#64748b")}
 
-    cards = ""
+    cards = ""; shown_clusters = set()
     if not events and st["ok"]:
-        cards = "<div class='card'><p style='color:#64748b;text-align:center;padding:20px'>No events in the next 72 hours for this filter.</p></div>"
+        cards = "<div class='card'><p style='color:#64748b;text-align:center;padding:20px'>No events in the next 7 days for this filter.</p></div>"
     for e in events:
         correlated = sorted([s for s in ALL_SYMBOLS if e["currency"] in nc.currencies_for_symbol(s)])
         watched_hit = [s for s in correlated if s in watched]
@@ -984,26 +1111,14 @@ def news_page():
         highlight = "border:1px solid #ef444455;background:linear-gradient(135deg,#1a0f0f,#151e32)" if watched_hit else ""
         watch_note = f"<div style='margin-top:8px;font-size:11px;color:#fca5a5'>⚠️ Affects {len(watched_hit)} symbol(s) on your watchlist: {', '.join(watched_hit[:8])}{'…' if len(watched_hit)>8 else ''}</div>" if watched_hit else ""
 
-        # Has the real number printed yet? Only THEN do we show a surprise
-        # note (actual vs forecast) — never a pre-release directional call.
-        # A forecast-vs-previous gap is already priced in before release;
-        # it's the ACTUAL-vs-forecast surprise, once real, that can move a
-        # market, and even that is "this is why it may be volatile right
-        # now", not "buy/sell this".
+        # Once the real number has printed (JBlanked source only), note the surprise vs forecast.
         surprise_note = ""
         if e.get("actual") not in (None, "", "—"):
-            try:
-                actual_v = float(str(e.get("actual")).replace("%","").replace("K","").strip())
-                forecast_v = float(str(e.get("forecast")).replace("%","").replace("K","").strip())
-                diff = actual_v - forecast_v
-                if abs(diff) > 1e-9:
-                    direction_word = "above" if diff > 0 else "below"
-                    surprise_note = f"<div style='margin-top:8px;font-size:11px;color:#fbbf24'>📣 Printed {direction_word} forecast ({e.get('actual')} vs {e.get('forecast')} exp) — expect elevated volatility on correlated symbols now that this is real data, not a prediction.</div>"
-            except (TypeError, ValueError):
-                pass
+            actual_v = nc.parse_number(e.get("actual")); forecast_v = nc.parse_number(e.get("forecast"))
+            if actual_v is not None and forecast_v is not None and abs(actual_v - forecast_v) > 1e-9:
+                direction_word = "above" if actual_v > forecast_v else "below"
+                surprise_note = f"<div style='margin-top:8px;font-size:11px;color:#fbbf24'>📣 Printed {direction_word} forecast ({_esc(e.get('actual'))} vs {_esc(e.get('forecast'))} exp) — expect elevated volatility on correlated symbols now that this is real data.</div>"
 
-        # Admin-only: which of OUR users have a correlated symbol watched
-        # and have "trade through news" ON (so this event won't block them)?
         exposed_note = ""
         if is_admin and correlated:
             exposed_users = []
@@ -1014,19 +1129,26 @@ def news_page():
             if exposed_users:
                 exposed_note = f"<div style='margin-top:8px;font-size:11px;color:#60a5fa'>👤 Trading through this news (Avoid News OFF, symbol watched): {', '.join(exposed_users[:10])}{'…' if len(exposed_users)>10 else ''}</div>"
 
+        lean_note = ""
+        ckey = (e["currency"], e["time"])
+        if e["impact"] == "High" and ckey in leans and ckey not in shown_clusters:
+            shown_clusters.add(ckey)
+            lean_note = lean_card_html(leans[ckey], calls.get(leans[ckey]["cluster_id"]), agg)
+
         cards += f"""<div class='card' style='{highlight}'>
 <div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:8px'>
-<div><span class='pill' style='background:{bg};color:{fg}'>{e['currency']} {e.get('impact','').upper()}</span></div>
+<div><span class='pill' style='background:{bg};color:{fg}'>{_esc(e['currency'])} {_esc(e.get('impact','')).upper()}</span></div>
 <div style='color:#64748b;font-size:11px;font-weight:700'>{nc.countdown_str(e)} • {e['time'].strftime('%a %H:%M UTC')} · {(e['time']+timedelta(hours=2)).strftime('%H:%M')} SAST</div>
 </div>
-<h3 style='margin:10px 0 4px;font-size:15px'>{e['name']}</h3>
+<h3 style='margin:10px 0 4px;font-size:15px'>{_esc(e['name'])}</h3>
 <div style='display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-top:8px;font-size:11px'>
-<div><div style='color:#64748b'>FORECAST</div><div style='font-weight:700'>{e.get('forecast') or '—'}</div></div>
-<div><div style='color:#64748b'>PREVIOUS</div><div style='font-weight:700'>{e.get('previous') or '—'}</div></div>
-<div><div style='color:#64748b'>ACTUAL</div><div style='font-weight:700'>{e.get('actual') or '—'}</div></div>
+<div><div style='color:#64748b'>FORECAST</div><div style='font-weight:700'>{_esc(e.get('forecast') or '—')}</div></div>
+<div><div style='color:#64748b'>PREVIOUS</div><div style='font-weight:700'>{_esc(e.get('previous') or '—')}</div></div>
+<div><div style='color:#64748b'>ACTUAL</div><div style='font-weight:700'>{_esc(e.get('actual') or '—')}</div></div>
 </div>
 <div style='margin-top:10px;font-size:11px;color:#64748b'>Correlated: {', '.join(correlated[:10]) if correlated else '—'}{'…' if len(correlated)>10 else ''}</div>
 {watch_note}
+{lean_note}
 {surprise_note}
 {exposed_note}
 </div>"""
@@ -1034,18 +1156,45 @@ def news_page():
     def filter_btn(label):
         active = impact_filter == label
         style = "background:#10b981;color:white;border:1px solid #10b981" if active else "background:#151e32;border:1px solid #1e293b;color:#94a3b8"
-        return f"<a href='/news?impact={label}' style='padding:7px 14px;border-radius:20px;text-decoration:none;font-size:11px;font-weight:600;{style}'>{label}</a>"
+        return f"<a href='/news?impact={quote(label)}' style='padding:7px 14px;border-radius:20px;text-decoration:none;font-size:11px;font-weight:600;{style}'>{label}</a>"
 
     content = f"""<div style='max-width:900px;margin:0 auto;padding:14px'>
 <h1 style='font-size:20px;font-weight:900;margin:0 0 4px'>🗓️ Economic Calendar</h1>
-<p style='color:#64748b;font-size:12px;margin:0 0 10px'>Every scheduled event, next 72 hours. We show correlated symbols, volatility risk, and (once the real number is out) the actual-vs-forecast surprise —
-never a directional call before the release; forecast-vs-previous is already priced in, so a pre-print "buy/sell" badge is a guess dressed up as data.
+<p style='color:#64748b;font-size:12px;margin:0 0 10px'>Every scheduled event, next 7 days, in UTC and SAST. High-impact releases that publish a forecast and previous reading also get a <b>news lean</b> —
+an experimental guess at which way the currency may move, logged and scored against real prices (see the scorecard). It is not a signal: the actual number vs forecast is what really moves price.
 {'Auto-flagging is ON: with Avoid News enabled in Settings, tracked trades on correlated symbols get flagged and you get alerted ahead of these.' if not user_settings.get('trade_news', True) else 'Avoid News is currently OFF in your settings, so these events will not block signals or flag trades for you.'}</p>
+{scorecard_html(agg)}
 <div style='display:flex;gap:6px;flex-wrap:wrap;margin-bottom:14px'>{filter_btn("All")}{filter_btn("Low+")}{filter_btn("Medium+")}{filter_btn("High")}</div>
 {feed_banner}
 <div style='display:grid;gap:12px'>{cards}</div>
 </div>"""
     return pro_layout(content, "News", is_admin=is_admin)
+
+@app.route("/news-scorecard")
+def news_scorecard():
+    """The lean's track record as JSON (also lists logged-but-unscored calls)."""
+    if not session.get("user"): return redirect("/login")
+    calls = load_json(NEWS_CALLS_FILE, dict)
+    pending = [{"release": f"{c['currency']} {c.get('group')} @ {c['event_time_utc']}Z", "view": c.get("view"), "status": c.get("status"), "attempts": c.get("attempts", 0)} for c in calls.values() if c.get("status") != "scored"]
+    return jsonify({"scorecard": nc.aggregate(calls), "not_yet_scored": pending})
+
+@app.route("/news-digest-preview")
+def news_digest_preview():
+    """What today's / tomorrow's Telegram digest would say for YOU, right now.
+    Add ?send=1 to also send it to your own Telegram."""
+    if not session.get("user"): return redirect("/login")
+    email = session.get("user"); agg = nc.aggregate(load_json(NEWS_CALLS_FILE, dict))
+    sast_now = datetime.utcnow() + timedelta(hours=2)
+    out = {}
+    for label, day, not_before in (("today", sast_now.date(), datetime.utcnow()), ("tomorrow", (sast_now + timedelta(days=1)).date(), None)):
+        evs = nc.events_on_sast_day(day, "High", not_before=not_before)
+        out[label] = build_digest_text(email, evs, label, day, agg) or "(no High-impact events touching your watchlist)"
+    if request.args.get("send") == "1":
+        chat_id = get_user_chat_id(email)
+        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": out["today"] + "\n\n— — —\n\n" + out["tomorrow"]}) if chat_id else {"ok": False, "error": "no Telegram linked"}
+        out["sent_to_your_telegram"] = bool(res.get("ok")) or res.get("error")
+    out["calendar"] = nc.status_summary()
+    return jsonify(out)
 
 @app.route("/journal")
 def journal_page():
@@ -1370,7 +1519,10 @@ def telegram_webhook():
                 # Pressing Start here proves this chat can receive messages, and the
                 # chat id is captured by Telegram itself — no copy-paste to get wrong.
                 linked_email = consume_link_token(payload[5:])
-                if linked_email:
+                clash = chat_owner_conflict(chat_id, linked_email) if linked_email else None
+                if clash:
+                    telegram_post("sendMessage", {"chat_id": chat_id, "text": f"This Telegram chat is already linked to {_mask_email(clash)}, so it can't also be linked to {linked_email}. Use a different Telegram account for this login, or unlink the other account first."}, timeout=5)
+                elif linked_email:
                     tg_all = load_json(TG_FILE, dict)
                     tg_all[linked_email] = {"chat_id": str(chat_id), "linked_at": datetime.now().isoformat(), "manual": False,
                                             "first_name": from_user.get("first_name", ""), "username": from_user.get("username", "")}
@@ -1570,21 +1722,48 @@ def link_telegram():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"; tg_users=load_json(TG_FILE, dict)
     if request.method=="POST":
-        chat_id=request.form.get("chat_id","").strip()
-        if chat_id:
-            tg_users[email]={"chat_id":chat_id,"linked_at":datetime.now().isoformat(),"manual":True}
-            save_json(TG_FILE, tg_users); return redirect("/dashboard")
-    current=tg_users.get(email,{}).get("chat_id","Not linked - follow steps below")
+        # Manual path. Used to save WHATEVER was typed ("@name", "Chat ID: 123", a typo...)
+        # and say nothing — the account then looked linked but never received a message.
+        # Now: must contain a numeric Chat ID, and Telegram must actually deliver a
+        # confirmation message to it BEFORE the link is saved.
+        raw=request.form.get("chat_id","").strip()
+        m=re.search(r"-?\d{5,15}", raw)
+        if not m:
+            return redirect("/link-telegram?err="+quote("That doesn't look like a Chat ID. It's a number like 1234567890 — open the bot in Telegram, send /start, and copy the number from its reply. (Or use the one-tap button above.)"))
+        chat_id=m.group(0)
+        clash = chat_owner_conflict(chat_id, email)
+        if clash:
+            return redirect("/link-telegram?err="+quote(f"That Telegram chat is already linked to {_mask_email(clash)}. Each login needs its own Telegram account/chat — otherwise signals and TOOK buttons get mixed up."))
+        res=telegram_post("sendMessage", {"chat_id":chat_id,"text":f"✅ AGENT 35 PRO linked to {email}.\n\nSignals and news alerts for your watchlist will arrive in this chat."})
+        if not res.get("ok"):
+            return redirect("/link-telegram?err="+quote(f"Couldn't link: {res.get('error')}"))
+        tg_users[email]={"chat_id":chat_id,"linked_at":datetime.now().isoformat(),"manual":True}
+        save_json(TG_FILE, tg_users)
+        return redirect("/link-telegram?ok="+quote("Linked ✅ — a confirmation message was just sent to your Telegram."))
+    banner = ""
+    if request.args.get("err"): banner = alert(_html.escape(request.args.get("err")), "error")
+    elif request.args.get("ok"): banner = alert(_html.escape(request.args.get("ok")), "success")
+    linked=tg_users.get(email,{}).get("chat_id")
+    current=_html.escape(str(linked)) if linked else "Not linked yet"
+    bot_user=get_bot_username()
+    if bot_user:
+        tok=make_link_token(email)
+        one_tap=f"<a href='https://t.me/{bot_user}?start=link_{tok}' target='_blank' style='display:block;text-align:center;background:#10b981;color:white;padding:14px;border-radius:10px;text-decoration:none;font-weight:800;font-size:14px'>📲 Connect with one tap</a><div style='font-size:11px;color:#64748b;margin-top:8px;line-height:1.5'>Opens Telegram → press <b>Start</b>. That's it — your chat is linked automatically and you'll get a confirmation message. The button works for 30 minutes.</div>"
+    else:
+        one_tap="<div style='font-size:12px;color:#fca5a5'>One-tap link unavailable right now (couldn't reach the bot). Use the manual option below.</div>"
     content=f"""<div style='max-width:600px;margin:0 auto;padding:14px'>
-<div class='card'><h2 style='font-size:16px;margin:0 0 6px'>Link Telegram</h2><p style='color:#64748b;font-size:12px;margin:0 0 14px'>Get signals directly to your Telegram. 2 steps.</p>
-<div style='background:#0b1220;border:1px solid #1e293b;padding:12px;border-radius:10px;font-size:11px;margin-bottom:14px'><div style='color:#64748b;font-size:9px'>CURRENT</div><div style='font-weight:700;margin-top:4px'>{current}</div></div>
+<div class='card'><h2 style='font-size:16px;margin:0 0 6px'>Link Telegram</h2><p style='color:#64748b;font-size:12px;margin:0 0 14px'>Get signals and news alerts directly in Telegram.</p>
+{banner}
+<div style='background:#0b1220;border:1px solid #1e293b;padding:12px;border-radius:10px;font-size:11px;margin-bottom:14px'><div style='color:#64748b;font-size:9px'>CURRENT CHAT ID</div><div style='font-weight:700;margin-top:4px'>{current}</div>
+<div style='margin-top:8px;display:flex;gap:8px;flex-wrap:wrap'><a href='/test-telegram' style='color:#10b981;font-size:11px'>Send test signal</a> · <a href='/telegram-status' style='color:#10b981;font-size:11px'>Check connection</a></div></div>
 <div style='background:#111a2e;border:1px solid #1e293b;border-radius:12px;padding:14px;margin-bottom:14px'>
-<h4 style='margin:0 0 10px;font-size:13px'>Step 1: Start Bot</h4>
-<div style='font-size:12px;color:#94a3b8;line-height:1.6'>1. Open Telegram → Search your bot<br>2. Send /start<br>3. Copy Chat ID from reply</div>
+<h4 style='margin:0 0 10px;font-size:13px'>Recommended: one tap</h4>
+{one_tap}
 </div>
 <div style='background:#111a2e;border:1px solid #1e293b;border-radius:12px;padding:14px'>
-<h4 style='margin:0 0 10px;font-size:13px'>Step 2: Paste Chat ID</h4>
-<form method='post'><input name='chat_id' placeholder='Paste Chat ID (e.g. 1234567890)' style='width:100%;padding:12px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white' required><button type='submit' style='background:#10b981;color:white;padding:12px;width:100%;border:none;border-radius:10px;font-weight:800;margin-top:10px;cursor:pointer'>Connect Telegram</button></form>
+<h4 style='margin:0 0 10px;font-size:13px'>Or manually: paste your Chat ID</h4>
+<div style='font-size:12px;color:#94a3b8;line-height:1.6;margin-bottom:10px'>1. Open your bot in Telegram and send /start<br>2. Copy the Chat ID number from its reply<br>3. Paste it here — we send a confirmation message to check it works before saving</div>
+<form method='post'><input name='chat_id' placeholder='Paste Chat ID (e.g. 1234567890)' style='width:100%;padding:12px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white' required><button type='submit' style='background:#1e293b;border:1px solid #334155;color:white;padding:12px;width:100%;border-radius:10px;font-weight:800;margin-top:10px;cursor:pointer'>Connect Telegram</button></form>
 </div>
 </div>
 </div>"""
@@ -1622,62 +1801,70 @@ def pay_submit():
 
 @app.route("/cron/news-check")
 def cron_news_check():
-    """Call this on a schedule (every 5-10 min) from an external cron —
-    same as /cron/scan. Sends a Telegram heads-up ~30min before any
-    high-impact event, but ONLY to users whose OWN watchlist contains a
-    correlated symbol — not a broadcast to everyone. Also auto-flags/closes
-    a user's OWN tracked trades on a correlated symbol, but only if THAT
-    user (the trade's owner) personally has Avoid News enabled — not "any
-    user in the system," which was the bug this replaced.
+    """Call this on a schedule (every 5-10 min) from an external cron — same as
+    /cron/scan. Each run:
+      1. ~30 min before any High-impact release: Telegram heads-up to users whose
+         OWN watchlist overlaps it (events released at the same moment are ONE
+         alert), with the news lean + its track record when the numbers allow one;
+         and auto-flag the OWNER's tracked trades if THAT user has Avoid News on.
+      2. Morning (07:00 SAST) digest of today's High-impact releases and an
+         evening (18:00 SAST) digest of tomorrow's — so nothing arrives as a surprise.
+      3. Scores earlier leans against what price actually did.
     """
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
 
     alerted = load_json(NEWS_ALERTED_FILE, dict)
-    # prune alert records older than 3 days so this doesn't grow forever
     cutoff = datetime.now() - timedelta(days=3)
     alerted = {k:v for k,v in alerted.items() if _safe_dt(v) and _safe_dt(v) > cutoff}
 
     tg_users = load_json(TG_FILE, dict)
+    calls = load_json(NEWS_CALLS_FILE, dict); calls_before = json.dumps(calls, sort_keys=True, default=str)
+    agg = nc.aggregate(calls)
+    bot = os.getenv("TELEGRAM_BOT_TOKEN")
 
     ALERT_WINDOW_MIN = 30
     events = nc.upcoming_high_impact(hours_ahead=2)
-    newly_alerted = []
-    flagged_total = []
+    newly_alerted = []; flagged_total = []; leans_logged = []
 
-    for e in events:
-        mins = nc.minutes_until(e)
-        if not (0 <= mins <= ALERT_WINDOW_MIN) or e["id"] in alerted:
+    for cluster in nc.cluster_events(events):
+        mins = (cluster["time"] - datetime.utcnow()).total_seconds() / 60.0
+        if not (0 <= mins <= ALERT_WINDOW_MIN) or all(e["id"] in alerted for e in cluster["events"]):
             continue
+        cur = cluster["currency"]
+        correlated = sorted([s for s in ALL_SYMBOLS if cur in nc.currencies_for_symbol(s)])
+        lines = [f"⚠️ HIGH-IMPACT NEWS in {int(mins)}min — {cur}", ""]
+        for e in cluster["events"]:
+            lines.append(f"• {e['name']} — Forecast: {e.get('forecast') or '—'} | Previous: {e.get('previous') or '—'}")
+        base_text = "\n".join(lines) + f"\n\nCorrelated: {', '.join(correlated[:10])}{'…' if len(correlated)>10 else ''}\n\nExpect volatility and spread widening."
 
-        correlated = sorted([s for s in ALL_SYMBOLS if e["currency"] in nc.currencies_for_symbol(s)])
-        alert_text=(f"⚠️ HIGH-IMPACT NEWS in {int(mins)}min\n\n"
-              f"{e['currency']} — {e['name']}\n"
-              f"Forecast: {e.get('forecast') or '—'} | Previous: {e.get('previous') or '—'}\n\n"
-              f"Correlated: {', '.join(correlated[:10])}{'…' if len(correlated)>10 else ''}\n\n"
-              f"Expect volatility and spread widening.")
+        lean = nc.compute_cluster_lean(cluster)
+        if lean and nc.record_lean_call(calls, lean, datetime.utcnow()):
+            leans_logged.append(lean["cluster_id"])
 
-        # Alert only users whose OWN watchlist actually overlaps this event's
-        # correlated symbols — not everyone.
-        bot = os.getenv("TELEGRAM_BOT_TOKEN")
+        # Alert only users whose OWN watchlist overlaps this release's correlated symbols.
         for user_email, tg_info in tg_users.items():
             chat_id = tg_info.get("chat_id")
             if not chat_id: continue
-            # FIXED: users who never pressed Save on Settings have no stored
-            # settings row, so they got an empty watchlist here and NEVER
-            # received a news alert. get_user_settings() applies the defaults.
-            user_settings = get_user_settings(user_email)
-            user_watchlist = set(user_settings.get("symbols", []))
+            user_watchlist = set(get_user_settings(user_email).get("symbols", []))  # defaults for users who never saved Settings
             if not user_watchlist & set(correlated):
-                continue  # this event doesn't touch anything this user watches
+                continue
+            text = base_text
+            if lean and lean.get("mixed"):
+                text += "\n\n📊 News lean: mixed — these releases point in opposite directions, so no lean."
+            elif lean:
+                lean_txt = nc.lean_message(lean, agg, user_watchlist)
+                if lean_txt: text += "\n\n" + lean_txt
             if bot:
-                res = telegram_post("sendMessage", {"chat_id":chat_id,"text":alert_text})
+                res = telegram_post("sendMessage", {"chat_id":chat_id,"text":text})
                 if not res.get("ok"): print(f"[NEWS ALERT] send to {user_email} failed: {res.get('error')}", file=sys.stderr)
 
-        alerted[e["id"]] = datetime.now().isoformat()
-        newly_alerted.append(e["name"])
+        names = [e["name"] for e in cluster["events"]]
+        label = names[0] + (f" (+{len(names)-1} more)" if len(names) > 1 else "")
+        for e in cluster["events"]:
+            alerted[e["id"]] = datetime.now().isoformat()
+        newly_alerted.extend(names)
 
-        # Auto-flag/close: only a user's OWN tracked trades, only if THAT
-        # user's own trade_news setting is off — not a system-wide check.
+        # Auto-flag/close: only a user's OWN tracked trades, only if THAT user's own trade_news setting is off.
         tracked = load_json(TRACK_FILE, dict)
         closed_this_event = []
         for signal_id in list(tracked.keys()):
@@ -1686,14 +1873,13 @@ def cron_news_check():
             owner_email = entry.get("email")
             if sym not in correlated or not owner_email:
                 continue
-            owner_settings = get_user_settings(owner_email)
-            if owner_settings.get("trade_news", True):
+            if get_user_settings(owner_email).get("trade_news", True):
                 continue  # this trade's owner is fine trading through news
             journal = load_json(JOURNAL_FILE, list)
             journal.append({
                 "time": datetime.now().strftime("%m-%d %H:%M"),
                 "symbol": sym, "status": "NEWS CLOSE",
-                "result": f"Auto-flagged ahead of {e['currency']} {e['name']}",
+                "result": f"Auto-flagged ahead of {cur} {label}",
                 "pnl": 0, "entry": entry.get("entry"),
                 "date": datetime.now().strftime("%Y-%m-%d"), "email": owner_email,
             })
@@ -1703,18 +1889,39 @@ def cron_news_check():
             closed_this_event.append(sym)
             flagged_total.append(sym)
             if owner_chat and bot:
-                try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":owner_chat,"text":(
+                telegram_post("sendMessage", {"chat_id":owner_chat,"text":(
                     f"🚨 Avoid-News is on: flagged and removed from your tracking ahead of "
-                    f"{e['currency']} {e['name']}: {sym}\n\n"
+                    f"{cur} {label}: {sym}\n\n"
                     f"⚠️ This bot doesn't hold live broker positions — if you're actually "
                     f"in this trade on your platform, close or hedge it yourself before the news."
-                )}, timeout=10)
-                except Exception: pass
+                )})
         if closed_this_event:
             save_json(TRACK_FILE, tracked)
 
+    # ---- morning / evening digests ----
+    digests = []
+    sast_now = datetime.utcnow() + timedelta(hours=2)
+    slots = []
+    if sast_now.hour >= 7: slots.append(("am", sast_now.date(), "today"))
+    if sast_now.hour >= 18: slots.append(("pm", (sast_now + timedelta(days=1)).date(), "tomorrow"))
+    for slot, day, label in slots:
+        key = f"digest_{slot}_{day.isoformat()}"
+        if key in alerted: continue
+        nc.fetch_calendar()
+        if not nc.STATUS["event_count"]: continue   # calendar unavailable: retry next run instead of burning today's digest
+        alerted[key] = datetime.now().isoformat()
+        evs = nc.events_on_sast_day(day, "High", not_before=datetime.utcnow() if label == "today" else None)
+        if not evs: continue
+        digests.append({"slot": f"{slot}:{day.isoformat()}", "events": len(evs), "users_messaged": send_news_digest(evs, label, day, tg_users, agg)})
+
+    # ---- score earlier leans against real price moves ----
+    scored = run_news_scoring(calls)
+    if json.dumps(calls, sort_keys=True, default=str) != calls_before:
+        save_json(NEWS_CALLS_FILE, calls)
+
     save_json(NEWS_ALERTED_FILE, alerted)
-    return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "auto_flagged": flagged_total, "calendar": nc.status_summary()})
+    return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "auto_flagged": flagged_total,
+                    "leans_logged": leans_logged, "digests": digests, "scored": scored, "calendar": nc.status_summary()})
 
 @app.route("/cron/track-check")
 def cron_track_check():
