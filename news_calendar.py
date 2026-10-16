@@ -120,40 +120,63 @@ def _restore_persisted(now):
 
 # ================================================================ sources
 
+def _ff_rows_to_events(raw):
+    events = []
+    for e in raw:
+        dt = _parse_iso_to_utc(e.get("date", ""))
+        if not dt:
+            continue
+        currency = e.get("country", "")
+        title = e.get("title", "Unnamed event")
+        events.append({
+            "id": f"{currency}_{title}_{e.get('date','')}",
+            "name": title,
+            "currency": currency,
+            "impact": _normalize_impact(e.get("impact")),
+            "time": dt,
+            "actual": None,  # this feed doesn't publish actuals
+            "forecast": e.get("forecast") or None,
+            "previous": e.get("previous") or None,
+        })
+    return events
+
+
+def _get_ff_week(url):
+    r = requests.get(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=HTTP_TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code}" + (" (rate limited)" if r.status_code == 429 else ""))
+    raw = r.json()
+    if not isinstance(raw, list):
+        raise RuntimeError(f"unexpected response shape: {str(raw)[:100]}")
+    return _ff_rows_to_events(raw)
+
+
 def _fetch_forex_factory_feed():
-    """Free, keyless. Tries the main host then the CDN mirror."""
+    """Free, keyless. THIS week (required) + NEXT week (best effort — it is only
+    published late in the week, and without it Friday-night/weekend looks empty
+    even though Monday is full of events). Tries the main host, then the CDN mirror."""
     errors = []
     for url in FF_FEED_URLS:
+        host = url.split("/")[2]
         try:
-            r = requests.get(url, headers={"User-Agent": USER_AGENT, "Accept": "application/json"}, timeout=HTTP_TIMEOUT)
-            if r.status_code != 200:
-                raise RuntimeError(f"HTTP {r.status_code}" + (" (rate limited)" if r.status_code == 429 else ""))
-            raw = r.json()
-            if not isinstance(raw, list):
-                raise RuntimeError(f"unexpected response shape: {str(raw)[:100]}")
-            events = []
-            for e in raw:
-                dt = _parse_iso_to_utc(e.get("date", ""))
-                if not dt:
-                    continue
-                currency = e.get("country", "")
-                title = e.get("title", "Unnamed event")
-                events.append({
-                    "id": f"{currency}_{title}_{e.get('date','')}",
-                    "name": title,
-                    "currency": currency,
-                    "impact": _normalize_impact(e.get("impact")),
-                    "time": dt,
-                    "actual": None,  # this feed doesn't publish actuals
-                    "forecast": e.get("forecast") or None,
-                    "previous": e.get("previous") or None,
-                })
+            events = _get_ff_week(url)
             if not events:
                 raise RuntimeError("responded but contained zero usable events")
-            return events
         except Exception as ex:
-            host = url.split("/")[2]
             errors.append(f"{host}: {ex}")
+            continue
+        next_url = url.replace("thisweek", "nextweek")
+        if next_url != url:
+            try:
+                events += _get_ff_week(next_url)
+                STATUS["next_week_note"] = ""
+            except Exception as ex:
+                STATUS["next_week_note"] = f"next week not available yet ({ex})"
+        seen, unique = set(), []
+        for e in events:
+            if e["id"] not in seen:
+                seen.add(e["id"]); unique.append(e)
+        return unique
     raise RuntimeError("; ".join(errors))
 
 
@@ -269,7 +292,7 @@ def status_summary():
         "build": BUILD_ID,
         "source": STATUS["source"], "ok": STATUS["ok"], "stale": STATUS["stale"], "event_count": STATUS["event_count"],
         "last_attempt_utc": iso(STATUS["last_attempt"]), "last_success_utc": iso(STATUS["last_success"]),
-        "last_error": STATUS["last_error"],
+        "last_error": STATUS["last_error"], "next_week_note": STATUS.get("next_week_note", ""),
         "jblanked_key_set": bool(JBLANKED_API_KEY), "news_source_setting": NEWS_SOURCE,
     }
 
@@ -297,7 +320,7 @@ def currencies_for_symbol(symbol):
     return currencies
 
 
-def upcoming_high_impact(hours_ahead=72, min_impact="High", lookback_minutes=0):
+def upcoming_high_impact(hours_ahead=168, min_impact="High", lookback_minutes=0):
     """Events from `lookback_minutes` ago up to `hours_ahead` from now, at or
     above `min_impact`, soonest first. (Name kept for compatibility — pass
     min_impact="None" for everything.)"""
