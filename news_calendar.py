@@ -34,16 +34,19 @@ JBLANKED_API_KEY = os.getenv("JBLANKED_API_KEY", "")
 JBLANKED_BASE_URL = "https://www.jblanked.com/news/api"
 JBLANKED_UTC_OFFSET_HOURS = float(os.getenv("JBLANKED_UTC_OFFSET_HOURS", "0") or 0)
 _FF_PRIMARY = os.getenv("FF_FEED_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")
-FF_FEED_URLS = list(dict.fromkeys([_FF_PRIMARY, "https://cdn-nfs.faireconomy.media/ff_calendar_thisweek.json"]))
+FF_FEED_URLS = [_FF_PRIMARY]   # the old cdn-nfs mirror host does not resolve (DNS error), so it is no longer tried
 NEWS_SOURCE = os.getenv("NEWS_SOURCE", "auto").strip().lower()  # "auto" (free feed first) or "jblanked"
 
-CACHE_TTL_MINUTES = 15       # don't hammer the feeds; a 15-min-stale calendar is fine
+CACHE_TTL_MINUTES = 60       # the free feed allows only ~2 requests per 5 min PER IP and Render shares IPs, so fetch rarely; scheduled times almost never change
 FAILURE_BACKOFF_MINUTES = 5  # after a failed fetch, wait this long before trying again
+RATE_LIMIT_BACKOFF_MINUTES = 30  # after an HTTP 429, leave the feed alone this long
+NEXT_WEEK_TTL_HOURS = 6
 SAVED_COPY_MAX_AGE_DAYS = 8  # a saved copy older than this is from a different week — ignore it
 HTTP_TIMEOUT = 12
 USER_AGENT = "Mozilla/5.0 (compatible; Agent35/1.0; +https://agent-35-trading-bot.onrender.com)"
 
 _CACHE = {"events": [], "fetched_at": None, "next_try_at": None}
+_NEXT = {"events": [], "at": None}
 _PERSIST = {"load": None, "save": None, "restore_tried": False, "last_sig": None, "last_saved": None}
 
 STATUS = {
@@ -152,32 +155,39 @@ def _get_ff_week(url):
 
 
 def _fetch_forex_factory_feed():
-    """Free, keyless. THIS week (required) + NEXT week (best effort — it is only
-    published late in the week, and without it Friday-night/weekend looks empty
-    even though Monday is full of events). Tries the main host, then the CDN mirror."""
+    """Free, keyless. THIS week (required). NEXT week is best effort, only asked
+    for Thursday-Sunday and cached for hours, because the feed rate-limits hard
+    (HTTP 429) and next week's file doesn't exist until late in the week."""
     errors = []
+    events = None
     for url in FF_FEED_URLS:
-        host = url.split("/")[2]
         try:
             events = _get_ff_week(url)
             if not events:
                 raise RuntimeError("responded but contained zero usable events")
+            this_url = url
+            break
         except Exception as ex:
-            errors.append(f"{host}: {ex}")
-            continue
-        next_url = url.replace("thisweek", "nextweek")
-        if next_url != url:
+            events = None
+            errors.append(f"{url.split('/')[2]}: {ex}")
+    if events is None:
+        raise RuntimeError("; ".join(errors))
+    now = datetime.utcnow()
+    if now.weekday() >= 3:
+        stale = _NEXT["at"] is None or (now - _NEXT["at"]).total_seconds() > NEXT_WEEK_TTL_HOURS * 3600
+        if stale:
             try:
-                events += _get_ff_week(next_url)
+                _NEXT.update(events=_get_ff_week(this_url.replace("thisweek", "nextweek")), at=now)
                 STATUS["next_week_note"] = ""
             except Exception as ex:
+                _NEXT["at"] = now - timedelta(hours=NEXT_WEEK_TTL_HOURS - 0.5)  # retry in ~30 min
                 STATUS["next_week_note"] = f"next week not available yet ({ex})"
-        seen, unique = set(), []
-        for e in events:
-            if e["id"] not in seen:
-                seen.add(e["id"]); unique.append(e)
-        return unique
-    raise RuntimeError("; ".join(errors))
+        events = events + _NEXT["events"]
+    seen, unique = set(), []
+    for e in events:
+        if e["id"] not in seen:
+            seen.add(e["id"]); unique.append(e)
+    return unique
 
 
 def _fetch_jblanked():
@@ -248,11 +258,23 @@ def fetch_calendar(force=False):
     failure it serves the last good cache (or the saved copy) and records the
     reason in STATUS."""
     now = datetime.utcnow()
-    if not force:
-        if _CACHE["fetched_at"] and (now - _CACHE["fetched_at"]).total_seconds() < CACHE_TTL_MINUTES * 60:
-            return _CACHE["events"]
-        if _CACHE["next_try_at"] and now < _CACHE["next_try_at"]:
-            return _CACHE["events"]  # backing off after a recent failure
+    # Cold start (Render woke up / redeployed): reuse the saved copy if it is still fresh,
+    # instead of spending a rate-limited request on the feed.
+    if not _CACHE["events"] and not _PERSIST["restore_tried"]:
+        _PERSIST["restore_tried"] = True
+        events, saved_at = _restore_persisted(now)
+        if events:
+            _CACHE["events"] = events
+            fresh = (now - saved_at).total_seconds() < CACHE_TTL_MINUTES * 60
+            _CACHE["fetched_at"] = saved_at if fresh else None
+            STATUS.update({"source": f"saved copy from {saved_at.strftime('%a %d %b %H:%M')} UTC", "stale": not fresh,
+                           "ok": fresh, "event_count": len(events)})
+            if fresh:
+                return events
+    if _CACHE["next_try_at"] and now < _CACHE["next_try_at"]:
+        return _CACHE["events"]  # backing off after a recent failure (force can't override: a 429 gets worse if hammered)
+    if not force and _CACHE["fetched_at"] and (now - _CACHE["fetched_at"]).total_seconds() < CACHE_TTL_MINUTES * 60:
+        return _CACHE["events"]
 
     STATUS["last_attempt"] = now
     errors = []
@@ -271,18 +293,32 @@ def fetch_calendar(force=False):
             print(f"[NEWS CALENDAR] {name} failed: {ex}", file=sys.stderr)
 
     # every live source failed
-    _CACHE["next_try_at"] = now + timedelta(minutes=FAILURE_BACKOFF_MINUTES)
-    STATUS.update({"ok": False, "last_error": " | ".join(errors)})
-    if not _CACHE["events"] and not _PERSIST["restore_tried"]:
-        _PERSIST["restore_tried"] = True
-        events, saved_at = _restore_persisted(now)
-        if events:
-            _CACHE["events"] = events
-            STATUS.update({"source": f"saved copy from {saved_at.strftime('%a %d %b %H:%M')} UTC", "stale": True})
-    elif _CACHE["events"]:
+    limited = any("429" in e for e in errors)
+    _CACHE["next_try_at"] = now + timedelta(minutes=RATE_LIMIT_BACKOFF_MINUTES if limited else FAILURE_BACKOFF_MINUTES)
+    STATUS.update({"ok": False, "last_error": " | ".join(errors) + (" — the free feed is rate-limiting this server; retrying in 30 min. Admin: paste the calendar manually at /news-import." if limited else "")})
+    if _CACHE["events"]:
         STATUS["stale"] = True
     STATUS["event_count"] = len(_CACHE["events"])
     return _CACHE["events"]  # stale beats nothing
+
+
+def import_manual(text, now=None):
+    """Admin fallback: the raw JSON from the free feed URL, pasted by hand (a browser
+    isn't rate-limited like the server is). Returns the number of events loaded."""
+    import json
+    now = now or datetime.utcnow()
+    raw = json.loads(text)
+    if not isinstance(raw, list):
+        raise ValueError("expected a JSON list of events")
+    events = _ff_rows_to_events(raw)
+    if not events:
+        raise ValueError("no usable events found in that JSON")
+    events.sort(key=lambda e: e["time"])
+    _CACHE.update({"events": events, "fetched_at": now, "next_try_at": None})
+    STATUS.update({"source": "manual import", "ok": True, "stale": False, "last_success": now, "last_error": "", "event_count": len(events)})
+    _PERSIST["last_sig"] = None
+    _save_persisted(events, now)
+    return len(events)
 
 
 def status_summary():
