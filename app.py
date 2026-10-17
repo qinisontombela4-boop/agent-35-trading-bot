@@ -1091,12 +1091,13 @@ def news_page():
     leans = nc.compute_event_leans(nc.fetch_calendar())
 
     refresh_btn = f"<a href='/news?impact={quote(impact_filter)}&refresh=1' style='color:#10b981;font-size:11px;text-decoration:none;margin-left:8px'>↻ Refresh now</a>"
+    import_link = " · <a href='/news-import' style='color:#10b981'>import by hand (admin)</a>" if is_admin else ""
     if st["ok"]:
         feed_banner = f"<div style='font-size:11px;color:#64748b;margin:0 0 10px'>Source: {_esc(st['source'])} · {st['event_count']} events this week · updated {st['last_success_utc'][11:16]} UTC{refresh_btn}</div>"
     elif st["event_count"]:
-        feed_banner = f"<div class='card' style='border:1px solid #f59e0b55;margin-bottom:12px'><div style='font-weight:800;color:#fbbf24'>⚠️ Showing an older calendar ({_esc(st['source'])})</div><div style='font-size:12px;color:#94a3b8;margin-top:6px;word-break:break-word'>Live feed problem: {_esc(st['last_error'])}</div><div style='font-size:11px;color:#64748b;margin-top:6px'>Scheduled times rarely change, so this is still useful. Retrying automatically.{refresh_btn} · <a href='/news-status' style='color:#10b981'>details</a></div></div>"
+        feed_banner = f"<div class='card' style='border:1px solid #f59e0b55;margin-bottom:12px'><div style='font-weight:800;color:#fbbf24'>⚠️ Showing an older calendar ({_esc(st['source'])})</div><div style='font-size:12px;color:#94a3b8;margin-top:6px;word-break:break-word'>Live feed problem: {_esc(st['last_error'])}</div><div style='font-size:11px;color:#64748b;margin-top:6px'>Scheduled times rarely change, so this is still useful. Retrying automatically.{refresh_btn}{import_link} · <a href='/news-status' style='color:#10b981'>details</a></div></div>"
     else:
-        feed_banner = f"<div class='card' style='border:1px solid #ef444455;margin-bottom:12px'><div style='font-weight:800;color:#fca5a5'>⚠️ Calendar feed unavailable</div><div style='font-size:12px;color:#94a3b8;margin-top:6px;word-break:break-word'>{_esc(st['last_error']) or 'No fetch attempted yet — refresh in a moment.'}</div><div style='font-size:11px;color:#64748b;margin-top:6px'>News blackout and alerts are paused until the feed responds (retrying automatically).{refresh_btn} · <a href='/news-status' style='color:#10b981'>details</a></div></div>"
+        feed_banner = f"<div class='card' style='border:1px solid #ef444455;margin-bottom:12px'><div style='font-weight:800;color:#fca5a5'>⚠️ Calendar feed unavailable</div><div style='font-size:12px;color:#94a3b8;margin-top:6px;word-break:break-word'>{_esc(st['last_error']) or 'No fetch attempted yet — refresh in a moment.'}</div><div style='font-size:11px;color:#64748b;margin-top:6px'>News blackout and alerts are paused until the feed responds (retrying automatically).{refresh_btn}{import_link} · <a href='/news-status' style='color:#10b981'>details</a></div></div>"
 
     settings_all = load_json(SETTINGS_FILE, dict) if is_admin else {}
     IMPACT_COLORS = {"High": ("rgba(239,68,68,0.15)", "#ef4444"), "Medium": ("rgba(245,158,11,0.15)", "#f59e0b"), "Low": ("rgba(100,116,139,0.15)", "#94a3b8"), "None": ("rgba(100,116,139,0.1)", "#64748b")}
@@ -1169,6 +1170,24 @@ an experimental guess at which way the currency may move, logged and scored agai
 <div style='display:grid;gap:12px'>{cards}</div>
 </div>"""
     return pro_layout(content, "News", is_admin=is_admin)
+
+@app.route("/news-import", methods=["GET","POST"])
+def news_import():
+    """Admin-only fallback for when the free feed rate-limits the server (HTTP 429):
+    open the feed URL in your own browser, copy everything, paste it here."""
+    email=session.get("user")
+    if email!="admin@agent35.com": return redirect("/login")
+    msg=""
+    if request.method=="POST":
+        try:
+            n=nc.import_manual(request.form.get("json","").strip())
+            msg=f"<div style='color:#10b981;font-weight:700;margin-bottom:10px'>Loaded {n} events. The News tab now shows them (and they are saved).</div>"
+        except Exception as ex:
+            msg=f"<div style='color:#fca5a5;margin-bottom:10px'>Couldn't import: {_esc(str(ex)[:200])}</div>"
+    return pro_layout(f"""<div style='max-width:700px;margin:30px auto'><div class='card'><h2 style='font-size:15px'>Import the calendar by hand</h2>
+<p style='color:#94a3b8;font-size:12px;line-height:1.6'>1. Open <a style='color:#10b981' target='_blank' href='https://nfs.faireconomy.media/ff_calendar_thisweek.json'>this link</a> in your browser (and on Thu–Sun also the same link with <b>nextweek</b> instead of thisweek).<br>2. Select all (Ctrl+A), copy (Ctrl+C).<br>3. Paste below and press Import. Do next week separately after this week.</p>{msg}
+<form method='post'><textarea name='json' rows='10' style='width:100%;padding:10px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white;font-size:11px' placeholder='[{{"title":"CPI m/m","country":"USD",...}}]' required></textarea>
+<button style='background:#10b981;color:white;padding:12px;width:100%;border:0;border-radius:10px;font-weight:800;margin-top:10px;cursor:pointer'>Import</button></form></div></div>""","News",is_admin=True)
 
 @app.route("/news-scorecard")
 def news_scorecard():
