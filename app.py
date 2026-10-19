@@ -6,7 +6,6 @@ from urllib.parse import quote
 from dotenv import load_dotenv
 from datetime import datetime, timedelta
 from werkzeug.security import generate_password_hash, check_password_hash
-from supabase import create_client
 
 load_dotenv()
 app = Flask(__name__)
@@ -70,17 +69,46 @@ SUPABASE_KEY = os.getenv("SUPABASE_SERVICE_KEY", "")
 # fallback already exists for "Supabase not configured at all". A bad
 # credential should degrade to that same fallback, loudly, not crash-loop
 # the whole service until someone notices and fixes the host's dashboard.
+class _SupabaseREST:
+    """Talks to Supabase's REST API (PostgREST) directly with `requests`, instead of
+    the supabase-py client. That client checks the key's FORMAT before it sends
+    anything, and old versions reject Supabase's newer `sb_secret_...` keys as
+    "Invalid API key" even though the key is perfectly valid — which is what was
+    silently switching this app back to wiped-on-redeploy local files."""
+    def __init__(self, url, key):
+        url = url.strip().strip('"').strip("'").rstrip("/")
+        for tail in ("/rest/v1", "/rest"):
+            if url.endswith(tail): url = url[: -len(tail)]
+        self.base = url + "/rest/v1/app_data"
+        key = key.strip().strip('"').strip("'")
+        self.headers = {"apikey": key, "Content-Type": "application/json"}
+        if key.startswith("eyJ"):  # legacy JWT keys also go in the Authorization header; sb_secret_ keys must NOT
+            self.headers["Authorization"] = f"Bearer {key}"
+
+    def get(self, filename):
+        """(found, content). Raises on any HTTP/network failure."""
+        r = requests.get(self.base, headers=self.headers, params={"select": "content", "filename": f"eq.{filename}"}, timeout=15)
+        if r.status_code != 200: raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+        rows = r.json()
+        return (True, rows[0]["content"]) if rows else (False, None)
+
+    def put(self, filename, content):
+        h = {**self.headers, "Prefer": "resolution=merge-duplicates,return=minimal"}
+        r = requests.post(self.base, headers=h, params={"on_conflict": "filename"}, data=json.dumps({"filename": filename, "content": content}), timeout=15)
+        if r.status_code not in (200, 201, 204): raise RuntimeError(f"HTTP {r.status_code}: {r.text[:200]}")
+
 supabase = None
 if SUPABASE_URL and SUPABASE_KEY:
     try:
-        supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
+        _sb = _SupabaseREST(SUPABASE_URL, SUPABASE_KEY)
+        requests.get(_sb.base, headers=_sb.headers, params={"select": "filename", "limit": "1"}, timeout=15).raise_for_status()
+        supabase = _sb
     except Exception as e:
-        print(f"[STARTUP] CRITICAL: SUPABASE_URL/SUPABASE_SERVICE_KEY are set but "
-              f"rejected by the Supabase client ({e}). Falling back to local files — "
-              "this means NO persistence across redeploys until the credential is "
-              "fixed. Re-copy the service_role key from Supabase dashboard > "
-              "Settings > API, with no extra whitespace/quotes, and redeploy.",
-              file=sys.stderr)
+        detail = str(e)
+        if "401" in detail or "403" in detail: detail += " — the key was refused: use the secret/service_role key (not the publishable/anon one) from Supabase > Project Settings > API Keys"
+        elif "404" in detail: detail += " — the app_data table doesn't exist (run supabase_setup.sql in the Supabase SQL editor) or SUPABASE_URL is wrong"
+        print(f"[STARTUP] CRITICAL: Supabase check failed ({detail}). Falling back to local files — "
+              "NO persistence across redeploys until this is fixed.", file=sys.stderr)
 
 # Local-file fallback dir, used if Supabase isn't configured OR its
 # credentials were rejected above (see the try/except). Once a valid
@@ -132,10 +160,9 @@ def _filename(p):
 def load_json(p, dt=dict):
     if supabase:
         try:
-            res = supabase.table("app_data").select("content").eq("filename", _filename(p)).execute()
-            if res.data:
-                return res.data[0]["content"]
-            return {} if dt==dict else []
+            try: found, content = supabase.get(_filename(p))
+            except Exception: found, content = supabase.get(_filename(p))  # one retry on a transient failure
+            return content if found else ({} if dt==dict else [])
         except Exception as e:
             print(f"[SUPABASE READ FAILED] {_filename(p)}: {e}", file=sys.stderr)
             return {} if dt==dict else []
@@ -147,7 +174,7 @@ def load_json(p, dt=dict):
 def save_json(p, data):
     if supabase:
         try:
-            supabase.table("app_data").upsert({"filename": _filename(p), "content": data}).execute()
+            supabase.put(_filename(p), data)
         except Exception as e:
             print(f"[SUPABASE WRITE FAILED] {_filename(p)}: {e}", file=sys.stderr)
         return
