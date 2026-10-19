@@ -1,0 +1,37 @@
+name: Update calendar
+on:
+  schedule:
+    - cron: "7 * * * *"      # every hour at :07
+  workflow_dispatch: {}       # lets you run it by hand from the Actions tab
+permissions:
+  contents: write
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Download this week + next week and merge
+        run: |
+          UA="Mozilla/5.0 (compatible; Agent35-relay)"
+          curl -fsS --retry 6 --retry-delay 30 --retry-all-errors -A "$UA" \
+            https://nfs.faireconomy.media/ff_calendar_thisweek.json -o this.json
+          curl -fsS --retry 3 --retry-delay 30 --retry-all-errors -A "$UA" \
+            https://nfs.faireconomy.media/ff_calendar_nextweek.json -o next.json || echo "[]" > next.json
+          python3 - <<'PY'
+          import json
+          this = json.load(open("this.json"))
+          try: nxt = json.load(open("next.json"))
+          except Exception: nxt = []
+          if not isinstance(this, list) or not this:
+              raise SystemExit("this week's file is empty - keeping the old calendar.json")
+          if not isinstance(nxt, list): nxt = []
+          json.dump(this + nxt, open("calendar.json", "w"))
+          print(len(this), "this week +", len(nxt), "next week")
+          PY
+          rm -f this.json next.json
+      - name: Save if changed
+        run: |
+          git config user.name "calendar-bot"
+          git config user.email "calendar-bot@users.noreply.github.com"
+          git add calendar.json
+          git diff --cached --quiet || (git commit -m "calendar update" && git push)
