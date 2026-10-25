@@ -125,7 +125,7 @@ else:
 
 MAX_TRACKED = 6  # now PER-USER: how many taken/tracked trades one user can have open at once
 MAX_SIGNALS_PER_DAY = 20  # PER-USER cap, resets via /cron/daily-reset or the date rollover
-TRADE_EXPIRY_HOURS = {"scalp": 6, "regular": 48}  # per-mode max time a TAKEN trade can sit unresolved
+TRADE_EXPIRY_HOURS = {"scalp": 6, "regular": 168}  # per-mode max time a TAKEN trade can sit unresolved
 PENDING_EXPIRY_HOURS = 3  # how long an un-actioned (not yet TOOK/SKIP'd) signal stays valid
 
 AUTH_FILE = os.path.join(BASE_DIR, "auth_users.json")
@@ -2053,7 +2053,7 @@ def cron_check_expiry():
         entry = tracked[signal_id]
         opened = _safe_dt(entry.get("time",""))
         mode = entry.get("mode","regular")
-        max_age_hours = TRADE_EXPIRY_HOURS.get(mode, 24)
+        max_age_hours = TRADE_EXPIRY_HOURS.get(mode, 168)
         if opened is None or (now - opened).total_seconds() > max_age_hours * 3600:
             journal = load_json(JOURNAL_FILE, list)
             journal.append({
