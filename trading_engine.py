@@ -1,4 +1,4 @@
-import os, requests
+import os, time, requests
 from datetime import datetime, timedelta, timezone
 import news_calendar
 
@@ -60,6 +60,9 @@ def get_values(symbol, interval, outputsize=50):
 # fetched twice in one call to full_multi_tf_analysis. Saves API quota and
 # guarantees h1_ob and multi_ob score off the SAME 1h candles, not two
 # separately-fetched (and possibly slightly different) sets. ----
+_DATA_CACHE = {}
+_TTL = {"1day": 3*3600, "4h": 30*60, "1h": 10*60, "15min": 3*60, "5min": 90}   # seconds a live candle set is reused
+
 def get_values_cached(cache, symbol, interval, outputsize=50, historical=None):
     # BACKTEST SUPPORT: if `historical` provides pre-fetched candles for this
     # interval, use those instead of calling the live API — this is what lets
@@ -71,12 +74,18 @@ def get_values_cached(cache, symbol, interval, outputsize=50, historical=None):
         return (candles[-outputsize:] if outputsize else candles), None
     key=(symbol, interval, outputsize)
     if key in cache: return cache[key]
+    if not historical:   # live: reuse recent fetches across scans/users so the API quota lasts (daily/4h barely change)
+        hit = _DATA_CACHE.get((symbol, interval))
+        if hit and time.time() - hit[0] < _TTL.get(interval, 120) and len(hit[1]) >= min(outputsize, 30):
+            return hit[1][-outputsize:], None
     # reuse an earlier, larger fetch of the same symbol+interval (no extra API request)
     for (s, i, o), (cached_candles, _err) in list(cache.items()):
         if s == symbol and i == interval and cached_candles and o >= outputsize:
             return cached_candles[-outputsize:], None
     result = get_values(symbol, interval, outputsize)
     cache[key] = result
+    if not historical and result and result[0]:
+        _DATA_CACHE[(symbol, interval)] = (time.time(), result[0])
     return result
 
 def is_market_open(symbol, as_of=None):
@@ -538,6 +547,7 @@ DEFAULT_WEIGHTS.update({
     # call, not a backtested number — validate it with backtest.py once you
     # have real results, and adjust from there.
     "min_score": 2,        # strategies that must line up before a signal is sent
+    "regular_min_score": 6,  # REGULAR (SMC) mode: checklist items (of 10) needed; the 4 required gates already count
     "max_opposing": 2,     # if more than this many strategies vote the OTHER way, skip
     "zone_veto": True,     # never buy in premium / sell in discount unless a zone-appropriate OB backs it
 })
@@ -936,6 +946,244 @@ def build_confluence_rationale(direction, score, aligned):
     parts = "; ".join(f"{name}: {note}" for name, note in aligned)
     return f"{_fmt_score(score)}/10 strategies agree on a {direction.lower()} setup. {parts}."
 
+# ================= REGULAR (SMC) MODE: DAILY BIAS -> 1H SMC -> 15m/5m ENTRY =================
+#
+# Top-down, like the TradingView reference chart:
+#   1. DAILY BIAS (structure: last daily BOS/CHoCH) decides the ONLY direction allowed. No bias = no trade.
+#   2. 1H chart = the SMC map: swing structure (BOS/CHoCH), dealing range with
+#      premium / equilibrium / discount, order blocks (Bu-OB / Be-OB), equal
+#      highs/lows, previous-day high/low, liquidity sweeps. The trade must come
+#      from an unmitigated 1H order block in the right half of the range
+#      (discount for buys, premium for sells) - never a chase.
+#   3. 15m and 5m REFINE THE ENTRY: price must have tapped the 1H order block
+#      and then shown a 15m structure shift (CHoCH/BOS) in the bias direction;
+#      a 5m trigger (BOS or engulfing/hammer) adds confirmation.
+#   4. The STOP goes beyond the order block / the sweep low-high (structure),
+#      not an arbitrary distance. TP = the user's RR multiple of that stop.
+# The ten strategies still vote on the 1H chart, but only votes WITH the daily
+# bias count, and they are one checklist item rather than the trigger.
+
+SWING_1H = 4          # swing length for 1H "swing structure" (bigger than the 2-bar internal swings -> fewer, cleaner BOS/CHoCH)
+REGULAR_CHECKLIST = ["Daily bias", "4H agrees", "1H structure agrees", "Right side of range", "1H order block tapped",
+                     "FVG / imbalance", "Liquidity swept", "15m structure shift", "5m trigger", "Strategies agree"]
+
+def _ob_for_event(candles, ev, direction):
+    """LuxAlgo-style order block: the candle with the lowest low (bullish) / highest
+    high (bearish) between the swing that got broken and the candle that broke it."""
+    e = ev["index"]; start = max(0, e - 20)
+    for k in range(e - 1, max(-1, e - 60), -1):   # find the broken swing's candle (the level that was closed beyond)
+        c = candles[k]
+        if (direction == "BULLISH" and c["high"] == ev["level"]) or (direction == "BEARISH" and c["low"] == ev["level"]):
+            start = k; break
+    window = candles[start:e]
+    if not window: return None
+    if direction == "BULLISH": m = min(range(len(window)), key=lambda j: window[j]["low"])
+    else: m = max(range(len(window)), key=lambda j: window[j]["high"])
+    idx = start + m; c = candles[idx]
+    return {"index": idx, "low": c["low"], "high": c["high"], "break_index": e, "kind": ev["kind"]}
+
+def find_h1_poi(h1, events, direction, rng, atr, price):
+    """Nearest UNMITIGATED 1H order block (not closed through since it formed), sitting in
+    the correct half of the dealing range, of sane size."""
+    best = None
+    for ev in [e for e in events if e["direction"] == direction][-6:]:
+        ob = _ob_for_event(h1, ev, direction)
+        if not ob or ob["high"] <= ob["low"]: continue
+        after = h1[ev["index"] + 1:]
+        if direction == "BULLISH" and any(c["close"] < ob["low"] for c in after): continue
+        if direction == "BEARISH" and any(c["close"] > ob["high"] for c in after): continue
+        if not ob_in_zone((ob["low"], ob["high"]), direction, rng): continue
+        if (ob["high"] - ob["low"]) > 3.0 * atr: continue
+        dist = (price - ob["high"]) if direction == "BULLISH" else (ob["low"] - price)   # >0: price still on the approach side
+        key = abs(dist)
+        if best is None or key < best[0]: best = (key, ob)
+    return best[1] if best else None
+
+def liquidity_grab(candles, swings, direction, d1, lookback=24):
+    """Was sell-side (for buys) / buy-side (for sells) liquidity taken in the last `lookback` 1H
+    candles - a prior swing extreme or the previous-day low/high - with the close back inside?"""
+    n = len(candles); start = max(1, n - lookback); notes = []
+    kind = "low" if direction == "BULLISH" else "high"
+    levels = [(s["candle"][kind], "swing " + kind) for s in swings if s["kind"] == kind and s["index"] < start][-4:]
+    if d1 and len(d1) >= 2:
+        pd = d1[-2]; levels.append((pd["low"], "previous-day low") if direction == "BULLISH" else (pd["high"], "previous-day high"))
+    for lvl, name in levels:
+        for c in candles[start:]:
+            if direction == "BULLISH" and c["low"] < lvl < c["close"]: return f"{name} {lvl:.5g} swept"
+            if direction == "BEARISH" and c["high"] > lvl > c["close"]: return f"{name} {lvl:.5g} swept"
+    return None
+
+def _m5_trigger(m5, direction, m5_events):
+    if not m5: return None
+    ev = [e for e in m5_events if e["direction"] == direction and e["index"] >= len(m5) - 24]
+    if ev: return f"5m {ev[-1]['kind']}"
+    for k in range(0, 3):
+        seg = m5[:len(m5) - k] if k else m5
+        pats, _ = detect_candle(seg)
+        if direction == "BULLISH" and _bull_pat(pats): return "5m " + [p for p in pats if p in ("Bull Engulf", "Hammer")][0]
+        if direction == "BEARISH" and _bear_pat(pats): return "5m " + [p for p in pats if p in ("Bear Engulf", "Hang Man")][0]
+    return None
+
+def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h4, h1, _out):
+    rr = float(user_settings.get("rr_ratio", 2.0) or 2.0)
+    min_rr = float(user_settings.get("min_risk_reward", 1.5) or 1.5)
+    min_score = w.get("regular_min_score", 6)
+    items = {k: False for k in REGULAR_CHECKLIST}
+    notes = {}
+
+    def done(reason, bias="NEUTRAL", entry=0, pct=50, details=None):
+        sc = sum(items.values())
+        d = {"checklist": dict(items), "notes": notes, "regular_mode": True}
+        if details: d.update(details)
+        return _out(reason, score=sc, bias=bias, entry=entry, pct=pct, details=d, extra={"mode_stage": "regular"})
+
+    # ---- 1. DAILY BIAS ----
+    daily_bias, _dp, _dc = get_htf_bias(symbol, cache, historical)
+    aligned_4h, bias_4h = check_4h_alignment(symbol, daily_bias, cache, historical)
+    if daily_bias not in ("BULLISH", "BEARISH"):
+        return done("No clear daily bias (no daily BOS/CHoCH yet) - regular mode only trades with the daily bias")
+    items["Daily bias"] = True; direction = daily_bias; notes["Daily bias"] = f"daily structure {daily_bias.lower()}"
+    items["4H agrees"] = bool(aligned_4h); notes["4H agrees"] = f"4H {bias_4h.lower()}"
+
+    # ---- 2. 1H SMC MAP ----
+    h1_swings = find_swing_points(h1, lookback=SWING_1H)
+    h1_events = detect_structure_events(h1, h1_swings)
+    h1_range = compute_dealing_range(h1_swings, lookback_swings=12, candles=h1, raw_lookback=120)
+    atr_h1 = atr(h1, 14)
+    if not h1_range or not atr_h1: return done("Not enough 1H structure yet", bias=direction)
+    price = h1[-1]["close"]
+    h1_pct = fib_level(h1_range, price) * 100
+    zone = zone_of(h1_range, price)
+    last_ev = h1_events[-1] if h1_events else None
+    items["1H structure agrees"] = bool(last_ev and last_ev["direction"] == direction)
+    notes["1H structure agrees"] = f"last 1H break: {last_ev['kind']} {last_ev['direction'].lower()}" if last_ev else "no 1H break yet"
+    right_side = (zone == "discount") if direction == "BULLISH" else (zone == "premium")
+    items["Right side of range"] = right_side
+    notes["Right side of range"] = f"price at {h1_pct:.0f}% of the 1H range ({zone})"
+    if not right_side:
+        return done(f"Daily bias {direction}, but price is in {zone} ({h1_pct:.0f}% of the 1H range) - waiting for it to {'drop into discount' if direction=='BULLISH' else 'rally into premium'} (no chasing)", bias=direction, entry=price, pct=h1_pct)
+
+    poi = find_h1_poi(h1, h1_events, direction, h1_range, atr_h1, price)
+    if not poi:
+        return done(f"Daily bias {direction}, price in {zone}, but no unmitigated 1H order block to trade from", bias=direction, entry=price, pct=h1_pct)
+    gap = (price - poi["high"]) if direction == "BULLISH" else (poi["low"] - price)
+    far = gap > 1.5 * atr_h1
+    poi_txt = f"{'Bull' if direction=='BULLISH' else 'Bear'} OB {poi['low']:.5g}-{poi['high']:.5g}"
+    if far:
+        return done(f"Daily bias {direction}; waiting for price to reach {poi_txt} ({gap/atr_h1:.1f} ATR away)", bias=direction, entry=price, pct=h1_pct,
+                    details={"poi": poi, "waiting_for": "poi"})
+
+    # ---- 3. price is near the POI: now (and only now) look at 15m / 5m ----
+    m15 = [] if (historical is not None and "15min" not in historical) else (get_values_cached(cache, symbol, "15min", 100, historical)[0] or [])
+    m5 = get_values_cached(cache, symbol, "5min", 100, historical)[0] or []
+    if not m15 and not m5:
+        return done("No 15m/5m data to confirm the entry", bias=direction, entry=price, pct=h1_pct)
+    ltf = m15 or m5
+    price = (m5 or m15)[-1]["close"]
+    h1_pct = fib_level(h1_range, price) * 100
+    # tap = first LTF candle of the current visit into the order block
+    look = ltf[-32:] if m15 else ltf[-96:]
+    base = len(ltf) - len(look); tap = None
+    for i, c in enumerate(look):
+        if (direction == "BULLISH" and c["low"] <= poi["high"]) or (direction == "BEARISH" and c["high"] >= poi["low"]):
+            tap = base + i; break
+    if tap is None:
+        return done(f"Daily bias {direction}; {poi_txt} not tapped yet - waiting", bias=direction, entry=price, pct=h1_pct, details={"poi": poi, "waiting_for": "tap"})
+    after_tap = ltf[tap:]
+    buf = 0.25 * atr_h1
+    if (direction == "BULLISH" and any(c["close"] < poi["low"] - buf for c in after_tap)) or \
+       (direction == "BEARISH" and any(c["close"] > poi["high"] + buf for c in after_tap)):
+        return done(f"{poi_txt} was closed through after the tap - order block invalidated", bias=direction, entry=price, pct=h1_pct, details={"poi": poi})
+    items["1H order block tapped"] = True; notes["1H order block tapped"] = f"{poi_txt} tapped"
+
+    # 15m structure shift after the tap (falls back to 5m if no 15m data, e.g. old backtests)
+    sw = find_swing_points(ltf, lookback=2); evs = detect_structure_events(ltf, sw)
+    mss = [e for e in evs if e["direction"] == direction and e["index"] >= tap and e["index"] >= len(ltf) - (12 if m15 else 36)]
+    tf_name = "15m" if m15 else "5m"
+    if mss:
+        items["15m structure shift"] = True; notes["15m structure shift"] = f"{tf_name} {mss[-1]['kind']} {direction.lower()} after the tap"
+    m5_swings = find_swing_points(m5, lookback=2) if m5 else []
+    m5_events = detect_structure_events(m5, m5_swings) if m5 else []
+    trig = _m5_trigger(m5, direction, m5_events)
+    if trig: items["5m trigger"] = True; notes["5m trigger"] = trig
+
+    grab = liquidity_grab(h1, h1_swings, direction, d1)
+    if grab: items["Liquidity swept"] = True; notes["Liquidity swept"] = grab
+    fvg = recent_fvg(ltf, direction, max_age=30, after_index=max(tap - 1, 2)) or \
+          recent_fvg(h1, direction, max_age=30)
+    if fvg and (fvg["bottom"] <= poi["high"] + atr_h1 and fvg["top"] >= poi["low"] - atr_h1 or mss):
+        items["FVG / imbalance"] = True; notes["FVG / imbalance"] = f"FVG {fvg['bottom']:.5g}-{fvg['top']:.5g}"
+
+    # the ten strategies, applied to the 1H chart - only votes WITH the daily bias count
+    try:
+        m5_l = m5 or []
+        x = {"symbol": symbol, "now": now, "price": price, "d1": d1, "h4": h4, "h1": h1, "m5": m5_l,
+             "daily_bias": daily_bias, "bias_4h": bias_4h, "aligned_4h": aligned_4h, "atr_h1": atr_h1,
+             "atr_m5": atr(m5_l, 14) if m5_l else None, "rsi_h1": rsi(h1, 14), "adx_h1": adx(h1, 14),
+             "h1_swings": find_swing_points(h1, 2), "h1_events": detect_structure_events(h1, find_swing_points(h1, 2)),
+             "h1_range": h1_range, "h4_range": None, "h4_liq": [], "m5_swings": m5_swings, "m5_events": m5_events,
+             "m5_liq": find_liquidity_zones(m5_swings, 0.001) if m5_swings else [], "m5_patterns": detect_candle(m5_l)[0] if m5_l else [],
+             "h1_patterns": detect_candle(h1)[0], "profile": volume_profile(h1[-100:])}
+        x["h1_liq"] = find_liquidity_zones(x["h1_swings"], 0.0008)
+        x["h1_sweep"] = check_sweep(x["h1_liq"], h1, lookback_bars=20)
+        x["m5_sweep"] = check_sweep(x["m5_liq"], m5_l, lookback_bars=30) if m5_l else None
+        h4_sw = find_swing_points(h4, 2) if h4 else []
+        x["h4_range"] = compute_dealing_range(h4_sw, 8, h4) if h4 else None
+        x["h4_liq"] = find_liquidity_zones(h4_sw, 0.0012) if h4 else []
+        votes = {}
+        for name, fn in STRATEGY_FUNCS:
+            try: votes[name] = fn(x)
+            except Exception: votes[name] = (None, "")
+    except Exception:
+        votes = {n: (None, "") for n in STRATEGY_NAMES}
+    agree = [n for n in STRATEGY_NAMES if votes[n][0] == direction]
+    against = [n for n in STRATEGY_NAMES if votes[n][0] and votes[n][0] != direction]
+    if len(agree) >= 4: items["Strategies agree"] = True
+    notes["Strategies agree"] = f"{len(agree)}/10 with the daily bias" + (f" ({', '.join(agree)})" if agree else "")
+
+    score = sum(items.values())
+    common = {"checklist": dict(items), "notes": notes, "regular_mode": True, "poi": poi, "zone": zone,
+              "votes": {n: votes[n][0] for n in STRATEGY_NAMES}, "strategies_agree": agree, "strategies_against": against}
+    if not items["15m structure shift"]:
+        return _out(f"{poi_txt} tapped, but no {tf_name} structure shift {direction.lower()} yet - waiting for confirmation ({score}/10)",
+                    score=score, bias=direction, entry=price, pct=h1_pct, details={**common, "waiting_for": "confirmation"}, extra={"mode_stage": "regular"})
+
+    # ---- 4. structural stop, room to target, size sanity ----
+    entry = price
+    if direction == "BULLISH":
+        extreme = min([poi["low"]] + [c["low"] for c in after_tap])
+        stop = extreme - buf; risk = entry - stop
+        target = h1_range["high"]; room = target - entry
+    else:
+        extreme = max([poi["high"]] + [c["high"] for c in after_tap])
+        stop = extreme + buf; risk = stop - entry
+        target = h1_range["low"]; room = entry - target
+    if risk <= 0:
+        return _out("Rejected: invalid stop distance", score=score, bias=direction, entry=entry, pct=h1_pct, details=common, extra={"mode_stage": "regular"})
+    if risk > 3.0 * atr_h1:
+        return _out(f"Stop would be {risk/atr_h1:.1f} ATR wide (beyond the order block) - setup too wide to trade", score=score, bias=direction, entry=entry, pct=h1_pct, details=common, extra={"mode_stage": "regular"})
+    if room < min_rr * risk:
+        return _out(f"Only {room/risk:.1f}R of room to the 1H range target - need {min_rr:.1f}R", score=score, bias=direction, entry=entry, pct=h1_pct, details=common, extra={"mode_stage": "regular"})
+    if score < min_score:
+        return _out(f"{score}/10 checklist - need {min_score}+ ({', '.join(k for k, v in items.items() if not v)} missing)", score=score, bias=direction, entry=entry, pct=h1_pct, details=common, extra={"mode_stage": "regular"})
+
+    tp = entry + risk * rr if direction == "BULLISH" else entry - risk * rr
+    why = [f"Daily {direction.lower()} bias" + (", 4H agrees" if items["4H agrees"] else ""),
+           f"1H: price in {zone} ({h1_pct:.0f}% of range), {poi_txt} tapped"]
+    if grab: why.append(grab)
+    why.append(notes["15m structure shift"] + (f", {trig}" if trig else ""))
+    why.append(f"{len(agree)}/10 strategies agree")
+    why.append(f"stop beyond the order block at {stop:.5g}; 1H range target {target:.5g} ({room/risk:.1f}R room)")
+    return {
+        "symbol": symbol, "signal": True, "score": score, "bias": direction, "bias_4h": bias_4h, "entry": entry,
+        "stop_loss": stop, "take_profit": tp, "risk_reward": rr, "premium_pct": h1_pct,
+        "reason": f"{score}/10 SMC checklist: " + ", ".join(k for k, v in items.items() if v),
+        "rationale": ". ".join(why) + ".", "confluence": " | ".join(k for k, v in items.items() if v),
+        "details": {**common, "stop": stop, "target_liquidity": target, "room_r": round(room / risk, 2), "tap_index": tap},
+        "mode": "regular", "structural": True, "mode_stage": "regular",
+        "factors": {**{n: (votes[n][0] == direction) for n in STRATEGY_NAMES}, "zone": zone, "zone_veto_blocked": False},
+    }
+
 # ================= ORCHESTRATION =================
 def full_multi_tf_analysis(symbol, user_settings=None, historical=None, as_of=None, weights=None):
     """historical: optional dict {"1day":[...], "4h":[...], "1h":[...], "5min":[...]}
@@ -968,10 +1216,12 @@ def full_multi_tf_analysis(symbol, user_settings=None, historical=None, as_of=No
     d1, _e = get_values_cached(cache, symbol, "1day", 100, historical)
     h4, _e = get_values_cached(cache, symbol, "4h", 100, historical)
     h1, _e = get_values_cached(cache, symbol, "1h", 250, historical)
-    m5, _e = get_values_cached(cache, symbol, "5min", 100, historical)
     d1, h4 = d1 or [], h4 or []
     if not h1 or len(h1) < 30:
         return _out("No H1 data")
+    if mode != "scalp":   # regular (SMC) mode: daily bias -> 1H SMC -> 15m/5m entry (fetches 15m/5m only when price is at the 1H order block)
+        return _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h4, h1, _out)
+    m5, _e = get_values_cached(cache, symbol, "5min", 100, historical)
     # existing helpers, reused as-is (same cache keys as the fetches above -> no extra API calls)
     daily_bias, _daily_pct, _dc = get_htf_bias(symbol, cache, historical)
     aligned_4h, bias_4h = check_4h_alignment(symbol, daily_bias, cache, historical)
