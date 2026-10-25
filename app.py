@@ -54,6 +54,7 @@ if not NEWS_MODULE_OK:
 # here and formatting it into every UI string below means this can't drift
 # out of sync with the engine again.
 MIN_SCORE = eng.DEFAULT_WEIGHTS.get("min_score", 5)
+REGULAR_MIN_SCORE = eng.DEFAULT_WEIGHTS.get("regular_min_score", 6)
 
 # --- SUPABASE: persistent storage. Data lives in a Supabase Postgres
 # table, entirely outside Render's ephemeral disk, so it survives every
@@ -455,7 +456,10 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings, is_test=Fa
     lot = user_settings.get('lot_size', 0.01); lev = user_settings.get('leverage', '1:500')
     acc = user_settings.get('account_size', 142); curr_sym = get_currency_symbol(user_settings.get("currency","ZAR"))
     mode = user_settings.get("trading_mode", "regular")
-    sl, tp, sl_dist, tp_dist, risk_amt, lev_info = calculate_dynamic_sl_tp(symbol, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
+    sl, tp, sl_dist, tp_dist, risk_amt, lev_info = build_trade_plan(symbol, r, user_settings)
+    if lev_info.get('too_risky'):
+        return False, {"error": f"skipped: stop is too wide for this account - the smallest lot (0.01) would risk {lev_info.get('actual_risk_pct')}% vs your {risk_percent}% limit"}
+    if lev_info.get('structural'): lot = lev_info['effective_lot']
 
     signal_id = generate_signal_id()
     try:
@@ -627,6 +631,63 @@ def calculate_dynamic_sl_tp(symbol, entry, bias, account_size, lot_size, leverag
         sl=entry+sl_dist if is_sell else entry-sl_dist; tp=entry-tp_dist if is_sell else entry+tp_dist
         return round(sl,dp),round(tp,dp),round(sl_pips,1),round(tp_pips,1),risk_amount,{"leverage_capped":leverage_capped,"effective_lot":round(lot_size,4),"max_lot":round(max_lot,4)}
 
+# ---- STRUCTURAL TRADE PLAN (regular/SMC mode) -------------------------------------------
+# The engine now puts the stop where the setup is invalidated (beyond the 1H order block /
+# sweep extreme). The old approach derived the stop FROM the risk amount and clamped it to a
+# fixed band, so stops had nothing to do with the chart. Here the order is reversed: stop from
+# structure -> TP = RR x that stop -> LOT SIZE chosen so a stop-out costs the user's risk %.
+# Contract sizes / FX rates are standard-broker approximations: confirm the lot in your
+# platform's calculator before trading. Override rates with env vars if you like.
+ACCOUNT_TO_USD = {"USD": 1.0, "ZAR": 1.0/float(os.getenv("USDZAR_RATE", "18.0")), "EUR": float(os.getenv("EURUSD_RATE", "1.08")), "GBP": float(os.getenv("GBPUSD_RATE", "1.27"))}
+CCY_USD = {"USD": 1.0, "EUR": 1.08, "GBP": 1.27, "AUD": 0.65, "NZD": 0.60, "CAD": 0.73, "CHF": 1.13, "JPY": 1.0/float(os.getenv("USDJPY_RATE", "150"))}
+_INDICES = ["US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200"]
+_CRYPTO = ["BTC","ETH","SOL","BNB","XRP","ADA","DOGE","DOT","AVAX","LINK","MATIC","LTC"]
+
+def _contract(symbol, entry):
+    """(USD P&L per 1.0 price move per 1.0 lot, USD notional per lot for margin, pip size or None)."""
+    if symbol == "XAUUSD": return 100.0, 100.0*entry, None
+    if symbol == "XAGUSD": return 5000.0, 5000.0*entry, None
+    if symbol in ("XTIUSD","XBRUSD"): return 1000.0, 1000.0*entry, None
+    if symbol in _INDICES: return 1.0, 1.0*entry, None
+    if any(c in symbol for c in _CRYPTO): return 1.0, 1.0*entry, None
+    base, quote = symbol[:3], symbol[3:]
+    val = 100000.0 * CCY_USD.get(quote, 1.0)
+    base_usd = 1.0 if base == "USD" else (entry*CCY_USD.get(quote, 1.0) if quote != "USD" else entry)
+    return val, 100000.0*base_usd, (0.01 if quote == "JPY" else 0.0001)
+
+def build_trade_plan(symbol, r, user_settings):
+    """Same 6-tuple as calculate_dynamic_sl_tp: (sl, tp, sl_dist, tp_dist, risk_amt, lev_info).
+    Uses the engine's structural stop when the signal carries one (regular mode); otherwise the old method."""
+    rr = float(user_settings.get('rr_ratio', 2.5) or 2.5); risk_percent = float(user_settings.get('risk_percent', 1) or 1)
+    lot = user_settings.get('lot_size', 0.01); lev = user_settings.get('leverage', '1:500'); acc = float(user_settings.get('account_size', 142))
+    entry = float(r.get('entry', 0))
+    if not (r.get('structural') and r.get('stop_loss')):
+        return calculate_dynamic_sl_tp(symbol, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
+    sell = "BEARISH" in r.get('bias','').upper() or "SELL" in r.get('bias','').upper()
+    dp = eng.price_decimals(symbol)
+    dist = abs(entry - float(r['stop_loss'])); dist = max(dist, 1e-9)
+    sl = entry + dist if sell else entry - dist
+    tp = entry - dist*rr if sell else entry + dist*rr
+    to_usd = ACCOUNT_TO_USD.get(user_settings.get("currency", "ZAR"), 1.0)
+    val, notional, pip = _contract(symbol, entry)
+    risk_usd = acc*to_usd*risk_percent/100.0
+    lot_risk = risk_usd / (dist*val)
+    max_lot = (acc*to_usd*0.5*parse_leverage_ratio(lev)) / notional if notional > 0 else 999.0   # use at most half the balance as margin
+    lot_f = min(lot_risk, max_lot)
+    lot_f = int(lot_f*100 + 1e-9)/100.0           # 0.01-lot steps, rounded DOWN
+    notes = []
+    capped = max_lot < lot_risk - 1e-9
+    if capped: notes.append(f"Lot limited to {max(lot_f,0.01)} by {lev} leverage (half the balance as margin) - below the {lot_risk:.2f} lots your risk % would allow")
+    if lot_f < 0.01:
+        lot_f = 0.01
+        if 0.01*dist*val > risk_usd*1.05: notes.append(f"The smallest lot (0.01) already risks more than your {risk_percent:g}% - this stop is wide for your account size")
+    actual_risk = lot_f*dist*val/to_usd if to_usd else risk_usd
+    if pip: sl_d, tp_d = dist/pip, dist*rr/pip
+    else: sl_d, tp_d = dist, dist*rr
+    too_risky = actual_risk > 2.0*risk_usd/to_usd if to_usd else False   # even the smallest lot risks over twice the user's risk %
+    info = {"too_risky": too_risky, "actual_risk_pct": round(actual_risk/acc*100, 1) if acc else None, "leverage_capped": False, "effective_lot": lot_f, "max_lot": round(max_lot, 2), "sized_to_risk": True, "note": " | ".join(notes), "structural": True}
+    return round(sl, dp), round(tp, dp), round(sl_d, 1), round(tp_d, 1), actual_risk, info
+
 def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale="", lev_info=None):
     """FIXED: now sends to ONE specific chat_id (the user who's actually
     watching this symbol), not broadcast to every linked chat. callback_data
@@ -647,7 +708,10 @@ def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl
     lev_note = ""
     if lev_info.get("leverage_capped"):
         lev_note = f"\n⚠️ Lot capped to {lev_info.get('effective_lot')} — {leverage} leverage on {currency_symbol}{account_size} can't margin {lot_size} lots here"
-    text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}{lev_note}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_percent}%){rationale_line}\n\n🔍 {confluence_text}\n\n⏰ {sast_now}"
+    if lev_info.get("note"): lev_note += f"\n⚠️ {lev_info['note']}"
+    try: risk_pct_shown = round(float(risk_amt)/float(account_size)*100, 2) if lev_info.get("structural") else risk_percent
+    except Exception: risk_pct_shown = risk_percent
+    text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}{lev_note}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_pct_shown}%){rationale_line}\n\n🔍 {confluence_text}\n\n⏰ {sast_now}"
     keyboard={"inline_keyboard": [[{"text":"✅ TOOK ENTRY","callback_data":f"TOOK_{signal_id}"},{"text":"❌ SKIP","callback_data":f"SKIP_{signal_id}"}],[{"text":"📊 Journal","url":"https://agent-35-trading-bot.onrender.com/journal"}]]}
     res = telegram_post("sendMessage", {"chat_id":chat_id,"text":text,"reply_markup":keyboard})
     if not res.get("ok"): return {"error": res.get("error", "Telegram send failed")}
@@ -873,7 +937,7 @@ def dashboard():
     mode_badge = "⚡ SCALP MODE - Fast M5 - 10-20/day" if mode=="scalp" else "🎯 REGULAR MODE - Swing - 2-5/day"
     content=f"""
 <div class='main'>
-<div class='card'><div class='card-title'>Total Profit & Loss</div><div class='card-value' style='color:{pnl_color}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0b1220;border-radius:10px;padding:10px;margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px'><div><div style='font-size:9px;color:#64748b'>TODAY</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['daily']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>WEEK</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['weekly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>MONTH</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['monthly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>YEAR</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div class='card-sub'>{mode_badge}<br>Score: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+</div></div>
+<div class='card'><div class='card-title'>Total Profit & Loss</div><div class='card-value' style='color:{pnl_color}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0b1220;border-radius:10px;padding:10px;margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px'><div><div style='font-size:9px;color:#64748b'>TODAY</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['daily']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>WEEK</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['weekly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>MONTH</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['monthly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>YEAR</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div class='card-sub'>{mode_badge}<br>Score /10: regular needs {REGULAR_MIN_SCORE}+ (7=strong, 8+=A+) · scalp needs {MIN_SCORE}+</div></div>
 <div class='card'><div class='card-title'>Performance</div><div class='card-value'>{stats['total_trades']} Trades • {stats['win_rate']}% WR</div><div class='card-sub'>✅ Wins: {stats['wins']} ❌ Losses: {stats['losses']} ➖ BE: {stats['be']}<br><br>Telegram: {tg_status}<br>Referrals: {ref_count}/10 free lifetime<br>Tracked: {tracked_count}/{MAX_TRACKED} active (limit 6)</div></div>
 <div class='card'><div class='card-title'>Account Overview</div><div class='card-value'>{curr_sym}{user_settings.get('account_size',142)}</div><div class='card-sub'>Lot Size: {user_settings.get('lot_size',0.01)} • Lev {user_settings.get('leverage','1:500')}<br>Risk: {user_settings.get('risk_percent',1)}% • RR 1:{user_settings.get('rr_ratio',2.5)}<br>Currency: {user_settings.get('currency','ZAR')} {curr_sym}<br>Mode: {mode.upper()} - All strategies as ONE<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings →</a></div></div>
 <div class='card'><div class='card-title'>Quick Actions</div><div style='display:flex;flex-direction:column;gap:2px;margin-top:8px'><a href='/dashboard-scan' onclick="this.querySelector('button').innerHTML='⏳ Scanning...'; this.querySelector('button').disabled=true;"><button class='btn-primary'>🔍 Scan Market Now</button></a><a href='/test-telegram' class='btn-secondary'>📤 Test Telegram</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram</a><a href='/export-journal' class='btn-secondary'>📥 Export Journal CSV</a><a href='/clear-tracked' class='btn-secondary' style='color:#ef4444'>Clear Tracked ({tracked_count}/{MAX_TRACKED})</a>{admin_link}</div></div>
@@ -899,10 +963,10 @@ def settings_page():
 <form method='post'>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:16px'>
 <div class='card' style='border:2px solid #10b981'><div class='card-title'>Trading Mode - 2 Modes Only</div><select name='trading_mode' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #10b981'>
-<option value='regular' {'selected' if mode=='regular' else ''}>🎯 REGULAR - Swing H1/4H/Daily - 2-5/day - Score {MIN_SCORE}+ send</option>
+<option value='regular' {'selected' if mode=='regular' else ''}>🎯 REGULAR (SMC) - Daily bias + 1H order block + 15m/5m entry - Score {REGULAR_MIN_SCORE}+ send</option>
 <option value='scalp' {'selected' if mode=='scalp' else ''}>⚡ SCALP - Fast M5 only - 10-20/day - Score {MIN_SCORE}+ send</option>
 </select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>
-<b>REGULAR:</b> Daily bias + 4H alignment + Discount/Premium + Sweep + Engulfing + EMA/RSI + Breakout + OB/BOS/FVG as ONE. Best for Gold/Forex/Indices. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+<br><br>
+<b>REGULAR (SMC):</b> The daily structure sets the ONLY direction. On the 1H chart the bot maps swing structure (BOS/CHoCH), the premium/discount range and unmitigated order blocks; it waits for price to tap an order block in the right half of the range, then needs a 15m structure shift (and ideally a 5m trigger) before sending. The stop sits beyond the order block, and the lot is sized so a stop-out costs your risk %. Best for Gold/Forex/Indices. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+<br><br>
 <b>SCALP:</b> M5 EMA9/21 + RSI + Sweep + OB + Engulfing as ONE. Fast, more signals. Best for R142 + Crypto 24/7.
 </div></div>
 <div class='card'><div class='card-title'>Currency</div><select name='currency' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{currency_options}</select></div>
@@ -1086,7 +1150,7 @@ def dashboard_scan():
                 rows+=f"<tr><td>{s}</td><td colspan=4 style='color:#ef4444;font-size:10px'>{err_msg[:50]}</td></tr>"
     mode_badge = "⚡ SCALP MODE" if mode=="scalp" else "🎯 REGULAR MODE"
     content=f"""<div style='max-width:1600px;margin:0 auto;padding:14px'>
-<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold {MIN_SCORE}+ sends. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+. Your tracked: {my_tracked_count}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
+<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold: regular {REGULAR_MIN_SCORE}+ / scalp {MIN_SCORE}+. 7=strong, 8+=A+. Your tracked: {my_tracked_count}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
 <table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div>"""
     return pro_layout(content,"All Signals", is_admin=is_admin)
 
@@ -1477,7 +1541,7 @@ def send_signal():
             # immediately, attributed to this user.
             rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
             mode=user_set.get("trading_mode","regular")
-            sl,tp,sl_dist,tp_dist,risk_amt,lev_info=calculate_dynamic_sl_tp(sym, entry, r.get('bias',''), acc, lot, lev, risk_percent, rr)
+            sl,tp,sl_dist,tp_dist,risk_amt,lev_info=build_trade_plan(sym, r, user_set)
             tracked=load_json(TRACK_FILE, dict)
             signal_id = generate_signal_id()
             tracked[signal_id]={"email":email,"chat_id":None,"symbol":sym,"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode}
