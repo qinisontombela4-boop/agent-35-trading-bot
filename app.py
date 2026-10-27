@@ -144,6 +144,7 @@ NEWS_ALERTED_FILE = os.path.join(BASE_DIR, "news_alerted.json")  # event ids alr
 DAILY_COUNT_FILE = os.path.join(BASE_DIR, "daily_signal_count.json")
 NEWS_CACHE_FILE = os.path.join(BASE_DIR, "news_calendar_cache.json")  # last good calendar, survives restarts
 NEWS_CALLS_FILE = os.path.join(BASE_DIR, "news_calls.json")           # every news lean logged + its scored outcome
+HEADSUP_FILE = os.path.join(BASE_DIR, "headsup_sent.json")            # "price is approaching an order block" heads-ups already sent (one per setup per day)
 TG_LINK_FILE = os.path.join(BASE_DIR, "tg_link_tokens.json")          # one-tap Telegram link tokens (30 min, single use)
 
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","EURCHF","GBPCHF","EURAUD","GBPAUD","EURCAD","GBPCAD","EURNZD","GBPNZD","AUDNZD","AUDCAD","NZDCAD","AUDCHF","NZDJPY","XAUUSD","XAGUSD","XTIUSD","XBRUSD","US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200","BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
@@ -252,7 +253,7 @@ def drop_ghost_sessions():
 
 def get_user_settings(email):
     settings = load_json(SETTINGS_FILE, dict)
-    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":["London","New York"],"symbols":ALL_SYMBOLS[:10],"risk_percent":1.0,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular"}
+    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":["London","New York"],"symbols":ALL_SYMBOLS[:10],"risk_percent":1.0,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":True}
     s = settings.get(email, default)
     for k,v in default.items():
         if k not in s: s[k]=v
@@ -459,7 +460,7 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings, is_test=Fa
     sl, tp, sl_dist, tp_dist, risk_amt, lev_info = build_trade_plan(symbol, r, user_settings)
     if lev_info.get('too_risky'):
         return False, {"error": f"skipped: stop is too wide for this account - the smallest lot (0.01) would risk {lev_info.get('actual_risk_pct')}% vs your {risk_percent}% limit"}
-    if lev_info.get('structural'): lot = lev_info['effective_lot']
+    if lev_info.get('structural'): lot = lev_info['effective_lot']; rr = lev_info.get('rr', rr)
 
     signal_id = generate_signal_id()
     try:
@@ -668,6 +669,8 @@ def build_trade_plan(symbol, r, user_settings):
     dist = abs(entry - float(r['stop_loss'])); dist = max(dist, 1e-9)
     sl = entry + dist if sell else entry - dist
     tp = entry - dist*rr if sell else entry + dist*rr
+    if r.get('tp_is_target') and r.get('take_profit'):   # pullback trade: the take profit is the daily/4H/1H order block, not an RR multiple
+        tp = float(r['take_profit']); rr = round(abs(tp-entry)/dist, 2)
     to_usd = ACCOUNT_TO_USD.get(user_settings.get("currency", "ZAR"), 1.0)
     val, notional, pip = _contract(symbol, entry)
     risk_usd = acc*to_usd*risk_percent/100.0
@@ -685,7 +688,7 @@ def build_trade_plan(symbol, r, user_settings):
     if pip: sl_d, tp_d = dist/pip, dist*rr/pip
     else: sl_d, tp_d = dist, dist*rr
     too_risky = actual_risk > 2.0*risk_usd/to_usd if to_usd else False   # even the smallest lot risks over twice the user's risk %
-    info = {"too_risky": too_risky, "actual_risk_pct": round(actual_risk/acc*100, 1) if acc else None, "leverage_capped": False, "effective_lot": lot_f, "max_lot": round(max_lot, 2), "sized_to_risk": True, "note": " | ".join(notes), "structural": True}
+    info = {"too_risky": too_risky, "actual_risk_pct": round(actual_risk/acc*100, 1) if acc else None, "leverage_capped": False, "effective_lot": lot_f, "max_lot": round(max_lot, 2), "sized_to_risk": True, "note": " | ".join(notes), "structural": True, "rr": rr}
     return round(sl, dp), round(tp, dp), round(sl_d, 1), round(tp_d, 1), actual_risk, info
 
 def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale="", lev_info=None):
@@ -702,6 +705,7 @@ def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl
     entry_fmt=f"{entry_f:.{dp}f}"; sl_fmt=f"{float(sl):.{dp}f}"; tp_fmt=f"{float(tp):.{dp}f}"
     sast_now=(datetime.utcnow()+timedelta(hours=2)).strftime("%H:%M SAST")
     mode_emoji = "⚡" if mode_name=="scalp" else "🎯"
+    if str(confluence_text).startswith("PULLBACK"): mode_name = (mode_name or "regular") + " · PULLBACK vs daily bias"
     strength = "🔥 A+" if score>=8 else "✅ Strong" if score>=7 else "👍 Good" if score>=6 else "⚡ Takeable"
     rationale_line = f"\n\n💡 {rationale}" if rationale else ""
     lev_info = lev_info or {}
@@ -764,7 +768,7 @@ def cached_analysis(symbol, user_settings):
     # trading through news doesn't). Keying on (symbol, mode) alone let one
     # user's blackout result be served to everyone else for ~4 minutes — and
     # let a "no blackout" result leak to users who asked to avoid news.
-    key = (symbol, mode, bool(user_settings.get("trade_news", True)),
+    key = (symbol, mode, bool(user_settings.get("pullback_trades", True)), bool(user_settings.get("trade_news", True)),
            user_settings.get("news_blackout_before_min", 15), user_settings.get("news_blackout_after_min", 15))
     now = datetime.now()
     hit = _ANALYSIS_CACHE.get(key)
@@ -951,7 +955,7 @@ def settings_page():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"
     if request.method=="POST":
-        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":float(request.form.get("risk_percent",1)),"rr_ratio":float(request.form.get("rr_ratio",2.5)),"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":request.form.get("trading_mode","regular"),"symbols":request.form.getlist("symbols") or ALL_SYMBOLS[:10]}
+        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":float(request.form.get("risk_percent",1)),"rr_ratio":float(request.form.get("rr_ratio",2.5)),"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":request.form.get("trading_mode","regular"),"pullback_trades":request.form.get("pullback_trades")=="yes","symbols":request.form.getlist("symbols") or ALL_SYMBOLS[:10]}
         save_user_settings(email,new_settings)
         return redirect("/dashboard")
     s=get_user_settings(email)
@@ -976,6 +980,7 @@ def settings_page():
 <div class='card'><div class='card-title'>Leverage</div><select name='leverage' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{"".join([f"<option value='1:{lv}' {'selected' if s.get('leverage','1:500')==f'1:{lv}' else ''}>1:{lv}</option>" for lv in [10,20,30,50,100,200,400,500,1000,2000]])}</select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Caps how large a position your account can actually margin — if this is too low for your lot size, SL/TP will size the trade down automatically and flag it in the Telegram message.</div></div>
 <div class='card'><div class='card-title'>Risk Reward</div><select name='rr_ratio' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='1.5' {'selected' if str(s.get('rr_ratio'))=='1.5' else ''}>1:1.5 Scalp</option><option value='2' {'selected' if str(s.get('rr_ratio'))=='2' else ''}>1:2</option><option value='2.5' {'selected' if str(s.get('rr_ratio'))=='2.5' else ''}>1:2.5 Regular</option><option value='3' {'selected' if str(s.get('rr_ratio'))=='3' else ''}>1:3 SMC</option></select></div>
 <div class='card' style='border:2px solid #ef444455'><div class='card-title'>Avoid News</div><select name='trade_news' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='yes' {'selected' if s.get('trade_news',True) else ''}>🟢 Trade through news — no blackout</option><option value='no' {'selected' if not s.get('trade_news',True) else ''}>🔴 Avoid news — block signals + auto-flag tracked trades near high-impact events</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When set to Avoid, new signals are blocked ±15min around real high-impact events for correlated symbols, and you'll get a Telegram alert ~30min before. See the <a href='/news' style='color:#10b981'>News</a> tab for the live calendar.</div></div>
+<div class='card'><div class='card-title'>Pullback trades (SMC)</div><select name='pullback_trades' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='no' {'selected' if not s.get('pullback_trades',True) else ''}>⚪ Off - only trade WITH the daily bias</option><option value='yes' {'selected' if s.get('pullback_trades',True) else ''}>🟢 On - also trade the 1H move toward the daily order block (recommended)</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Regular mode only. When the daily bias is bullish but the 1H is bearish and falling toward an untaken bullish order block / liquidity (or the reverse), the bot also sends the 1H trade: a SELL when price retests a 1H bearish order block or sweeps premium highs and the 15m turns down, with the take profit at that order block / liquidity. These trades go AGAINST the daily bias for the length of the move, so they are labelled PULLBACK and are riskier than daily-bias trades. Turn off to trade only with the daily bias.</div></div>
 </div>
 <div class='card' style='margin-top:12px'><div class='card-title'>Watchlist - {len(ALL_SYMBOLS)} Symbols Available - Score {MIN_SCORE}+ will be sent - Max Tracked {MAX_TRACKED}</div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;max-height:380px;overflow-y:auto;margin-top:10px;padding-right:4px'>{symbols_html}</div></div>
 <button type='submit' class='btn-primary' style='margin-top:16px'>Save Settings - {mode.upper()} Mode</button>
@@ -1140,8 +1145,8 @@ def dashboard_scan():
                 if my_tracked_count>=MAX_TRACKED and not user_has_open_or_pending(email, s): signal_btn=f"<span class='pill' style='background:rgba(239,68,68,0.15);color:#ef4444'>Limit {MAX_TRACKED}</span>"
                 elif user_has_open_or_pending(email, s): signal_btn=f"<span class='pill' style='background:rgba(245,158,11,0.15);color:#f59e0b'>Already sent</span>"
                 else: signal_btn=f"<a href='/send-signal?symbol={s}' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:11px'>Send {score}/10</a>"
-            else: signal_btn=f"<span style='color:#64748b;font-size:10px'>{r.get('reason','')[:44]}</span>"
-            rows+=f"<tr><td style='font-weight:700'>{s}<div style='font-size:9px;color:#64748b'>{entry_display}</div></td><td><span class='pill' style='background:{color}22;color:{color};border:1px solid {color}44'>{score}/10</span></td><td>{bias}</td><td>{'✅ SEND' if r.get('signal') else '⏳ Wait'}</td><td>{signal_btn}</td></tr>"
+            else: signal_btn=f"<span style='color:#64748b;font-size:10px;display:inline-block;max-width:420px;white-space:normal;line-height:1.35' title='{_html.escape(r.get('reason',''))}'>{_html.escape(r.get('reason','')[:170])}</span>"
+            rows+=f"<tr><td style='font-weight:700'><a href='/market-map?symbol={s}' style='color:inherit;text-decoration:none' title='Open the market map'>{s} 🗺️</a><div style='font-size:9px;color:#64748b'>{entry_display}</div></td><td><span class='pill' style='background:{color}22;color:{color};border:1px solid {color}44'>{score}/10</span></td><td>{bias}</td><td>{'✅ SEND' if r.get('signal') else '⏳ Wait'}</td><td>{signal_btn}</td></tr>"
         except Exception as e:
             err_msg = str(e)
             if "429" in err_msg or "rate" in err_msg.lower():
@@ -1153,6 +1158,52 @@ def dashboard_scan():
 <div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold: regular {REGULAR_MIN_SCORE}+ / scalp {MIN_SCORE}+. 7=strong, 8+=A+. Your tracked: {my_tracked_count}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
 <table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div>"""
     return pro_layout(content,"All Signals", is_admin=is_admin)
+
+_MAP_CACHE = {}
+
+@app.route("/market-map")
+def market_map_page():
+    """What the bot sees on one symbol: daily bias, premium/discount on each timeframe, unmitigated order blocks,
+    untaken liquidity above/below, and what the SMC logic is waiting for."""
+    if not session.get("user"): return redirect("/login")
+    email=session.get("user"); is_admin=email=="admin@agent35.com"; us=get_user_settings(email)
+    sym=request.args.get("symbol") or (us.get("symbols") or ["EURUSD"])[0]
+    if sym not in ALL_SYMBOLS: sym="EURUSD"
+    hit=_MAP_CACHE.get(sym); now=time.time()
+    if hit and now-hit[0] < 180: m=hit[1]
+    else:
+        try: m=eng.market_map(sym)
+        except Exception as e: m={"symbol":sym,"error":str(e)[:150]}
+        _MAP_CACHE[sym]=(now,m)
+    opts="".join(f"<option value='{x}' {'selected' if x==sym else ''}>{x}</option>" for x in (us.get("symbols") or ["EURUSD"]) + ([sym] if sym not in (us.get("symbols") or []) else []))
+    head=f"<form method='get' style='margin:0 0 14px'><select name='symbol' onchange='this.form.submit()' style='padding:10px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{opts}</select></form>"
+    if m.get("error"):
+        body=f"<div class='card'><p style='color:#fca5a5'>{_esc(m['error'])}</p></div>"
+    else:
+        dp=eng.price_decimals(sym); f=lambda v:f"{v:.{dp}f}"
+        atr_h1=m.get("atr_h1") or 1
+        try: r=cached_analysis(sym, us); status=r.get("reason","")
+        except Exception as e: status=f"(analysis unavailable: {str(e)[:80]})"
+        def bias_chip(b): 
+            col={"BULLISH":"#10b981","BEARISH":"#ef4444"}.get(b,"#94a3b8"); return f"<span class='pill' style='background:{col}22;color:{col};border:1px solid {col}44'>{b}</span>"
+        z="".join(f"<tr><td style='font-weight:700'>{k}</td><td>{v['pct']}%</td><td>{v['zone']}</td><td style='color:#64748b'>{f(v['low'])} - {f(v['high'])}</td></tr>" for k,v in m["zones"].items())
+        def ob_rows(lst, label):
+            if not lst: return f"<tr><td colspan=3 style='color:#64748b'>No unmitigated {label} order blocks nearby</td></tr>"
+            return "".join(f"<tr><td style='font-weight:700'>{o['tf']}</td><td>{f(o['low'])} - {f(o['high'])}</td><td style='color:#94a3b8'>{abs(o['dist'])/atr_h1:.1f} ATR {'below' if label=='bullish' and o['dist']>0 else 'above' if label=='bearish' and o['dist']>0 else 'inside'}</td></tr>" for o in lst)
+        def liq_rows(lst):
+            if not lst: return "<tr><td colspan=2 style='color:#64748b'>None nearby</td></tr>"
+            return "".join(f"<tr><td>{_esc(p['name'])}</td><td style='font-weight:700'>{f(p['level'])}</td></tr>" for p in lst)
+        body=f"""<div class='card'><div style='display:flex;gap:10px;align-items:center;flex-wrap:wrap'><div style='font-size:18px;font-weight:900'>{sym}</div><div style='font-size:15px'>{f(m['price'])}</div>Daily {bias_chip(m['daily_bias'])} 4H {bias_chip(m['bias_4h'])}</div>
+<div style='margin-top:10px;font-size:12px;color:#cbd5e1;line-height:1.5'><b>What the bot is doing:</b> {_esc(status)}</div>
+<div style='margin-top:6px;font-size:11px;color:#64748b'>Last 1H structure break: {_esc(m.get('last_1h_break') or 'none yet')}</div></div>
+<div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-top:12px'>
+<div class='card'><div class='card-title'>Premium / discount by timeframe</div><table style='font-size:12px'><tr><th>TF</th><th>Range</th><th>Zone</th><th>Range low-high</th></tr>{z}</table></div>
+<div class='card'><div class='card-title'>🟢 Bullish order blocks (unmitigated)</div><table style='font-size:12px'><tr><th>TF</th><th>Zone</th><th>Distance</th></tr>{ob_rows(m['bull_obs'],'bullish')}</table></div>
+<div class='card'><div class='card-title'>🔴 Bearish order blocks (unmitigated)</div><table style='font-size:12px'><tr><th>TF</th><th>Zone</th><th>Distance</th></tr>{ob_rows(m['bear_obs'],'bearish')}</table></div>
+<div class='card'><div class='card-title'>Untaken sell-side liquidity (below price)</div><table style='font-size:12px'>{liq_rows(m['liquidity_below'])}</table></div>
+<div class='card'><div class='card-title'>Untaken buy-side liquidity (above price)</div><table style='font-size:12px'>{liq_rows(m['liquidity_above'])}</table></div></div>
+<p style='font-size:11px;color:#64748b;margin-top:12px;line-height:1.5'>Order blocks use the same rules as the signals: the candle that launched a structure break, not yet closed through, and sitting in the correct half of that timeframe's range. Liquidity = swing highs/lows, equal highs/lows and previous-day / 5-day extremes that price has not traded through since. Refreshes every 3 minutes.</p>"""
+    return pro_layout(f"<div style='max-width:1000px;margin:0 auto;padding:14px'><h1 style='font-size:20px;font-weight:900;margin:0 0 10px'>🗺️ Market Map</h1>{head}{body}</div>","All Signals", is_admin=is_admin)
 
 @app.route("/news")
 def news_page():
@@ -1542,6 +1593,7 @@ def send_signal():
             rr=user_set.get('rr_ratio',2.5); risk_percent=user_set.get('risk_percent',1); lot=user_set.get('lot_size',0.01); lev=user_set.get('leverage','1:500'); acc=user_set.get('account_size',142)
             mode=user_set.get("trading_mode","regular")
             sl,tp,sl_dist,tp_dist,risk_amt,lev_info=build_trade_plan(sym, r, user_set)
+            rr = lev_info.get('rr', rr)
             tracked=load_json(TRACK_FILE, dict)
             signal_id = generate_signal_id()
             tracked[signal_id]={"email":email,"chat_id":None,"symbol":sym,"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode}
@@ -2170,6 +2222,49 @@ def cron_daily_reset():
     save_json(DAILY_COUNT_FILE, {})  # every user's count self-heals to 0 on next read anyway
     return jsonify({"reset": True, "date": today, "previous_counts": prev_counts, "limit": MAX_SIGNALS_PER_DAY})
 
+MAX_HEADSUPS_PER_DAY = 6
+
+def maybe_send_heads_up(email, chat_id, symbol, hu):
+    """Telegram 'price is heading toward an order block' note - NOT a signal. Once per setup per day,
+    at most MAX_HEADSUPS_PER_DAY per user per day."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d"); sent = load_json(HEADSUP_FILE, dict)
+        sent = {k: v for k, v in sent.items() if k.split("|")[-1] >= (datetime.now() - timedelta(days=2)).strftime("%Y-%m-%d")}
+        key = f"{email}|{hu['key']}|{today}"
+        if key in sent: return False
+        if sum(1 for k in sent if k.startswith(email + "|") and k.endswith(today)) >= MAX_HEADSUPS_PER_DAY: return False
+        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": "📍 HEADS-UP (not a signal)\n" + hu["text"]})
+        if res.get("ok"):
+            sent[key] = datetime.now().isoformat(); save_json(HEADSUP_FILE, sent); return True
+    except Exception as e:
+        print(f"[HEADS-UP] {symbol}: {e}", file=sys.stderr)
+    return False
+
+def _digest_line(sym, r):
+    d = r.get("details") or {}
+    if r.get("signal"): return f"• {sym}: SETUP READY ({r.get('direction') or r.get('bias')})"
+    hu = d.get("heads_up")
+    txt = (hu or {}).get("text") if hu else (r.get("reason") or d.get("reason") or "")
+    txt = (txt or "no clear setup").split(". Pullback")[0]
+    return f"• {sym}: {txt[:170]}"
+
+def maybe_send_digest(email, chat_id, lines):
+    """One 'market watch' message per user per day so a quiet week doesn't look like a dead bot."""
+    try:
+        now = datetime.utcnow()
+        if now.hour < 5: return False
+        today = now.strftime("%Y-%m-%d"); sent = load_json(HEADSUP_FILE, dict)
+        key = f"{email}|DIGEST|{today}"
+        if key in sent: return False
+        body = "\n".join(lines[:12])
+        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": "🔭 DAILY MARKET WATCH (not a signal)\nThe bot is running and scanning. Where each pair stands:\n" + body + "\n\nSignals only fire when a full setup confirms - quiet days are normal."})
+        if res.get("ok"):
+            sent = {k: v for k, v in sent.items() if k.split("|")[-1] >= (now - timedelta(days=2)).strftime("%Y-%m-%d")}
+            sent[key] = now.isoformat(); save_json(HEADSUP_FILE, sent); return True
+    except Exception as e:
+        print(f"[DIGEST] {email}: {e}", file=sys.stderr)
+    return False
+
 @app.route("/cron/scan")
 def cron_scan():
     """FIXED: scans EACH linked user's own watchlist using THEIR OWN
@@ -2205,6 +2300,7 @@ def cron_scan():
         if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
             skipped.append(f"{email} DAILY_LIMIT_REACHED"); continue
 
+        digest_lines = []
         for sym in user_settings.get("symbols", [])[:12]:
             if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
                 skipped.append(f"{email} DAILY_LIMIT_REACHED"); break
@@ -2212,12 +2308,17 @@ def cron_scan():
             if user_has_open_or_pending(email, sym): continue
             try:
                 r = cached_analysis(sym, user_settings)
-                if not r.get('signal'): continue
+                digest_lines.append(_digest_line(sym, r))
+                if not r.get('signal'):
+                    hu = (r.get('details') or {}).get('heads_up')
+                    if hu and maybe_send_heads_up(email, chat_id, sym, hu): sent.append(f"{email}:{sym} heads-up")
+                    continue
                 ok, info = dispatch_signal_to_user(email, chat_id, sym, r, user_settings)
                 if ok: sent.append(f"{email}:{sym}")
                 else: skipped.append(f"{email}:{sym} {info.get('error')}")
             except Exception as e:
                 skipped.append(f"{email}:{sym} ERROR:{e}")
+        if digest_lines and maybe_send_digest(email, chat_id, digest_lines): sent.append(f"{email}: daily market watch")
         daily_counts[email] = get_daily_signal_count(email)
 
     return jsonify({"sent":sent,"skipped":skipped,"daily_counts":daily_counts,"daily_limit_per_user":MAX_SIGNALS_PER_DAY})
