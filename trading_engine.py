@@ -999,6 +999,38 @@ def find_h1_poi(h1, events, direction, rng, atr, price):
         if best is None or key < best[0]: best = (key, ob)
     return best[1] if best else None
 
+def find_mitigation_block(h1, events, direction, rng, atr, price):
+    """Mitigation block / breaker: an order block of the OPPOSITE direction that price has since closed through
+    (e.g. a bullish OB that broke down becomes bearish supply when price rallies back up into it). Valid while
+    price has not closed back through it, sitting in the right half of the range, of sane size."""
+    opp = _opp(direction); best = None
+    for ev in [e for e in events if e["direction"] == opp][-6:]:
+        ob = _ob_for_event(h1, ev, opp)
+        if not ob or ob["high"] <= ob["low"] or (ob["high"] - ob["low"]) > 3.0 * atr: continue
+        broke = None
+        for k in range(ev["index"] + 1, len(h1)):
+            cl = h1[k]["close"]
+            if (opp == "BULLISH" and cl < ob["low"]) or (opp == "BEARISH" and cl > ob["high"]): broke = k; break
+        if broke is None: continue
+        later = h1[broke + 1:]
+        if direction == "BEARISH" and any(k["close"] > ob["high"] for k in later): continue
+        if direction == "BULLISH" and any(k["close"] < ob["low"] for k in later): continue
+        if not ob_in_zone((ob["low"], ob["high"]), direction, rng): continue
+        dist = (price - ob["high"]) if direction == "BULLISH" else (ob["low"] - price)
+        if best is None or abs(dist) < best[0]: best = (abs(dist), {**ob, "type": "MB", "kind": "mitigation"})
+    return best[1] if best else None
+
+def best_poi(h1, events, direction, rng, atr, price):
+    """Nearest 1H point of interest: an unmitigated order block OR a mitigation block."""
+    cands = []
+    ob = find_h1_poi(h1, events, direction, rng, atr, price)
+    if ob: cands.append({**ob, "type": "OB"})
+    mb = find_mitigation_block(h1, events, direction, rng, atr, price)
+    if mb: cands.append(mb)
+    if not cands: return None
+    dist = lambda o: abs((price - o["high"]) if direction == "BULLISH" else (o["low"] - price))
+    return min(cands, key=dist)
+
 def liquidity_grab(candles, swings, direction, d1, lookback=24):
     """Was sell-side (for buys) / buy-side (for sells) liquidity taken in the last `lookback` 1H
     candles - a prior swing extreme or the previous-day low/high - with the close back inside?"""
@@ -1013,6 +1045,29 @@ def liquidity_grab(candles, swings, direction, d1, lookback=24):
             if direction == "BEARISH" and c["high"] > lvl > c["close"]: return f"{name} {lvl:.5g} swept"
     return None
 
+def find_grab(candles, swings, direction, d1, lookback=12):
+    """Most recent liquidity grab in the last `lookback` 1H candles: buy-side swept (wick above a prior swing
+    high / equal highs / previous-day high, close back below) for BEARISH, sell-side for BULLISH. Returns the
+    swept level and the extreme of the grab - used as a 'sweep reversal' point of interest."""
+    n = len(candles); start = max(1, n - lookback)
+    hi = direction == "BEARISH"; kind = "high" if hi else "low"
+    levels = [(s["candle"][kind], f"swing {kind}") for s in swings if s["kind"] == kind and s["index"] < start][-5:]
+    for z in find_liquidity_zones(swings, 0.0008):
+        if (z["kind"] == "buy_side") == hi and max(z["indices"]) < start: levels.append((z["price"], "equal " + kind + "s"))
+    if d1 and len(d1) >= 2:
+        pd = d1[-2]; levels.append((pd[kind], "previous-day " + kind))
+    best = None
+    for lvl, name in levels:
+        for i in range(start, n):
+            k = candles[i]
+            if (hi and k["high"] > lvl > k["close"]) or ((not hi) and k["low"] < lvl < k["close"]):
+                if best is None or i > best["index"]: best = {"index": i, "level": lvl, "name": name}
+    if not best: return None
+    seg = candles[best["index"]:]
+    extreme = max(k["high"] for k in seg) if hi else min(k["low"] for k in seg)
+    low, high = (best["level"], extreme) if hi else (extreme, best["level"])
+    return {"index": best["index"], "low": low, "high": high, "kind": "sweep", "name": best["name"], "level": best["level"]}
+
 def _m5_trigger(m5, direction, m5_events):
     if not m5: return None
     ev = [e for e in m5_events if e["direction"] == direction and e["index"] >= len(m5) - 24]
@@ -1024,112 +1079,136 @@ def _m5_trigger(m5, direction, m5_events):
         if direction == "BEARISH" and _bear_pat(pats): return "5m " + [p for p in pats if p in ("Bear Engulf", "Hang Man")][0]
     return None
 
-def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h4, h1, _out):
-    rr = float(user_settings.get("rr_ratio", 2.0) or 2.0)
-    min_rr = float(user_settings.get("min_risk_reward", 1.5) or 1.5)
-    min_score = w.get("regular_min_score", 6)
-    items = {k: False for k in REGULAR_CHECKLIST}
-    notes = {}
+def _opp(d): return "BEARISH" if d == "BULLISH" else "BULLISH"
 
-    def done(reason, bias="NEUTRAL", entry=0, pct=50, details=None):
-        sc = sum(items.values())
-        d = {"checklist": dict(items), "notes": notes, "regular_mode": True}
-        if details: d.update(details)
-        return _out(reason, score=sc, bias=bias, entry=entry, pct=pct, details=d, extra={"mode_stage": "regular"})
+def liquidity_pools(candles, swings, d1):
+    """Resting liquidity on a chart: swing highs/lows and equal highs/lows that price has NOT traded
+    through since they formed ('untaken'), plus previous-day and prior-5-day highs/lows.
+    side 'sell' = sell-side liquidity (stops under lows), 'buy' = buy-side (stops over highs)."""
+    pools = []
+    for s in swings[-40:]:
+        hi = s["kind"] == "high"; lvl = s["candle"]["high" if hi else "low"]
+        later = candles[s["index"] + 1:]
+        taken = any(k["high"] > lvl for k in later) if hi else any(k["low"] < lvl for k in later)
+        pools.append({"name": "swing high" if hi else "swing low", "level": lvl, "taken": taken, "side": "buy" if hi else "sell"})
+    for z in find_liquidity_zones(swings, 0.0008):
+        later = candles[max(z["indices"]) + 1:]
+        buy = z["kind"] == "buy_side"
+        taken = any(k["high"] > z["price"] for k in later) if buy else any(k["low"] < z["price"] for k in later)
+        pools.append({"name": "equal highs" if buy else "equal lows", "level": z["price"], "taken": taken, "side": "buy" if buy else "sell"})
+    if d1 and len(d1) >= 2:
+        pd, today = d1[-2], d1[-1]
+        pools.append({"name": "previous-day high", "level": pd["high"], "taken": today["high"] > pd["high"], "side": "buy"})
+        pools.append({"name": "previous-day low", "level": pd["low"], "taken": today["low"] < pd["low"], "side": "sell"})
+    if d1 and len(d1) >= 7:
+        wk = d1[-6:-1]; wh = max(k["high"] for k in wk); wl = min(k["low"] for k in wk)
+        pools.append({"name": "5-day high", "level": wh, "taken": d1[-1]["high"] > wh, "side": "buy"})
+        pools.append({"name": "5-day low", "level": wl, "taken": d1[-1]["low"] < wl, "side": "sell"})
+    return pools
 
-    # ---- 1. DAILY BIAS ----
-    daily_bias, _dp, _dc = get_htf_bias(symbol, cache, historical)
-    aligned_4h, bias_4h = check_4h_alignment(symbol, daily_bias, cache, historical)
-    if daily_bias not in ("BULLISH", "BEARISH"):
-        return done("No clear daily bias (no daily BOS/CHoCH yet) - regular mode only trades with the daily bias")
-    items["Daily bias"] = True; direction = daily_bias; notes["Daily bias"] = f"daily structure {daily_bias.lower()}"
-    items["4H agrees"] = bool(aligned_4h); notes["4H agrees"] = f"4H {bias_4h.lower()}"
+def untaken_liquidity(pools, price, side, n=4):
+    """Nearest untaken pools: side 'sell' -> below price, 'buy' -> above price."""
+    if side == "sell": cand = sorted([p for p in pools if p["side"] == "sell" and not p["taken"] and p["level"] < price], key=lambda p: -p["level"])
+    else: cand = sorted([p for p in pools if p["side"] == "buy" and not p["taken"] and p["level"] > price], key=lambda p: p["level"])
+    seen, out = set(), []
+    for p in cand:
+        k = round(p["level"], 5)
+        if k in seen: continue
+        seen.add(k); out.append(p)
+    return out[:n]
 
-    # ---- 2. 1H SMC MAP ----
-    h1_swings = find_swing_points(h1, lookback=SWING_1H)
-    h1_events = detect_structure_events(h1, h1_swings)
-    h1_range = compute_dealing_range(h1_swings, lookback_swings=12, candles=h1, raw_lookback=120)
-    atr_h1 = atr(h1, 14)
-    if not h1_range or not atr_h1: return done("Not enough 1H structure yet", bias=direction)
-    price = h1[-1]["close"]
-    h1_pct = fib_level(h1_range, price) * 100
-    zone = zone_of(h1_range, price)
+def htf_pois(direction, d1, h4, h1, price):
+    """Unmitigated order blocks in the `direction` (daily, 4H, 1H) - e.g. the daily Bu-OB in discount that
+    price is falling toward. Nearest to price first."""
+    out = []
+    for name, cand, lb in (("Daily", d1, 2), ("4H", h4, 3), ("1H", h1, SWING_1H)):
+        if not cand or len(cand) < 30: continue
+        sw = find_swing_points(cand, lb); ev = detect_structure_events(cand, sw)
+        rng = compute_dealing_range(sw, 12, cand, 120 if name == "1H" else 60); a = atr(cand, 14)
+        if not rng or not a: continue
+        poi = find_h1_poi(cand, ev, direction, rng, a, price)
+        if not poi: continue
+        dist = (price - poi["high"]) if direction == "BULLISH" else (poi["low"] - price)
+        if dist < -(poi["high"] - poi["low"]): continue       # price is already beyond it
+        out.append({"tf": name, "low": poi["low"], "high": poi["high"], "dist": dist, "kind": poi["kind"]})
+    out.sort(key=lambda p: abs(p["dist"]))
+    return out
+
+def _fmt_pool(p): return f"{p['name']} {p['level']:.5g}"
+
+def _entry_from_poi(c, direction, poi, pullback_target=None):
+    """Stage 3+4 for ONE direction/POI: tap -> 15m structure shift -> 5m trigger -> structural stop -> room check."""
+    symbol, h1, d1, h4, now, cache, historical = c["symbol"], c["h1"], c["d1"], c["h4"], c["now"], c["cache"], c["historical"]
+    atr_h1, h1_range, h1_swings, h1_events = c["atr_h1"], c["h1_range"], c["h1_swings"], c["h1_events"]
+    pullback = pullback_target is not None
     last_ev = h1_events[-1] if h1_events else None
+    zone = c["zone"]
+    items = {k: False for k in REGULAR_CHECKLIST}; notes = {}
+    items["Daily bias"] = True; notes["Daily bias"] = f"daily {c['daily_bias'].lower()}"
+    items["4H agrees"] = c["bias_4h"] == direction; notes["4H agrees"] = f"4H {c['bias_4h'].lower()}"
     items["1H structure agrees"] = bool(last_ev and last_ev["direction"] == direction)
     notes["1H structure agrees"] = f"last 1H break: {last_ev['kind']} {last_ev['direction'].lower()}" if last_ev else "no 1H break yet"
-    right_side = (zone == "discount") if direction == "BULLISH" else (zone == "premium")
-    items["Right side of range"] = right_side
-    notes["Right side of range"] = f"price at {h1_pct:.0f}% of the 1H range ({zone})"
-    if not right_side:
-        return done(f"Daily bias {direction}, but price is in {zone} ({h1_pct:.0f}% of the 1H range) - waiting for it to {'drop into discount' if direction=='BULLISH' else 'rally into premium'} (no chasing)", bias=direction, entry=price, pct=h1_pct)
+    items["Right side of range"] = (zone == "discount") if direction == "BULLISH" else (zone == "premium")
+    notes["Right side of range"] = f"price at {c['h1_pct']:.0f}% of the 1H range ({zone})"
+    is_sweep = poi.get("kind") == "sweep"
+    poi_txt = (f"1H sweep of {poi['name']} {poi['level']:.5g}" if is_sweep else
+               f"1H {'Bull' if direction=='BULLISH' else 'Bear'} {poi.get('type','OB')} {poi['low']:.5g}-{poi['high']:.5g}")
+    tag = "PULLBACK " if pullback else ""
 
-    poi = find_h1_poi(h1, h1_events, direction, h1_range, atr_h1, price)
-    if not poi:
-        return done(f"Daily bias {direction}, price in {zone}, but no unmitigated 1H order block to trade from", bias=direction, entry=price, pct=h1_pct)
-    gap = (price - poi["high"]) if direction == "BULLISH" else (poi["low"] - price)
-    far = gap > 1.5 * atr_h1
-    poi_txt = f"{'Bull' if direction=='BULLISH' else 'Bear'} OB {poi['low']:.5g}-{poi['high']:.5g}"
-    if far:
-        return done(f"Daily bias {direction}; waiting for price to reach {poi_txt} ({gap/atr_h1:.1f} ATR away)", bias=direction, entry=price, pct=h1_pct,
-                    details={"poi": poi, "waiting_for": "poi"})
+    def out(reason, details=None, score=None):
+        sc = sum(items.values()) if score is None else score
+        d = {"checklist": dict(items), "notes": notes, "regular_mode": True, "poi": poi, "zone": zone, "pullback": pullback}
+        if details: d.update(details)
+        return c["_out"](reason, score=sc, bias=direction, entry=price, pct=h1_pct, details=d, extra={"mode_stage": "regular"})
 
-    # ---- 3. price is near the POI: now (and only now) look at 15m / 5m ----
     m15 = [] if (historical is not None and "15min" not in historical) else (get_values_cached(cache, symbol, "15min", 100, historical)[0] or [])
     m5 = get_values_cached(cache, symbol, "5min", 100, historical)[0] or []
+    price = c["price"]; h1_pct = c["h1_pct"]
     if not m15 and not m5:
-        return done("No 15m/5m data to confirm the entry", bias=direction, entry=price, pct=h1_pct)
+        return out("No 15m/5m data to confirm the entry")
     ltf = m15 or m5
-    price = (m5 or m15)[-1]["close"]
-    h1_pct = fib_level(h1_range, price) * 100
-    # tap = first LTF candle of the current visit into the order block
+    price = (m5 or m15)[-1]["close"]; h1_pct = fib_level(h1_range, price) * 100
     look = ltf[-32:] if m15 else ltf[-96:]
     base = len(ltf) - len(look); tap = None
-    for i, c in enumerate(look):
-        if (direction == "BULLISH" and c["low"] <= poi["high"]) or (direction == "BEARISH" and c["high"] >= poi["low"]):
+    for i, k in enumerate(look):
+        if (direction == "BULLISH" and k["low"] <= poi["high"]) or (direction == "BEARISH" and k["high"] >= poi["low"]):
             tap = base + i; break
     if tap is None:
-        return done(f"Daily bias {direction}; {poi_txt} not tapped yet - waiting", bias=direction, entry=price, pct=h1_pct, details={"poi": poi, "waiting_for": "tap"})
+        return out(f"{tag}{poi_txt} not tapped yet - waiting", {"waiting_for": "tap",
+                   "heads_up": {"key": f"{symbol}|tap|{direction}|{round(poi['low'],5)}", "text": f"{symbol}: price is approaching the {poi_txt}. Watching for a 15m structure shift {direction.lower()} after the tap before any signal."}})
     after_tap = ltf[tap:]
     buf = 0.25 * atr_h1
-    if (direction == "BULLISH" and any(c["close"] < poi["low"] - buf for c in after_tap)) or \
-       (direction == "BEARISH" and any(c["close"] > poi["high"] + buf for c in after_tap)):
-        return done(f"{poi_txt} was closed through after the tap - order block invalidated", bias=direction, entry=price, pct=h1_pct, details={"poi": poi})
+    if (direction == "BULLISH" and any(k["close"] < poi["low"] - buf for k in after_tap)) or \
+       (direction == "BEARISH" and any(k["close"] > poi["high"] + buf for k in after_tap)):
+        return out(f"{poi_txt} was closed through after the tap - order block invalidated")
     items["1H order block tapped"] = True; notes["1H order block tapped"] = f"{poi_txt} tapped"
-
-    # 15m structure shift after the tap (falls back to 5m if no 15m data, e.g. old backtests)
     sw = find_swing_points(ltf, lookback=2); evs = detect_structure_events(ltf, sw)
     mss = [e for e in evs if e["direction"] == direction and e["index"] >= tap and e["index"] >= len(ltf) - (12 if m15 else 36)]
     tf_name = "15m" if m15 else "5m"
-    if mss:
-        items["15m structure shift"] = True; notes["15m structure shift"] = f"{tf_name} {mss[-1]['kind']} {direction.lower()} after the tap"
+    if mss: items["15m structure shift"] = True; notes["15m structure shift"] = f"{tf_name} {mss[-1]['kind']} {direction.lower()} after the tap"
     m5_swings = find_swing_points(m5, lookback=2) if m5 else []
     m5_events = detect_structure_events(m5, m5_swings) if m5 else []
     trig = _m5_trigger(m5, direction, m5_events)
     if trig: items["5m trigger"] = True; notes["5m trigger"] = trig
-
     grab = liquidity_grab(h1, h1_swings, direction, d1)
     if grab: items["Liquidity swept"] = True; notes["Liquidity swept"] = grab
-    fvg = recent_fvg(ltf, direction, max_age=30, after_index=max(tap - 1, 2)) or \
-          recent_fvg(h1, direction, max_age=30)
-    if fvg and (fvg["bottom"] <= poi["high"] + atr_h1 and fvg["top"] >= poi["low"] - atr_h1 or mss):
+    fvg = recent_fvg(ltf, direction, max_age=30, after_index=max(tap - 1, 2)) or recent_fvg(h1, direction, max_age=30)
+    if fvg and ((fvg["bottom"] <= poi["high"] + atr_h1 and fvg["top"] >= poi["low"] - atr_h1) or mss):
         items["FVG / imbalance"] = True; notes["FVG / imbalance"] = f"FVG {fvg['bottom']:.5g}-{fvg['top']:.5g}"
-
-    # the ten strategies, applied to the 1H chart - only votes WITH the daily bias count
     try:
         m5_l = m5 or []
+        sw2 = find_swing_points(h1, 2)
+        h4_sw = find_swing_points(h4, 2) if h4 else []
         x = {"symbol": symbol, "now": now, "price": price, "d1": d1, "h4": h4, "h1": h1, "m5": m5_l,
-             "daily_bias": daily_bias, "bias_4h": bias_4h, "aligned_4h": aligned_4h, "atr_h1": atr_h1,
+             "daily_bias": c["daily_bias"], "bias_4h": c["bias_4h"], "aligned_4h": c["aligned_4h"], "atr_h1": atr_h1,
              "atr_m5": atr(m5_l, 14) if m5_l else None, "rsi_h1": rsi(h1, 14), "adx_h1": adx(h1, 14),
-             "h1_swings": find_swing_points(h1, 2), "h1_events": detect_structure_events(h1, find_swing_points(h1, 2)),
-             "h1_range": h1_range, "h4_range": None, "h4_liq": [], "m5_swings": m5_swings, "m5_events": m5_events,
-             "m5_liq": find_liquidity_zones(m5_swings, 0.001) if m5_swings else [], "m5_patterns": detect_candle(m5_l)[0] if m5_l else [],
-             "h1_patterns": detect_candle(h1)[0], "profile": volume_profile(h1[-100:])}
-        x["h1_liq"] = find_liquidity_zones(x["h1_swings"], 0.0008)
+             "h1_swings": sw2, "h1_events": detect_structure_events(h1, sw2), "h1_range": h1_range,
+             "h4_range": compute_dealing_range(h4_sw, 8, h4) if h4 else None, "h4_liq": find_liquidity_zones(h4_sw, 0.0012) if h4 else [],
+             "m5_swings": m5_swings, "m5_events": m5_events, "m5_liq": find_liquidity_zones(m5_swings, 0.001) if m5_swings else [],
+             "m5_patterns": detect_candle(m5_l)[0] if m5_l else [], "h1_patterns": detect_candle(h1)[0], "profile": volume_profile(h1[-100:])}
+        x["h1_liq"] = find_liquidity_zones(sw2, 0.0008)
         x["h1_sweep"] = check_sweep(x["h1_liq"], h1, lookback_bars=20)
         x["m5_sweep"] = check_sweep(x["m5_liq"], m5_l, lookback_bars=30) if m5_l else None
-        h4_sw = find_swing_points(h4, 2) if h4 else []
-        x["h4_range"] = compute_dealing_range(h4_sw, 8, h4) if h4 else None
-        x["h4_liq"] = find_liquidity_zones(h4_sw, 0.0012) if h4 else []
         votes = {}
         for name, fn in STRATEGY_FUNCS:
             try: votes[name] = fn(x)
@@ -1139,50 +1218,178 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
     agree = [n for n in STRATEGY_NAMES if votes[n][0] == direction]
     against = [n for n in STRATEGY_NAMES if votes[n][0] and votes[n][0] != direction]
     if len(agree) >= 4: items["Strategies agree"] = True
-    notes["Strategies agree"] = f"{len(agree)}/10 with the daily bias" + (f" ({', '.join(agree)})" if agree else "")
-
+    notes["Strategies agree"] = f"{len(agree)}/10 with this direction" + (f" ({', '.join(agree)})" if agree else "")
     score = sum(items.values())
-    common = {"checklist": dict(items), "notes": notes, "regular_mode": True, "poi": poi, "zone": zone,
-              "votes": {n: votes[n][0] for n in STRATEGY_NAMES}, "strategies_agree": agree, "strategies_against": against}
+    common = {"votes": {n: votes[n][0] for n in STRATEGY_NAMES}, "strategies_agree": agree, "strategies_against": against}
     if not items["15m structure shift"]:
-        return _out(f"{poi_txt} tapped, but no {tf_name} structure shift {direction.lower()} yet - waiting for confirmation ({score}/10)",
-                    score=score, bias=direction, entry=price, pct=h1_pct, details={**common, "waiting_for": "confirmation"}, extra={"mode_stage": "regular"})
+        return out(f"{tag}{poi_txt} tapped, but no {tf_name} structure shift {direction.lower()} yet - waiting for confirmation ({score}/10)", {**common, "waiting_for": "confirmation"})
+    if pullback and not is_sweep and not items["1H structure agrees"]:
+        return out(f"Pullback {direction.lower()} setup rejected: the 1H structure hasn't turned {direction.lower()} yet", common)
 
-    # ---- 4. structural stop, room to target, size sanity ----
     entry = price
     if direction == "BULLISH":
-        extreme = min([poi["low"]] + [c["low"] for c in after_tap])
-        stop = extreme - buf; risk = entry - stop
-        target = h1_range["high"]; room = target - entry
+        extreme = min([poi["low"]] + [k["low"] for k in after_tap]); stop = extreme - buf; risk = entry - stop
     else:
-        extreme = max([poi["high"]] + [c["high"] for c in after_tap])
-        stop = extreme + buf; risk = stop - entry
-        target = h1_range["low"]; room = entry - target
-    if risk <= 0:
-        return _out("Rejected: invalid stop distance", score=score, bias=direction, entry=entry, pct=h1_pct, details=common, extra={"mode_stage": "regular"})
-    if risk > 3.0 * atr_h1:
-        return _out(f"Stop would be {risk/atr_h1:.1f} ATR wide (beyond the order block) - setup too wide to trade", score=score, bias=direction, entry=entry, pct=h1_pct, details=common, extra={"mode_stage": "regular"})
-    if room < min_rr * risk:
-        return _out(f"Only {room/risk:.1f}R of room to the 1H range target - need {min_rr:.1f}R", score=score, bias=direction, entry=entry, pct=h1_pct, details=common, extra={"mode_stage": "regular"})
-    if score < min_score:
-        return _out(f"{score}/10 checklist - need {min_score}+ ({', '.join(k for k, v in items.items() if not v)} missing)", score=score, bias=direction, entry=entry, pct=h1_pct, details=common, extra={"mode_stage": "regular"})
-
-    tp = entry + risk * rr if direction == "BULLISH" else entry - risk * rr
-    why = [f"Daily {direction.lower()} bias" + (", 4H agrees" if items["4H agrees"] else ""),
-           f"1H: price in {zone} ({h1_pct:.0f}% of range), {poi_txt} tapped"]
+        extreme = max([poi["high"]] + [k["high"] for k in after_tap]); stop = extreme + buf; risk = stop - entry
+    if pullback:
+        # take the first (nearest, order blocks before liquidity pools) target that leaves enough room; the TP sits
+        # AT an order block's near edge, or just before an untaken liquidity pool (which is where price is drawn to)
+        cands_t = pullback_target if isinstance(pullback_target, list) else [pullback_target]
+        pullback_target = None; target = None
+        for t in cands_t:
+            if t["tf"] == "liquidity": tl = t["low"] + (0.1 * atr_h1 if direction == "BEARISH" else -0.1 * atr_h1)
+            else: tl = t["high"] if direction == "BEARISH" else t["low"]
+            rm = (entry - tl) if direction == "BEARISH" else (tl - entry)
+            if risk > 0 and rm >= min_rr_of(c) * risk: pullback_target, target, room = t, tl, rm; break
+        if pullback_target is None:
+            t0 = cands_t[0]; tl0 = t0["high"] if (direction == "BEARISH" and t0["tf"] != "liquidity") else (t0["low"] if t0["tf"] != "liquidity" else t0["low"])
+            rm0 = ((entry - tl0) if direction == "BEARISH" else (tl0 - entry))
+            return out(f"Only {max(rm0,0)/risk:.1f}R of room to the nearest target - need {min_rr_of(c):.1f}R" if risk > 0 else "Rejected: invalid stop distance", common)
+    else:
+        target = h1_range["high"] if direction == "BULLISH" else h1_range["low"]
+        room = (target - entry) if direction == "BULLISH" else (entry - target)
+    if risk <= 0: return out("Rejected: invalid stop distance", common)
+    if risk > 3.0 * atr_h1: return out(f"Stop would be {risk/atr_h1:.1f} ATR wide (beyond the order block) - setup too wide to trade", common)
+    if room < min_rr_of(c) * risk: return out(f"Only {room/risk:.1f}R of room to the target - need {min_rr_of(c):.1f}R", common)
+    if score < c["min_score"]:
+        return out(f"{score}/10 checklist - need {c['min_score']}+ ({', '.join(k for k, v in items.items() if not v)} missing)", common)
+    rr = c["rr"]
+    tp = target if pullback else (entry + risk * rr if direction == "BULLISH" else entry - risk * rr)
+    if pullback:
+        tgt_desc = (f"the untaken {pullback_target['name']} {pullback_target['low']:.5g}" if pullback_target["tf"] == "liquidity" else
+                    f"the {pullback_target['tf']} {'Bull' if c['daily_bias']=='BULLISH' else 'Bear'} OB {pullback_target['low']:.5g}-{pullback_target['high']:.5g}")
+        why = [f"PULLBACK {direction.lower()} with the 1H move, against the daily {c['daily_bias'].lower()} bias: price is heading toward {tgt_desc}",
+               f"1H: {poi_txt}" + (" then rejected" if is_sweep else " tapped")]
+    else: why = [f"Daily {direction.lower()} bias" + (", 4H agrees" if items["4H agrees"] else ""), f"1H: price in {zone} ({h1_pct:.0f}% of range), {poi_txt} tapped"]
     if grab: why.append(grab)
     why.append(notes["15m structure shift"] + (f", {trig}" if trig else ""))
     why.append(f"{len(agree)}/10 strategies agree")
-    why.append(f"stop beyond the order block at {stop:.5g}; 1H range target {target:.5g} ({room/risk:.1f}R room)")
+    why.append(f"stop beyond the order block at {stop:.5g}; target {target:.5g} ({room/risk:.1f}R)")
+    if pullback: why.append("this trades the 1H move toward the target while the daily bias is still " + c['daily_bias'].lower() + " - take profit at the target, then look for the trade back in the daily direction")
     return {
-        "symbol": symbol, "signal": True, "score": score, "bias": direction, "bias_4h": bias_4h, "entry": entry,
-        "stop_loss": stop, "take_profit": tp, "risk_reward": rr, "premium_pct": h1_pct,
-        "reason": f"{score}/10 SMC checklist: " + ", ".join(k for k, v in items.items() if v),
-        "rationale": ". ".join(why) + ".", "confluence": " | ".join(k for k, v in items.items() if v),
-        "details": {**common, "stop": stop, "target_liquidity": target, "room_r": round(room / risk, 2), "tap_index": tap},
-        "mode": "regular", "structural": True, "mode_stage": "regular",
+        "symbol": symbol, "signal": True, "score": score, "bias": direction, "bias_4h": c["bias_4h"], "entry": entry,
+        "stop_loss": stop, "take_profit": tp, "risk_reward": round(abs(tp - entry) / risk, 2), "premium_pct": h1_pct,
+        "reason": f"{tag}{score}/10 SMC checklist: " + ", ".join(k for k, v in items.items() if v),
+        "rationale": ". ".join(why) + ".", "confluence": ("PULLBACK | " if pullback else "") + " | ".join(k for k, v in items.items() if v),
+        "details": {"checklist": dict(items), "notes": notes, "regular_mode": True, "poi": poi, "zone": zone, "pullback": pullback,
+                    **common, "stop": stop, "target_liquidity": target, "room_r": round(room / risk, 2), "tap_index": tap},
+        "mode": "regular", "structural": True, "mode_stage": "regular", "pullback": pullback, "tp_is_target": pullback,
         "factors": {**{n: (votes[n][0] == direction) for n in STRATEGY_NAMES}, "zone": zone, "zone_veto_blocked": False},
     }
+
+def min_rr_of(c): return c["min_rr"]
+
+def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h4, h1, _out):
+    c = {"symbol": symbol, "user_settings": user_settings, "historical": historical, "cache": cache, "now": now,
+         "d1": d1, "h4": h4, "h1": h1, "_out": _out,
+         "rr": float(user_settings.get("rr_ratio", 2.0) or 2.0), "min_rr": float(user_settings.get("min_risk_reward", 1.5) or 1.5),
+         "min_score": w.get("regular_min_score", 6)}
+    allow_pullback = bool(user_settings.get("pullback_trades", True))
+
+    def wait(reason, bias="NEUTRAL", entry=0, pct=50, score=0, details=None):
+        d = {"regular_mode": True}
+        if details: d.update(details)
+        return _out(reason, score=score, bias=bias, entry=entry, pct=pct, details=d, extra={"mode_stage": "regular"})
+
+    daily_bias, daily_pct, _dc = get_htf_bias(symbol, cache, historical)
+    aligned_4h, bias_4h = check_4h_alignment(symbol, daily_bias, cache, historical)
+    if daily_bias not in ("BULLISH", "BEARISH"):
+        return wait("No clear daily bias (no daily BOS/CHoCH yet) - regular mode only trades with the daily bias")
+    direction = daily_bias
+    h1_swings = find_swing_points(h1, lookback=SWING_1H)
+    h1_events = detect_structure_events(h1, h1_swings)
+    h1_range = compute_dealing_range(h1_swings, lookback_swings=12, candles=h1, raw_lookback=120)
+    atr_h1 = atr(h1, 14)
+    if not h1_range or not atr_h1: return wait("Not enough 1H structure yet", bias=direction)
+    price = h1[-1]["close"]; h1_pct = fib_level(h1_range, price) * 100; zone = zone_of(h1_range, price)
+    c.update(daily_bias=daily_bias, aligned_4h=aligned_4h, bias_4h=bias_4h, h1_swings=h1_swings, h1_events=h1_events,
+             h1_range=h1_range, atr_h1=atr_h1, price=price, h1_pct=h1_pct, zone=zone)
+    base_items = {k: False for k in REGULAR_CHECKLIST}; base_items["Daily bias"] = True
+    base_items["4H agrees"] = aligned_4h
+    base_items["1H structure agrees"] = bool(h1_events and h1_events[-1]["direction"] == direction)
+    right_side = (zone == "discount") if direction == "BULLISH" else (zone == "premium")
+    base_items["Right side of range"] = right_side
+    pools = liquidity_pools(h1, h1_swings, d1)
+    want_side = "sell" if direction == "BULLISH" else "buy"
+    liq = untaken_liquidity(pools, price, want_side)
+    liq_txt = (" Untaken liquidity on the way: " + ", ".join(_fmt_pool(p) for p in liq) + ".") if liq else ""
+    dz = f"{'discount' if daily_pct < 50 else 'premium'} {daily_pct:.0f}% of the daily range"
+
+    # ---- CONTINUATION: 1H price is in the right half -> look for the 1H order block entry ----
+    if right_side:
+        poi = best_poi(h1, h1_events, direction, h1_range, atr_h1, price)
+        if poi:
+            gap = (price - poi["high"]) if direction == "BULLISH" else (poi["low"] - price)
+            poi_txt = f"{'Bull' if direction=='BULLISH' else 'Bear'} {poi.get('type','OB')} {poi['low']:.5g}-{poi['high']:.5g}"
+            if gap > 1.5 * atr_h1:
+                return wait(f"Daily {direction.lower()} (price in {dz}); 1H in {zone} - waiting for price to reach the 1H {poi_txt} ({gap/atr_h1:.1f} ATR away).{liq_txt}",
+                            bias=direction, entry=price, pct=h1_pct, score=sum(base_items.values()), details={"poi": poi, "waiting_for": "poi", "liquidity": [_fmt_pool(p) for p in liq]})
+            return _entry_from_poi(c, direction, poi)
+
+    # ---- RETRACEMENT PHASE: daily bias intact, but the 1H is on the wrong side of its range (e.g. daily bullish, 1H in premium
+    #      falling toward an untaken bullish order block). The bot knows WHERE it is heading and what liquidity is left to take. ----
+    targets = htf_pois(direction, d1, h4, h1, price)
+    tgt = targets[0] if targets else None
+    if tgt:
+        pips = abs(tgt["dist"]); tgt_txt = f"{tgt['tf']} {'Bull' if direction=='BULLISH' else 'Bear'} OB {tgt['low']:.5g}-{tgt['high']:.5g} ({abs(tgt['dist'])/atr_h1:.1f} ATR {'below' if direction=='BULLISH' else 'above'})"
+        reason = (f"Daily {direction.lower()} (price in {dz}), but the 1H is in {zone} ({h1_pct:.0f}% of its range): price is retracing toward the {tgt_txt}"
+                  f".{liq_txt} Waiting for the tap + a 15m shift {direction.lower()}.")
+        det = {"phase": "retracement", "target_poi": tgt, "all_targets": targets, "liquidity": [_fmt_pool(p) for p in liq], "waiting_for": "retracement",
+               "heads_up": {"key": f"{symbol}|retr|{direction}|{tgt['tf']}|{round(tgt['low'],5)}",
+                            "text": f"{symbol}: daily bias is {direction.lower()}, but the 1H is retracing - price is heading toward the {tgt_txt}.{liq_txt}\nThe bot will only signal once price taps it and the 15m shifts {direction.lower()}."}}
+    else:
+        reason = f"Daily {direction.lower()} (price in {dz}), 1H in {zone} ({h1_pct:.0f}% of range) and no unmitigated {direction.lower()} order block to trade from yet - waiting"
+        det = {"phase": "retracement", "waiting_for": "poi"}
+    if allow_pullback:
+        counter = _opp(direction)
+        ptarget = list(targets) + [{"tf": "liquidity", "low": lp["level"], "high": lp["level"], "dist": abs(price - lp["level"]), "kind": "liq", "name": lp["name"]} for lp in liq]
+        ptarget = ptarget or None
+        c_right = (zone == "premium") if counter == "BEARISH" else (zone == "discount")
+        if ptarget and c_right:
+            cands = []
+            cpoi = find_h1_poi(h1, h1_events, counter, h1_range, atr_h1, price)
+            if cpoi: cands.append({**cpoi, "type": "OB"})
+            cmb = find_mitigation_block(h1, h1_events, counter, h1_range, atr_h1, price)
+            if cmb: cands.append(cmb)
+            sp = find_grab(h1, h1_swings, counter, d1)
+            if sp and (sp["high"] - sp["low"]) <= 3.0 * atr_h1: cands.append(sp)
+            for cp in cands:
+                cgap = (price - cp["high"]) if counter == "BULLISH" else (cp["low"] - price)
+                if cp.get("kind") != "sweep" and cgap > 1.5 * atr_h1: continue
+                res = _entry_from_poi(c, counter, cp, pullback_target=ptarget)
+                if res.get("signal"): return res
+                det["pullback_status"] = res.get("reason"); reason += f" Pullback {counter.lower()} check: {res.get('reason')}"
+                if (res.get("details") or {}).get("heads_up") and "heads_up" not in det: det["heads_up"] = res["details"]["heads_up"]
+                break
+    return wait(reason, bias=direction, entry=price, pct=h1_pct, score=sum(base_items.values()), details=det)
+
+def market_map(symbol, historical=None):
+    """Everything the bot 'sees' on one symbol: daily bias, where price sits on D1/4H/1H ranges, unmitigated order
+    blocks on every timeframe (both directions), untaken liquidity above and below, and the current phase."""
+    cache = {}
+    d1 = get_values_cached(cache, symbol, "1day", 100, historical)[0] or []
+    h4 = get_values_cached(cache, symbol, "4h", 100, historical)[0] or []
+    h1 = get_values_cached(cache, symbol, "1h", 250, historical)[0] or []
+    if len(h1) < 30 or len(d1) < 30: return {"symbol": symbol, "error": "not enough candle data (check the Twelve Data key)"}
+    price = h1[-1]["close"]
+    daily_bias, daily_pct, _ = get_htf_bias(symbol, cache, historical)
+    _al, bias_4h = check_4h_alignment(symbol, daily_bias, cache, historical)
+    sw = find_swing_points(h1, SWING_1H); ev = detect_structure_events(h1, sw)
+    rng = compute_dealing_range(sw, 12, h1, 120); atr_h1 = atr(h1, 14)
+    h1_pct = fib_level(rng, price) * 100 if rng else 50
+    tf_zone = {}
+    for name, cand in (("Daily", d1), ("4H", h4), ("1H", h1)):
+        if not cand: continue
+        s2 = find_swing_points(cand, 2 if name == "Daily" else (3 if name == "4H" else SWING_1H))
+        r2 = compute_dealing_range(s2, 12, cand, 60 if name != "1H" else 120)
+        if r2: tf_zone[name] = {"pct": round(fib_level(r2, price) * 100), "zone": zone_of(r2, price), "high": r2["high"], "low": r2["low"]}
+    pools = liquidity_pools(h1, sw, d1)
+    return {"symbol": symbol, "price": price, "daily_bias": daily_bias, "bias_4h": bias_4h, "atr_h1": atr_h1,
+            "zones": tf_zone, "last_1h_break": (f"{ev[-1]['kind']} {ev[-1]['direction'].lower()} @ {ev[-1]['level']:.5g}" if ev else None),
+            "bull_obs": htf_pois("BULLISH", d1, h4, h1, price), "bear_obs": htf_pois("BEARISH", d1, h4, h1, price),
+            "liquidity_below": untaken_liquidity(pools, price, "sell", 6), "liquidity_above": untaken_liquidity(pools, price, "buy", 6),
+            "taken_recently": [p for p in pools if p["taken"] and p["name"] in ("previous-day high", "previous-day low", "5-day high", "5-day low")]}
+
 
 # ================= ORCHESTRATION =================
 def full_multi_tf_analysis(symbol, user_settings=None, historical=None, as_of=None, weights=None):
