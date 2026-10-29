@@ -2085,6 +2085,23 @@ def cron_news_check():
     return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "auto_flagged": flagged_total,
                     "leans_logged": leans_logged, "digests": digests, "scored": scored, "calendar": nc.status_summary()})
 
+def check_trade_outcome(entry, candles, sl, tp):
+    """Scan EVERY 5m candle since the trade was taken and use each candle's HIGH/LOW (wicks count) - the old check
+    only looked at the latest close, so a spike through TP that pulled back before the cron ran was missed.
+    If one candle touches both levels we can't know the order, so it counts as a LOSS (worst case)."""
+    is_bull = "BULLISH" in str(entry.get("bias", "")).upper()
+    opened = _safe_dt(entry.get("time", ""))
+    for k in candles:
+        kt = _safe_dt(str(k.get("time", "")).replace(" ", "T"))
+        if opened and kt and kt < opened:      # candles that opened before the trade was taken
+            continue
+        hi, lo = k["high"], k["low"]
+        hit_tp = hi >= tp if is_bull else lo <= tp
+        hit_sl = lo <= sl if is_bull else hi >= sl
+        if hit_sl: return "LOSS", sl
+        if hit_tp: return "WIN", tp
+    return None, None
+
 @app.route("/cron/track-check")
 def cron_track_check():
     """Checks each user's tracked (TOOK'd) signal against the latest price
@@ -2105,6 +2122,20 @@ def cron_track_check():
     tracked = load_json(TRACK_FILE, dict)
     now = datetime.now()
     resolved = []
+    system = load_json(SYSTEM_FILE, dict); system["last_track_check"] = now.isoformat(); save_json(SYSTEM_FILE, system)   # proves the cron is firing
+
+    # one candle fetch per symbol per run, deep enough to cover the oldest open trade on that symbol
+    need = {}
+    for e in tracked.values():
+        opened = _safe_dt(e.get("time", ""))
+        hrs = ((now - opened).total_seconds() / 3600) if opened else 24
+        need[e.get("symbol")] = max(need.get(e.get("symbol"), 0), hrs)
+    candle_cache = {}
+    def candles_for(sym):
+        if sym not in candle_cache:
+            n = int(min(5000, max(30, need.get(sym, 24) * 12 + 24)))
+            candle_cache[sym] = eng.get_values(sym, "5min", n)[0] or []
+        return candle_cache[sym]
 
     for signal_id in list(tracked.keys()):
         entry = tracked[signal_id]
@@ -2114,19 +2145,10 @@ def cron_track_check():
             bias = entry.get("bias",""); risk_amt = float(entry.get("risk_amt",0) or 0); rr = float(entry.get("rr",2.5) or 2.5)
         except (TypeError, ValueError):
             continue
-        candles, err = eng.get_values(sym, "5min", 2)
+        candles = candles_for(sym)
         if not candles:
             continue
-        current = candles[-1]["close"]
-        is_bull = "BULLISH" in bias.upper()
-
-        outcome = None
-        if is_bull:
-            if current >= tp: outcome = "WIN"
-            elif current <= sl: outcome = "LOSS"
-        else:
-            if current <= tp: outcome = "WIN"
-            elif current >= sl: outcome = "LOSS"
+        outcome, current = check_trade_outcome(entry, candles, sl, tp)
 
         if outcome:
             pnl = round(risk_amt * rr, 2) if outcome == "WIN" else round(-risk_amt, 2)
