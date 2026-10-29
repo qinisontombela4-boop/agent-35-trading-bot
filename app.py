@@ -215,7 +215,7 @@ def ensure_files():
         save_json(AUTH_FILE, {"admin@agent35.com":{"email":"admin@agent35.com","name":"Master Creator","password":hash_pwd("Agent35!"),"account_size":142.0,"total_profit":-1.42,"plan_status":"ACTIVE lifetime - CREATOR","referred_by":"","expires":(datetime.now()+timedelta(days=36500)).isoformat(),"created":datetime.now().isoformat(),"reset_token":None,"reset_token_expires":None,"ref_code":"ADMIN35"}})
     for fp in [USERS_FILE, REFERRAL_FILE, REF_CODE_FILE, SETTINGS_FILE, TG_FILE, TEMP_CHAT_FILE, NEWS_ALERTED_FILE, PENDING_FILE]:
         if not load_json(fp, dict): save_json(fp, {})
-    if not load_json(DAILY_COUNT_FILE, dict): save_json(DAILY_COUNT_FILE, {"date": datetime.now().strftime("%Y-%m-%d"), "count": 0})
+    pass   # daily counts are stored per user ({email: {date, count}}); the old global {"date","count"} seed broke /cron/daily-reset
     if not load_json(JOURNAL_FILE, list): save_json(JOURNAL_FILE, [])
     if not load_json(TRACK_FILE, dict): save_json(TRACK_FILE, {})
     if not load_json(SYSTEM_FILE, dict): save_json(SYSTEM_FILE, {"last_scan":None,"total_scans":0,"total_signals":0,"system_up_since":datetime.now().isoformat()})
@@ -384,6 +384,7 @@ def get_daily_signal_count(email):
     # the "no signals after 10:30 SAST" bug.
     d = load_json(DAILY_COUNT_FILE, dict)
     user_entry = d.get(email, {})
+    if not isinstance(user_entry, dict): user_entry = {}
     today = datetime.now().strftime("%Y-%m-%d")
     if user_entry.get("date") != today:
         return 0  # previous day's count — self-heals even if the reset cron missed a run
@@ -393,7 +394,7 @@ def increment_daily_signal_count(email):
     d = load_json(DAILY_COUNT_FILE, dict)
     today = datetime.now().strftime("%Y-%m-%d")
     user_entry = d.get(email, {})
-    if user_entry.get("date") != today:
+    if not isinstance(user_entry, dict) or user_entry.get("date") != today:
         user_entry = {"date": today, "count": 0}
     user_entry["count"] = user_entry.get("count", 0) + 1
     d[email] = user_entry
@@ -2240,7 +2241,7 @@ def cron_daily_reset():
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
     today = datetime.now().strftime("%Y-%m-%d")
     prev = load_json(DAILY_COUNT_FILE, dict)
-    prev_counts = {email: v.get("count",0) for email, v in prev.items() if v.get("date")==today}
+    prev_counts = {email: v.get("count",0) for email, v in prev.items() if isinstance(v, dict) and v.get("date")==today}
     save_json(DAILY_COUNT_FILE, {})  # every user's count self-heals to 0 on next read anyway
     return jsonify({"reset": True, "date": today, "previous_counts": prev_counts, "limit": MAX_SIGNALS_PER_DAY})
 
