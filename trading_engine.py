@@ -33,19 +33,78 @@ def get_next_key():
     if not KEYS: return None
     key=KEYS[KEY_INDEX % len(KEYS)]; KEY_INDEX+=1; return key
 
+# ---- Twelve Data budget guard -------------------------------------------------------------------------------
+# The free plan allows 8 calls/minute and 800 credits/day PER KEY. Before this guard, a scan that needed more than
+# that simply got errors back and the bot read them as "no H1 data" = "no signal" - silently, for the rest of the day
+# (credits reset at 00:00 UTC = 02:00 SAST, which is exactly when signals used to reappear). Now every call is counted,
+# a local budget stops the bot from hammering the API, quota errors pause the feed until the right moment, and the
+# state is exposed through td_budget_status() so /health and the admin alert can say so out loud.
+_TD = {"day": None, "calls": 0, "mins": [], "blocked_until": 0.0, "blocked_reason": "", "last_error": None,
+       "errors_today": 0, "quota_hits_today": 0}
+
+def _utc_day(ts=None):
+    return datetime.fromtimestamp(ts if ts is not None else time.time(), timezone.utc).strftime("%Y-%m-%d")
+
+def _td_limits():
+    n = max(1, len(KEYS))
+    try: per_min = int(os.getenv("TD_CALLS_PER_MIN", "8"))
+    except ValueError: per_min = 8
+    try: per_day = int(os.getenv("TD_DAILY_CREDITS", "800"))
+    except ValueError: per_day = 800
+    return per_min * n, per_day * n
+
+def _td_roll_day(now):
+    d = _utc_day(now)
+    if _TD["day"] != d:
+        _TD.update({"day": d, "calls": 0, "mins": [], "errors_today": 0, "quota_hits_today": 0})
+        if _TD["blocked_reason"] == "daily": _TD["blocked_until"] = 0.0
+
+def td_budget_status():
+    now = time.time(); _td_roll_day(now); per_min, per_day = _td_limits()
+    mins = [t for t in _TD["mins"] if now - t < 60]
+    return {"day_utc": _TD["day"], "calls_today": _TD["calls"], "daily_limit": per_day,
+            "calls_last_minute": len(mins), "per_minute_limit": per_min, "keys": len(KEYS),
+            "paused": now < _TD["blocked_until"], "paused_reason": _TD["blocked_reason"] if now < _TD["blocked_until"] else "",
+            "quota_hits_today": _TD["quota_hits_today"], "errors_today": _TD["errors_today"], "last_error": _TD["last_error"]}
+
+def td_budget_available():
+    """True when one more API call is allowed right now (used by the scan to stop early instead of burning errors)."""
+    now = time.time(); _td_roll_day(now); per_min, per_day = _td_limits()
+    if now < _TD["blocked_until"] or _TD["calls"] >= per_day: return False
+    return len([t for t in _TD["mins"] if now - t < 60]) < per_min
+
+def _td_note_error(r, now):
+    msg = str((r or {}).get("message", r))[:200]; low = msg.lower(); _TD["last_error"] = msg; _TD["errors_today"] += 1
+    if (r or {}).get("code") == 429 or "credits" in low or "limit" in low:
+        _TD["quota_hits_today"] += 1
+        if "day" in low and "minute" not in low:     # out of credits for the day -> nothing works until 00:00 UTC
+            nxt = (int(now // 86400) + 1) * 86400 + 5
+            _TD["blocked_until"] = nxt; _TD["blocked_reason"] = "daily"
+        else:                                          # per-minute limit -> back off for the rest of the minute
+            _TD["blocked_until"] = max(_TD["blocked_until"], now + 20); _TD["blocked_reason"] = "minute"
+
 def td_request(symbol, interval, outputsize=50):
     if not KEYS: return {"code":500,"message":"No keys"}
+    now = time.time(); _td_roll_day(now); per_min, per_day = _td_limits()
+    if now < _TD["blocked_until"]:
+        return {"code":429,"message":f"data feed paused ({_TD['blocked_reason']} limit) - {_TD['last_error'] or ''}","local":True}
+    _TD["mins"] = [t for t in _TD["mins"] if now - t < 60]
+    if len(_TD["mins"]) >= per_min: return {"code":429,"message":"per-minute data budget used - will retry on the next run","local":True}
+    if _TD["calls"] >= per_day: return {"code":429,"message":"daily data budget used (credits reset 00:00 UTC)","local":True}
     td_symbol=SYMBOL_MAP.get(symbol,symbol); last_error=None
     for _ in range(len(KEYS)):
         key=get_next_key()
         url=f"https://api.twelvedata.com/time_series?symbol={td_symbol}&interval={interval}&outputsize={outputsize}&timezone=UTC&apikey={key}"
         try:
+            _TD["calls"] += 1; _TD["mins"].append(time.time())
             r=requests.get(url,timeout=12).json()
             if "code" in r and r["code"]==429: last_error=r; continue
             if "values" in r: return r
             last_error=r
         except Exception as e: last_error={"code":500,"message":str(e)}; continue
-    return last_error if last_error else {"code":500,"message":"fail"}
+    last_error = last_error if last_error else {"code":500,"message":"fail"}
+    _td_note_error(last_error, time.time())
+    return last_error
 
 def get_values(symbol, interval, outputsize=50):
     data=td_request(symbol, interval, outputsize)
@@ -61,7 +120,18 @@ def get_values(symbol, interval, outputsize=50):
 # guarantees h1_ob and multi_ob score off the SAME 1h candles, not two
 # separately-fetched (and possibly slightly different) sets. ----
 _DATA_CACHE = {}
-_TTL = {"1day": 3*3600, "4h": 30*60, "1h": 10*60, "15min": 3*60, "5min": 90}   # seconds a live candle set is reused
+_BAR_SECONDS = {"1day": 86400, "4h": 14400, "1h": 3600, "15min": 900, "5min": 300}
+# how old a cached copy may be and still be used when a fresh fetch FAILS (budget / quota): the higher timeframes barely
+# change, so serving them stale is far better than reporting "no data"; the entry timeframes get only a short grace.
+_MAX_STALE = {"1day": 36*3600, "4h": 12*3600, "1h": 3*3600, "15min": 30*60, "5min": 10*60}
+
+def _cache_fresh(interval, stored_at, now):
+    """A cached candle set stays valid until the NEXT bar of that timeframe opens (+20s for the feed to publish it).
+    Daily/4H/1H data therefore costs 1 / 6 / 24 calls per symbol per day instead of one per scan."""
+    bar = _BAR_SECONDS.get(interval, 120)
+    return int((stored_at - 20) // bar) == int((now - 20) // bar)
+
+cache_fresh = _cache_fresh   # public alias (names starting with _ are not exported through the trading_engine shim)
 
 def get_values_cached(cache, symbol, interval, outputsize=50, historical=None):
     # BACKTEST SUPPORT: if `historical` provides pre-fetched candles for this
@@ -74,15 +144,22 @@ def get_values_cached(cache, symbol, interval, outputsize=50, historical=None):
         return (candles[-outputsize:] if outputsize else candles), None
     key=(symbol, interval, outputsize)
     if key in cache: return cache[key]
-    if not historical:   # live: reuse recent fetches across scans/users so the API quota lasts (daily/4h barely change)
+    hit = None
+    if not historical:   # live: reuse recent fetches across scans/users so the API quota lasts
         hit = _DATA_CACHE.get((symbol, interval))
-        if hit and time.time() - hit[0] < _TTL.get(interval, 120) and len(hit[1]) >= min(outputsize, 30):
+        if hit and _cache_fresh(interval, hit[0], time.time()) and len(hit[1]) >= min(outputsize, 30):
             return hit[1][-outputsize:], None
     # reuse an earlier, larger fetch of the same symbol+interval (no extra API request)
     for (s, i, o), (cached_candles, _err) in list(cache.items()):
         if s == symbol and i == interval and cached_candles and o >= outputsize:
             return cached_candles[-outputsize:], None
     result = get_values(symbol, interval, outputsize)
+    if not result or not result[0]:
+        # fetch failed: fall back to the last good copy if it is not too old
+        if hit and time.time() - hit[0] < _MAX_STALE.get(interval, 600) and len(hit[1]) >= min(outputsize, 30):
+            return hit[1][-outputsize:], None
+        cache[key] = result
+        return result
     cache[key] = result
     if not historical and result and result[0]:
         _DATA_CACHE[(symbol, interval)] = (time.time(), result[0])
@@ -1231,6 +1308,9 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
         extreme = min([poi["low"]] + [k["low"] for k in after_tap]); stop = extreme - buf; risk = entry - stop
     else:
         extreme = max([poi["high"]] + [k["high"] for k in after_tap]); stop = extreme + buf; risk = stop - entry
+    min_risk = 0.5 * atr_h1   # stop floor: a stop tighter than half a 1H ATR sits inside normal noise (seen in backtests as 2-5 pip stops)
+    if 0 < risk < min_risk:
+        risk = min_risk; stop = entry - risk if direction == "BULLISH" else entry + risk
     if pullback:
         # take the first (nearest, order blocks before liquidity pools) target that leaves enough room; the TP sits
         # AT an order block's near edge, or just before an untaken liquidity pool (which is where price is drawn to)
@@ -1293,6 +1373,8 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
 
     daily_bias, daily_pct, _dc = get_htf_bias(symbol, cache, historical)
     aligned_4h, bias_4h = check_4h_alignment(symbol, daily_bias, cache, historical)
+    if not d1 or len(d1) < 30:
+        return _out("No daily data" + (f" ({str((_TD.get('last_error') or ''))[:90]})" if _TD.get("last_error") else ""), details={"data_error": True})
     if daily_bias not in ("BULLISH", "BEARISH"):
         return wait("No clear daily bias (no daily BOS/CHoCH yet) - regular mode only trades with the daily bias")
     direction = daily_bias
@@ -1425,7 +1507,7 @@ def full_multi_tf_analysis(symbol, user_settings=None, historical=None, as_of=No
     h1, _e = get_values_cached(cache, symbol, "1h", 250, historical)
     d1, h4 = d1 or [], h4 or []
     if not h1 or len(h1) < 30:
-        return _out("No H1 data")
+        return _out("No H1 data" + (f" ({str((_e or {}).get('message', ''))[:90]})" if _e else ""), details={"data_error": True})
     if mode != "scalp":   # regular (SMC) mode: daily bias -> 1H SMC -> 15m/5m entry (fetches 15m/5m only when price is at the 1H order block)
         return _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h4, h1, _out)
     m5, _e = get_values_cached(cache, symbol, "5min", 100, historical)
