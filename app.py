@@ -30,6 +30,21 @@ if not CREATOR_SECRET:
 
 import time
 import trading_engine as eng
+
+# Version guard: app.py and the engine file are deployed separately, and a half-updated deploy (new app.py, old engine)
+# used to crash every /cron/scan with "no attribute td_budget_status". These wrappers keep the app running if the engine
+# file is older, and ENGINE_OUTDATED makes the System Check page say so plainly.
+ENGINE_OUTDATED = not all(hasattr(eng, n) for n in ("td_budget_status", "td_budget_available", "cache_fresh"))
+if ENGINE_OUTDATED:
+    print("[STARTUP] WARNING: smc_trading_engine_v24.py is OLDER than app.py (no data-credit guard). Deploy both files together.", file=sys.stderr)
+def td_status():
+    if hasattr(eng, "td_budget_status"): return td_status()
+    return {"day_utc": None, "calls_today": 0, "daily_limit": 800, "calls_last_minute": 0, "per_minute_limit": 8, "keys": len(getattr(eng, "KEYS", [])),
+            "paused": False, "paused_reason": "", "quota_hits_today": 0, "errors_today": 0, "last_error": "engine file is outdated - credits are not being counted"}
+def td_available(): return td_available() if hasattr(eng, "td_budget_available") else True
+def td_cache_fresh(interval, stored_at, now_ts):
+    if hasattr(eng, "cache_fresh"): return eng.cache_fresh(interval, stored_at, now_ts)
+    return now_ts - stored_at < {"1h": 3600, "15min": 900}.get(interval, 300)
 import news_calendar as nc
 
 if not os.getenv("CRON_SECRET"):
@@ -2146,7 +2161,7 @@ def cron_track_check():
         if young.get(sym, 0) >= 24: iv, n = "1h", int(min(5000, need.get(sym, 24) + 6))
         else:                        iv, n = "15min", int(min(5000, max(30, need.get(sym, 24) * 4 + 8)))
         hit = _TRACK_CANDLES.get((sym, iv)); now_ts = time.time()
-        if hit and hit[2] >= n and eng.cache_fresh(iv, hit[0], now_ts): return hit[1]
+        if hit and hit[2] >= n and td_cache_fresh(iv, hit[0], now_ts): return hit[1]
         got = eng.get_values(sym, iv, n)[0]
         if got:
             _TRACK_CANDLES[(sym, iv)] = (now_ts, got, n); return got
@@ -2370,7 +2385,7 @@ def cron_scan():
                 if (r.get("details") or {}).get("data_error"):
                     scan_stats["data_errors"] += 1; scan_stats["deferred"].append(sym); scan_stats["last_data_error"] = r.get("reason")
                     if stopped_at is None: stopped_at = sym
-                    if not eng.td_budget_available(): break      # out of calls for now: stop, the next run continues from here
+                    if not td_available(): break      # out of calls for now: stop, the next run continues from here
                     continue
                 digest_lines.append(_digest_line(sym, r))
                 if not r.get('signal'):
@@ -2390,11 +2405,11 @@ def cron_scan():
     system = load_json(SYSTEM_FILE, dict)
     system["scan_cursor"] = cursors
     scan_stats["deferred"] = sorted(set(scan_stats["deferred"]))
-    system["last_scan_stats"] = {**scan_stats, "time": datetime.now().isoformat(), "feed": eng.td_budget_status()}
+    system["last_scan_stats"] = {**scan_stats, "time": datetime.now().isoformat(), "feed": td_status()}
     save_json(SYSTEM_FILE, system)
     if scan_stats["analyzed"] and scan_stats["data_errors"] >= max(2, scan_stats["analyzed"] // 2):
         alert_admin("data_feed", f"⚠️ Agent 35 data feed problem: {scan_stats['data_errors']} of {scan_stats['analyzed']} symbols had no data this scan "
-                    f"({scan_stats['last_data_error']}). Signals are paused for the affected pairs. Feed: {eng.td_budget_status()['calls_today']}/{eng.td_budget_status()['daily_limit']} credits used today.")
+                    f"({scan_stats['last_data_error']}). Signals are paused for the affected pairs. Feed: {td_status()['calls_today']}/{td_status()['daily_limit']} credits used today.")
     return jsonify({"sent":sent,"skipped":skipped,"daily_counts":daily_counts,"daily_limit_per_user":MAX_SIGNALS_PER_DAY,"scan":scan_stats})
 
 
@@ -2423,12 +2438,15 @@ def system_check():
     def row(name, ok, detail):
         rows.append(f"<tr><td>{'🟢' if ok is True else ('🟡' if ok is None else '🔴')}</td><td><b>{_esc(name)}</b></td><td>{detail}</td></tr>")
     # --- environment ---
+    if ENGINE_OUTDATED:
+        row("Engine file", False, "smc_trading_engine_v24.py on the server is OLDER than app.py - the data-credit guard is missing, so credits run out and signals stop. Upload BOTH files and redeploy.")
+        issues.append("The engine file on the server is outdated (missing the Twelve Data credit guard). Deploy smc_trading_engine_v24.py together with app.py.")
     row("Supabase storage", supabase is not None, "active - data survives redeploys" if supabase else "NOT active - data is wiped on every redeploy")
     if not supabase: issues.append("Supabase is not active: users, trades and settings are lost on redeploy.")
     row("Telegram bot token", bool(os.getenv("TELEGRAM_BOT_TOKEN")), "set" if os.getenv("TELEGRAM_BOT_TOKEN") else "missing")
     row("Cron secret", bool(os.getenv("CRON_SECRET")), "set" if os.getenv("CRON_SECRET") else "missing - every cron job is rejected")
     # --- data feed ---
-    fd = eng.td_budget_status(); pct = round(100 * fd["calls_today"] / max(1, fd["daily_limit"]))
+    fd = td_status(); pct = round(100 * fd["calls_today"] / max(1, fd["daily_limit"]))
     feed_ok = not fd["paused"] and fd["calls_today"] < fd["daily_limit"] * 0.9
     row("Twelve Data feed (this server's own count)", feed_ok, f"{fd['calls_today']}/{fd['daily_limit']} credits used today UTC ({pct}%), {fd['keys']} key(s), quota hits today {fd['quota_hits_today']}, errors {fd['errors_today']}" + (f"<br>PAUSED: {_esc(fd['paused_reason'])} - {_esc(str(fd['last_error'])[:160])}" if fd["paused"] else "") + (f"<br>last error: {_esc(str(fd['last_error'])[:160])}" if fd["last_error"] and not fd["paused"] else ""))
     if not feed_ok: issues.append("The Twelve Data credits are (nearly) used up or the feed is paused - the bot goes silent until 00:00 UTC (02:00 SAST) when credits reset. That matches signals only appearing around 2-3am.")
@@ -2492,7 +2510,7 @@ def health():
     # to debug. Now reads the real live value straight from the engine's
     # own confluence config instead of a second, hand-maintained number.
     system = load_json(SYSTEM_FILE, dict)
-    return jsonify({"ok":True,"last_scan":system.get("last_scan"),"total_scans":system.get("total_scans",0),"calendar":nc.status_summary(),"cron_secret_set":bool(os.getenv("CRON_SECRET")),"telegram_token_set":bool(os.getenv("TELEGRAM_BOT_TOKEN")),"twelve_data_keys":len(eng.KEYS),"version":"V24 - per-user signal delivery & tracking","symbols":len(ALL_SYMBOLS),"tracked_total_all_users":len(tracked),"per_user_limit":MAX_TRACKED,"data_feed":eng.td_budget_status(),"last_scan_stats":system.get("last_scan_stats"),"last_track_check":system.get("last_track_check"),"min_score":eng.DEFAULT_WEIGHTS.get("min_score"),"max_opposing":eng.DEFAULT_WEIGHTS.get("max_opposing"),"modes":["regular","scalp"]})
+    return jsonify({"ok":True,"last_scan":system.get("last_scan"),"total_scans":system.get("total_scans",0),"calendar":nc.status_summary(),"cron_secret_set":bool(os.getenv("CRON_SECRET")),"telegram_token_set":bool(os.getenv("TELEGRAM_BOT_TOKEN")),"twelve_data_keys":len(eng.KEYS),"version":"V24 - per-user signal delivery & tracking","symbols":len(ALL_SYMBOLS),"tracked_total_all_users":len(tracked),"per_user_limit":MAX_TRACKED,"data_feed":td_status(),"last_scan_stats":system.get("last_scan_stats"),"last_track_check":system.get("last_track_check"),"min_score":eng.DEFAULT_WEIGHTS.get("min_score"),"max_opposing":eng.DEFAULT_WEIGHTS.get("max_opposing"),"modes":["regular","scalp"]})
 
 @app.route("/debug-signal")
 def debug_signal():
