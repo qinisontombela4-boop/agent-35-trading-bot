@@ -38,10 +38,10 @@ ENGINE_OUTDATED = not all(hasattr(eng, n) for n in ("td_budget_status", "td_budg
 if ENGINE_OUTDATED:
     print("[STARTUP] WARNING: smc_trading_engine_v24.py is OLDER than app.py (no data-credit guard). Deploy both files together.", file=sys.stderr)
 def td_status():
-    if hasattr(eng, "td_budget_status"): return td_status()
+    if hasattr(eng, "td_budget_status"): return eng.td_budget_status()
     return {"day_utc": None, "calls_today": 0, "daily_limit": 800, "calls_last_minute": 0, "per_minute_limit": 8, "keys": len(getattr(eng, "KEYS", [])),
             "paused": False, "paused_reason": "", "quota_hits_today": 0, "errors_today": 0, "last_error": "engine file is outdated - credits are not being counted"}
-def td_available(): return td_available() if hasattr(eng, "td_budget_available") else True
+def td_available(): return eng.td_budget_available() if hasattr(eng, "td_budget_available") else True
 def td_cache_fresh(interval, stored_at, now_ts):
     if hasattr(eng, "cache_fresh"): return eng.cache_fresh(interval, stored_at, now_ts)
     return now_ts - stored_at < {"1h": 3600, "15min": 900}.get(interval, 300)
@@ -267,6 +267,53 @@ def drop_ghost_sessions():
         session.clear()
         return redirect("/login?error=" + quote("Your account no longer exists on this server (its data was reset). Please register again, then re-link Telegram."))
 
+# ================= ACCOUNT PROTECTION =================
+# No strategy wins every trade; what stops a client "blowing" an account in a bad run is limiting how much any run can cost.
+MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "2"))      # no account risks more than this per trade (was unlimited: 5% per trade loses 40% in 10 losses)
+MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))    # after this many stop-outs in one day, no new signals until tomorrow
+LOSS_STREAK_PAUSE = int(os.getenv("LOSS_STREAK_PAUSE", "3"))      # this many losses in a row ...
+STREAK_COOLOFF_HOURS = int(os.getenv("STREAK_COOLOFF_HOURS", "12"))  # ... pauses new signals for this long after the last loss
+SYMBOL_COOLDOWN_HOURS = int(os.getenv("SYMBOL_COOLDOWN_HOURS", "6")) # after a stop-out on a pair, that pair is skipped for this long (no re-entering the same failed setup)
+
+def _journal_results(email):
+    out = []
+    for j in load_json(JOURNAL_FILE, list):
+        if j.get("email") != email or j.get("status") not in ("WIN", "LOSS"): continue
+        try: ts = datetime.strptime(f"{j.get('date')} {str(j.get('time', ''))[-5:]}", "%Y-%m-%d %H:%M")
+        except Exception: continue
+        out.append((ts, j))
+    out.sort(key=lambda x: x[0]); return out
+
+def protection_status(email, now=None):
+    """(blocked, reason). Pauses NEW signals for a user after a bad run; open trades keep being tracked as normal."""
+    now = now or datetime.now(); res = _journal_results(email)
+    today_losses = sum(1 for ts, j in res if j["status"] == "LOSS" and ts.date() == now.date())
+    if today_losses >= MAX_LOSSES_PER_DAY:
+        return True, f"{today_losses} stop-outs today - new signals resume tomorrow"
+    streak, last_loss = 0, None
+    for ts, j in reversed(res):
+        if j["status"] != "LOSS": break
+        streak += 1; last_loss = last_loss or ts
+    if streak >= LOSS_STREAK_PAUSE and last_loss and (now - last_loss).total_seconds() < STREAK_COOLOFF_HOURS * 3600:
+        back = last_loss + timedelta(hours=STREAK_COOLOFF_HOURS)
+        return True, f"{streak} losses in a row - cooling off until {back.strftime('%H:%M')} server time"
+    return False, ""
+
+def symbol_in_cooldown(email, symbol, now=None):
+    now = now or datetime.now()
+    return any(j.get("symbol") == symbol and j["status"] == "LOSS" and (now - ts).total_seconds() < SYMBOL_COOLDOWN_HOURS * 3600 for ts, j in _journal_results(email))
+
+def maybe_send_pause_notice(email, chat_id, why):
+    """One Telegram note per user per day explaining WHY signals stopped, so a pause never looks like a broken bot."""
+    try:
+        today = datetime.now().strftime("%Y-%m-%d"); sent = load_json(HEADSUP_FILE, dict); key = f"{email}|PAUSE|{today}"
+        if key in sent: return False
+        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": f"🛑 PROTECTION PAUSE: {why}.\nThe bot is still running - it is deliberately holding back new signals so one bad run can't hurt your account. Your open trades are still tracked."})
+        if res.get("ok"): sent[key] = datetime.now().isoformat(); save_json(HEADSUP_FILE, sent); return True
+    except Exception as e:
+        print(f"[PAUSE NOTICE] {email}: {e}", file=sys.stderr)
+    return False
+
 def get_user_settings(email):
     settings = load_json(SETTINGS_FILE, dict)
     default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":["London","New York"],"symbols":ALL_SYMBOLS[:10],"risk_percent":1.0,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":True}
@@ -274,6 +321,8 @@ def get_user_settings(email):
     for k,v in default.items():
         if k not in s: s[k]=v
     if "trading_method" in s: s.pop("trading_method",None)
+    try: s["risk_percent"] = max(0.1, min(float(s.get("risk_percent", 1) or 1), MAX_RISK_PERCENT))
+    except (TypeError, ValueError): s["risk_percent"] = 1.0
     return s
 
 def get_currency_symbol(code): return CURRENCY_MAP.get(code, CURRENCY_MAP["ZAR"])["symbol"]
@@ -959,7 +1008,7 @@ def dashboard():
     mode_badge = "⚡ SCALP MODE - Fast M5 - 10-20/day" if mode=="scalp" else "🎯 REGULAR MODE - Swing - 2-5/day"
     content=f"""
 <div class='main'>
-<div class='card'><div class='card-title'>Total Profit & Loss</div><div class='card-value' style='color:{pnl_color}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0b1220;border-radius:10px;padding:10px;margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px'><div><div style='font-size:9px;color:#64748b'>TODAY</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['daily']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>WEEK</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['weekly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>MONTH</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['monthly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>YEAR</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div class='card-sub'>{mode_badge}<br>Score /10: regular needs {REGULAR_MIN_SCORE}+ (7=strong, 8+=A+) · scalp needs {MIN_SCORE}+</div></div>
+<div class='card'><div class='card-title'>Total Profit & Loss</div><div class='card-value' style='color:{pnl_color}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0b1220;border-radius:10px;padding:10px;margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px'><div><div style='font-size:9px;color:#64748b'>TODAY</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['daily']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>WEEK</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['weekly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>MONTH</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['monthly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>YEAR</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div class='card-sub'>{mode_badge}<br>Score /10: regular and scalp both need {REGULAR_MIN_SCORE}+ (7=strong, 8+=A+)</div></div>
 <div class='card'><div class='card-title'>Performance</div><div class='card-value'>{stats['total_trades']} Trades • {stats['win_rate']}% WR</div><div class='card-sub'>✅ Wins: {stats['wins']} ❌ Losses: {stats['losses']} ➖ BE: {stats['be']}<br><br>Telegram: {tg_status}<br>Referrals: {ref_count}/10 free lifetime<br>Tracked: {tracked_count}/{MAX_TRACKED} active (limit 6)</div></div>
 <div class='card'><div class='card-title'>Account Overview</div><div class='card-value'>{curr_sym}{user_settings.get('account_size',142)}</div><div class='card-sub'>Lot Size: {user_settings.get('lot_size',0.01)} • Lev {user_settings.get('leverage','1:500')}<br>Risk: {user_settings.get('risk_percent',1)}% • RR 1:{user_settings.get('rr_ratio',2.5)}<br>Currency: {user_settings.get('currency','ZAR')} {curr_sym}<br>Mode: {mode.upper()} - All strategies as ONE<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings →</a></div></div>
 <div class='card'><div class='card-title'>Quick Actions</div><div style='display:flex;flex-direction:column;gap:2px;margin-top:8px'><a href='/dashboard-scan' onclick="this.querySelector('button').innerHTML='⏳ Scanning...'; this.querySelector('button').disabled=true;"><button class='btn-primary'>🔍 Scan Market Now</button></a><a href='/test-telegram' class='btn-secondary'>📤 Test Telegram</a><a href='/link-telegram' class='btn-secondary'>🔗 Link Telegram</a><a href='/export-journal' class='btn-secondary'>📥 Export Journal CSV</a><a href='/clear-tracked' class='btn-secondary' style='color:#ef4444'>Clear Tracked ({tracked_count}/{MAX_TRACKED})</a>{admin_link}</div></div>
@@ -973,7 +1022,7 @@ def settings_page():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"
     if request.method=="POST":
-        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":float(request.form.get("risk_percent",1)),"rr_ratio":float(request.form.get("rr_ratio",2.5)),"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":request.form.get("trading_mode","regular"),"pullback_trades":request.form.get("pullback_trades")=="yes","symbols":request.form.getlist("symbols") or ALL_SYMBOLS[:10]}
+        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":max(0.1,min(float(request.form.get("risk_percent",1) or 1),MAX_RISK_PERCENT)),"rr_ratio":float(request.form.get("rr_ratio",2.5)),"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":request.form.get("trading_mode","regular"),"pullback_trades":request.form.get("pullback_trades")=="yes","symbols":request.form.getlist("symbols") or ALL_SYMBOLS[:10]}
         save_user_settings(email,new_settings)
         return redirect("/dashboard")
     s=get_user_settings(email)
@@ -986,7 +1035,7 @@ def settings_page():
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:16px'>
 <div class='card' style='border:2px solid #10b981'><div class='card-title'>Trading Mode - 2 Modes Only</div><select name='trading_mode' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #10b981'>
 <option value='regular' {'selected' if mode=='regular' else ''}>🎯 REGULAR (SMC) - Daily bias + 1H order block + 15m/5m entry - Score {REGULAR_MIN_SCORE}+ send</option>
-<option value='scalp' {'selected' if mode=='scalp' else ''}>⚡ SCALP - Fast M5 only - 10-20/day - Score {MIN_SCORE}+ send</option>
+<option value='scalp' {'selected' if mode=='scalp' else ''}>⚡ SCALP (SMC, one timeframe lower) - 4H bias + 15m order block + 5m entry - London/New York only - Score {REGULAR_MIN_SCORE}+ send</option>
 </select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>
 <b>REGULAR (SMC):</b> The daily structure sets the ONLY direction. On the 1H chart the bot maps swing structure (BOS/CHoCH), the premium/discount range and unmitigated order blocks; it waits for price to tap an order block in the right half of the range, then needs a 15m structure shift (and ideally a 5m trigger) before sending. The stop sits beyond the order block, and the lot is sized so a stop-out costs your risk %. Best for Gold/Forex/Indices. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+<br><br>
 <b>SCALP:</b> M5 EMA9/21 + RSI + Sweep + OB + Engulfing as ONE. Fast, more signals. Best for R142 + Crypto 24/7.
@@ -994,7 +1043,7 @@ def settings_page():
 <div class='card'><div class='card-title'>Currency</div><select name='currency' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{currency_options}</select></div>
 <div class='card'><div class='card-title'>Account Size</div><input name='account_size' type='number' step='0.01' value='{s.get('account_size',142)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
 <div class='card'><div class='card-title'>Lot Size</div><input name='lot_size' type='number' step='0.01' value='{s.get('lot_size',0.01)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
-<div class='card'><div class='card-title'>Risk %</div><input name='risk_percent' type='number' step='0.1' value='{s.get('risk_percent',1)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
+<div class='card'><div class='card-title'>Risk % per trade (max {MAX_RISK_PERCENT:g}%)</div><input name='risk_percent' type='number' step='0.1' value='{s.get('risk_percent',1)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
 <div class='card'><div class='card-title'>Leverage</div><select name='leverage' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{"".join([f"<option value='1:{lv}' {'selected' if s.get('leverage','1:500')==f'1:{lv}' else ''}>1:{lv}</option>" for lv in [10,20,30,50,100,200,400,500,1000,2000]])}</select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Caps how large a position your account can actually margin — if this is too low for your lot size, SL/TP will size the trade down automatically and flag it in the Telegram message.</div></div>
 <div class='card'><div class='card-title'>Risk Reward</div><select name='rr_ratio' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='1.5' {'selected' if str(s.get('rr_ratio'))=='1.5' else ''}>1:1.5 Scalp</option><option value='2' {'selected' if str(s.get('rr_ratio'))=='2' else ''}>1:2</option><option value='2.5' {'selected' if str(s.get('rr_ratio'))=='2.5' else ''}>1:2.5 Regular</option><option value='3' {'selected' if str(s.get('rr_ratio'))=='3' else ''}>1:3 SMC</option></select></div>
 <div class='card' style='border:2px solid #ef444455'><div class='card-title'>Avoid News</div><select name='trade_news' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='yes' {'selected' if s.get('trade_news',True) else ''}>🟢 Trade through news — no blackout</option><option value='no' {'selected' if not s.get('trade_news',True) else ''}>🔴 Avoid news — block signals + auto-flag tracked trades near high-impact events</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When set to Avoid, new signals are blocked ±15min around real high-impact events for correlated symbols, and you'll get a Telegram alert ~30min before. See the <a href='/news' style='color:#10b981'>News</a> tab for the live calendar.</div></div>
@@ -1173,7 +1222,7 @@ def dashboard_scan():
                 rows+=f"<tr><td>{s}</td><td colspan=4 style='color:#ef4444;font-size:10px'>{err_msg[:50]}</td></tr>"
     mode_badge = "⚡ SCALP MODE" if mode=="scalp" else "🎯 REGULAR MODE"
     content=f"""<div style='max-width:1600px;margin:0 auto;padding:14px'>
-<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold: regular {REGULAR_MIN_SCORE}+ / scalp {MIN_SCORE}+. 7=strong, 8+=A+. Your tracked: {my_tracked_count}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
+<div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><div><h2 style='font-size:16px;font-weight:800;margin:0'>Market Scan - {mode_badge} - Unified Strategy</h2><p style='font-size:11px;color:#64748b;margin:4px 0 0'>One strategy combining all methods as one score. Threshold: {REGULAR_MIN_SCORE}+ for both modes. 7=strong, 8+=A+. Your tracked: {my_tracked_count}/{MAX_TRACKED}</p></div><a href='/clear-tracked' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked</a></div>
 <table><tr><th>Symbol</th><th>Score</th><th>Bias</th><th>Signal</th><th>Action</th></tr>{rows}</table></div></div>"""
     return pro_layout(content,"All Signals", is_admin=is_admin)
 
@@ -2368,6 +2417,9 @@ def cron_scan():
         if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
             skipped.append(f"{email} DAILY_LIMIT_REACHED"); continue
 
+        paused, why = protection_status(email)
+        if paused:
+            skipped.append(f"{email} PROTECTION_PAUSE: {why}"); maybe_send_pause_notice(email, chat_id, why); continue
         digest_lines = []
         syms_all = user_settings.get("symbols", [])[:12]
         cur = (system.get("scan_cursor") or {}).get(email)
@@ -2379,6 +2431,7 @@ def cron_scan():
                 skipped.append(f"{email} DAILY_LIMIT_REACHED"); break
             if user_tracked_count(email) >= MAX_TRACKED: break
             if user_has_open_or_pending(email, sym): continue
+            if symbol_in_cooldown(email, sym): skipped.append(f"{email}:{sym} COOLDOWN_AFTER_LOSS"); continue
             try:
                 r = cached_analysis(sym, user_settings)
                 scan_stats["analyzed"] += 1
@@ -2481,7 +2534,7 @@ def system_check():
         cs = nc.status_summary(); row("News calendar", bool(cs.get("event_count")), f"{cs.get('event_count')} events, source {_esc(str(cs.get('source')))}" + (f"<br>{_esc(str(cs.get('last_error'))[:160])}" if cs.get("error") else ""))
     except Exception as e: row("News calendar", None, _esc(str(e)[:120]))
     # --- engine ---
-    row("Engine thresholds", True, f"regular mode needs {REGULAR_MIN_SCORE}/10, scalp needs {MIN_SCORE}; pullback signals are on by default")
+    row("Engine thresholds", True, f"regular and scalp both need {REGULAR_MIN_SCORE}/10; pullback signals are on by default")
     # --- users ---
     tg = load_json(TG_FILE, dict); tracked = load_json(TRACK_FILE, dict); pending = load_json(PENDING_FILE, dict); urows = []
     for email, d in tg.items():
@@ -2490,6 +2543,8 @@ def system_check():
         if not d.get("chat_id"): blockers.append("no Telegram chat linked")
         if len(tr) >= MAX_TRACKED: blockers.append(f"AT TRACKING LIMIT {len(tr)}/{MAX_TRACKED} - no new signals until a trade closes")
         if cnt >= MAX_SIGNALS_PER_DAY: blockers.append("daily signal cap reached")
+        pz, pwhy = protection_status(email)
+        if pz: blockers.append("protection pause: " + pwhy)
         old = [v for _, v in tr if (_safe_dt(v.get("time", "")) and (now - _safe_dt(v["time"])).total_seconds() > TRADE_EXPIRY_HOURS.get(v.get("mode", "regular"), 168) * 3600)]
         if old: blockers.append(f"{len(old)} tracked trade(s) older than the expiry (run /cron/check-expiry)")
         if blockers: issues.append(f"{_mask_email(email)}: " + "; ".join(blockers))
