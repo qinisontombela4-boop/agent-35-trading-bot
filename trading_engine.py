@@ -1,5 +1,6 @@
 import os, time, requests
 from datetime import datetime, timedelta, timezone
+import re
 import news_calendar
 
 def get_keys():
@@ -1308,7 +1309,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
         extreme = min([poi["low"]] + [k["low"] for k in after_tap]); stop = extreme - buf; risk = entry - stop
     else:
         extreme = max([poi["high"]] + [k["high"] for k in after_tap]); stop = extreme + buf; risk = stop - entry
-    min_risk = 0.5 * atr_h1   # stop floor: a stop tighter than half a 1H ATR sits inside normal noise (seen in backtests as 2-5 pip stops)
+    min_risk = c.get("min_stop_atr", 0.5) * atr_h1   # stop floor: a stop tighter than half a 1H ATR sits inside normal noise (seen in backtests as 2-5 pip stops)
     if 0 < risk < min_risk:
         risk = min_risk; stop = entry - risk if direction == "BULLISH" else entry + risk
     if pullback:
@@ -1331,7 +1332,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
     if risk <= 0: return out("Rejected: invalid stop distance", common)
     if risk > 3.0 * atr_h1: return out(f"Stop would be {risk/atr_h1:.1f} ATR wide (beyond the order block) - setup too wide to trade", common)
     if room < min_rr_of(c) * risk: return out(f"Only {room/risk:.1f}R of room to the target - need {min_rr_of(c):.1f}R", common)
-    if score < c["min_score"]:
+    if score < c["min_score"] + (1 if pullback else 0):   # trading against the daily bias needs one more confirmation than a trade with it
         return out(f"{score}/10 checklist - need {c['min_score']}+ ({', '.join(k for k, v in items.items() if not v)} missing)", common)
     rr = c["rr"]
     tp = target if pullback else (entry + risk * rr if direction == "BULLISH" else entry - risk * rr)
@@ -1359,11 +1360,57 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
 
 def min_rr_of(c): return c["min_rr"]
 
-def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h4, h1, _out):
+
+# ---- SCALP MODE ---------------------------------------------------------------------------------------------------
+# The old scalp mode let any 2 of 10 loosely-related strategies vote, counted a Doji as a trigger in BOTH directions and
+# sized stops from the account risk, not the chart. It is replaced by the SAME SMC engine as regular mode, run one
+# timeframe set lower:  4H = bias (was Daily), 1H = agreement (was 4H), 15m = structure + order blocks (was 1H),
+# 5m = tap / structure shift (was 15m).  Stops sit beyond the order block (never tighter than 1 x 15m ATR) and the same
+# gates apply: bias, right side of the range, tapped order block, a structure shift.  London / New York sessions only.
+_SCALP_FRAMES = {"1day": "4h", "4h": "1h", "1h": "15min", "15min": "5min"}
+_SCALP_LABELS = {"Daily": "4H", "4H": "1H", "1H": "15m", "15m": "5m"}
+
+class _ScalpFrames(dict):
+    """historical-style mapping that re-labels timeframes one step down and fetches each one only when the engine asks."""
+    def __init__(self, fetch): super().__init__(); self._fetch = fetch
+    def __bool__(self): return True
+    def __contains__(self, k): return k in _SCALP_FRAMES or k == "5min"
+    def __getitem__(self, k):
+        if k == "5min": return []                       # nothing below 5m: the 5m shift is the entry trigger
+        return self._fetch(_SCALP_FRAMES[k]) or []
+
+def _relabel(text):
+    if not isinstance(text, str): return text
+    return re.sub(r"Daily|4H|1H|15m", lambda m: _SCALP_LABELS[m.group(0)], text)
+
+def _scalp_mode(symbol, user_settings, historical, as_of, w, cache, now, _out):
+    crypto = symbol in ("BTCUSD", "ETHUSD", "SOLUSD", "BNBUSD", "XRPUSD", "ADAUSD", "DOGEUSD", "DOTUSD", "AVAXUSD", "LINKUSD", "MATICUSD", "LTCUSD")
+    hr = now.hour + now.minute / 60.0
+    if not crypto and not (7 <= hr < 20):
+        return _out("Scalp mode only trades the London / New York sessions (07:00-20:00 UTC) - waiting", details={"waiting_for": "session"})
+    if historical is not None:
+        shifted = {k: historical.get(v, []) for k, v in _SCALP_FRAMES.items()}; shifted["5min"] = []
+        fetch = lambda iv: historical.get(iv, [])
+    else:
+        fetch = lambda iv: get_values_cached(cache, symbol, iv, 200 if iv != "4h" else 120)[0]
+        shifted = _ScalpFrames(fetch)
+    f4, f1, f15 = fetch("4h"), fetch("1h"), fetch("15min")
+    if not f15 or len(f15) < 60 or not f4 or len(f4) < 30:
+        return _out("No scalp data (4H / 15m candles unavailable)" + (f" ({str((_TD.get('last_error') or ''))[:90]})" if _TD.get("last_error") else ""), details={"data_error": True})
+    r = _regular_mode(symbol, user_settings, shifted, as_of, w, cache, now, f4[-120:], (f1 or [])[-200:], f15[-250:], _out, scalp=True)
+    for k in ("reason", "rationale", "confluence"):
+        if k in r: r[k] = _relabel(r[k])
+    r["mode"] = "scalp"
+    det = r.get("details") or {}
+    if isinstance(det.get("checklist"), dict): det["checklist"] = {_relabel(k): v for k, v in det["checklist"].items()}
+    if isinstance(det.get("heads_up"), dict) and "text" in det["heads_up"]: det["heads_up"]["text"] = _relabel(det["heads_up"]["text"])
+    return r
+
+def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h4, h1, _out, scalp=False):
     c = {"symbol": symbol, "user_settings": user_settings, "historical": historical, "cache": cache, "now": now,
          "d1": d1, "h4": h4, "h1": h1, "_out": _out,
          "rr": float(user_settings.get("rr_ratio", 2.0) or 2.0), "min_rr": float(user_settings.get("min_risk_reward", 1.5) or 1.5),
-         "min_score": w.get("regular_min_score", 6)}
+         "min_score": w.get("regular_min_score", 6), "min_stop_atr": 1.0 if scalp else 0.5}
     allow_pullback = bool(user_settings.get("pullback_trades", True))
 
     def wait(reason, bias="NEUTRAL", entry=0, pct=50, score=0, details=None):
@@ -1502,6 +1549,8 @@ def full_multi_tf_analysis(symbol, user_settings=None, historical=None, as_of=No
     if blocked:
         return _out(news_reason, details={"news_blocked": True})
 
+    if mode == "scalp":   # scalp = the SMC engine one timeframe set lower (see _scalp_mode)
+        return _scalp_mode(symbol, user_settings, historical, as_of, w, cache, now, _out)
     d1, _e = get_values_cached(cache, symbol, "1day", 100, historical)
     h4, _e = get_values_cached(cache, symbol, "4h", 100, historical)
     h1, _e = get_values_cached(cache, symbol, "1h", 250, historical)
