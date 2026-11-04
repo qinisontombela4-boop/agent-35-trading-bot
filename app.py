@@ -28,6 +28,7 @@ if not CREATOR_SECRET:
           "is disabled until you set it (admin login still works normally).",
           file=sys.stderr)
 
+import time
 import trading_engine as eng
 import news_calendar as nc
 
@@ -776,7 +777,8 @@ def cached_analysis(symbol, user_settings):
     if hit and (now - hit[0]).total_seconds() < _ANALYSIS_TTL_SECONDS:
         return hit[1]
     result = eng.full_multi_tf_analysis(symbol, user_settings)
-    _ANALYSIS_CACHE[key] = (now, result)
+    if not (result.get("details") or {}).get("data_error"):    # a data failure must be retried next time, not cached as "no signal"
+        _ANALYSIS_CACHE[key] = (now, result)
     return result
 
 # ================= SHARED UI =================
@@ -2086,6 +2088,8 @@ def cron_news_check():
     return jsonify({"checked": len(events), "newly_alerted": newly_alerted, "auto_flagged": flagged_total,
                     "leans_logged": leans_logged, "digests": digests, "scored": scored, "calendar": nc.status_summary()})
 
+_TRACK_CANDLES = {}   # symbol -> (fetched_at, candles, outputsize)
+
 def check_trade_outcome(entry, candles, sl, tp):
     """Scan EVERY 5m candle since the trade was taken and use each candle's HIGH/LOW (wicks count) - the old check
     only looked at the latest close, so a spike through TP that pulled back before the cron ran was missed.
@@ -2131,12 +2135,22 @@ def cron_track_check():
         opened = _safe_dt(e.get("time", ""))
         hrs = ((now - opened).total_seconds() / 3600) if opened else 24
         need[e.get("symbol")] = max(need.get(e.get("symbol"), 0), hrs)
-    candle_cache = {}
+    young = {}
+    for e in tracked.values():
+        opened = _safe_dt(e.get("time", "")); hrs = ((now - opened).total_seconds() / 3600) if opened else 24
+        young[e.get("symbol")] = min(young.get(e.get("symbol"), 1e9), hrs)
     def candles_for(sym):
-        if sym not in candle_cache:
-            n = int(min(5000, max(30, need.get(sym, 24) * 12 + 24)))
-            candle_cache[sym] = eng.get_values(sym, "5min", n)[0] or []
-        return candle_cache[sym]
+        """Wicks are caught on 15m candles for trades under a day old, and on 1H candles for older ones (a 1H feed costs
+        24 credits/day per pair instead of 96, so several open week-long trades can't starve the scanner). Each set is
+        fetched at most once per bar."""
+        if young.get(sym, 0) >= 24: iv, n = "1h", int(min(5000, need.get(sym, 24) + 6))
+        else:                        iv, n = "15min", int(min(5000, max(30, need.get(sym, 24) * 4 + 8)))
+        hit = _TRACK_CANDLES.get((sym, iv)); now_ts = time.time()
+        if hit and hit[2] >= n and eng.cache_fresh(iv, hit[0], now_ts): return hit[1]
+        got = eng.get_values(sym, iv, n)[0]
+        if got:
+            _TRACK_CANDLES[(sym, iv)] = (now_ts, got, n); return got
+        return hit[1] if hit else []
 
     for signal_id in list(tracked.keys()):
         entry = tracked[signal_id]
@@ -2263,6 +2277,21 @@ def maybe_send_heads_up(email, chat_id, symbol, hu):
         print(f"[HEADS-UP] {symbol}: {e}", file=sys.stderr)
     return False
 
+def alert_admin(key, text, every_hours=6):
+    """Tell the admin on Telegram when something stops the bot from working (at most once per `every_hours` per kind)."""
+    try:
+        chat = (load_json(TG_FILE, dict).get("admin@agent35.com") or {}).get("chat_id") or os.getenv("TELEGRAM_CHAT_ID")
+        if not chat: return False
+        system = load_json(SYSTEM_FILE, dict); al = system.get("admin_alerts", {})
+        last = _safe_dt(al.get(key, ""))
+        if last and (datetime.now() - last).total_seconds() < every_hours * 3600: return False
+        res = telegram_post("sendMessage", {"chat_id": chat, "text": text})
+        if res.get("ok"):
+            al[key] = datetime.now().isoformat(); system["admin_alerts"] = al; save_json(SYSTEM_FILE, system); return True
+    except Exception as e:
+        print(f"[ADMIN ALERT] {e}", file=sys.stderr)
+    return False
+
 def _digest_line(sym, r):
     d = r.get("details") or {}
     if r.get("signal"): return f"• {sym}: SETUP READY ({r.get('direction') or r.get('bias')})"
@@ -2306,6 +2335,7 @@ def cron_scan():
 
     tg_users = load_json(TG_FILE, dict)
     sent=[]; skipped=[]; daily_counts={}
+    scan_stats = {"analyzed": 0, "data_errors": 0, "deferred": [], "last_data_error": None}; cursors = {}
 
     for email, chat_data in tg_users.items():
         chat_id = chat_data.get("chat_id")
@@ -2324,13 +2354,24 @@ def cron_scan():
             skipped.append(f"{email} DAILY_LIMIT_REACHED"); continue
 
         digest_lines = []
-        for sym in user_settings.get("symbols", [])[:12]:
+        syms_all = user_settings.get("symbols", [])[:12]
+        cur = (system.get("scan_cursor") or {}).get(email)
+        start = syms_all.index(cur) if cur in syms_all else 0
+        order = syms_all[start:] + syms_all[:start]        # resume where the last run ran out of data budget
+        stopped_at = None
+        for sym in order:
             if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
                 skipped.append(f"{email} DAILY_LIMIT_REACHED"); break
             if user_tracked_count(email) >= MAX_TRACKED: break
             if user_has_open_or_pending(email, sym): continue
             try:
                 r = cached_analysis(sym, user_settings)
+                scan_stats["analyzed"] += 1
+                if (r.get("details") or {}).get("data_error"):
+                    scan_stats["data_errors"] += 1; scan_stats["deferred"].append(sym); scan_stats["last_data_error"] = r.get("reason")
+                    if stopped_at is None: stopped_at = sym
+                    if not eng.td_budget_available(): break      # out of calls for now: stop, the next run continues from here
+                    continue
                 digest_lines.append(_digest_line(sym, r))
                 if not r.get('signal'):
                     hu = (r.get('details') or {}).get('heads_up')
@@ -2341,14 +2382,109 @@ def cron_scan():
                 else: skipped.append(f"{email}:{sym} {info.get('error')}")
             except Exception as e:
                 skipped.append(f"{email}:{sym} ERROR:{e}")
+        cursors[email] = stopped_at or ""
         if digest_lines and maybe_send_digest(email, chat_id, digest_lines): sent.append(f"{email}: daily market watch")
         daily_counts[email] = get_daily_signal_count(email)
 
-    return jsonify({"sent":sent,"skipped":skipped,"daily_counts":daily_counts,"daily_limit_per_user":MAX_SIGNALS_PER_DAY})
+    # record how healthy this run was, so /health (and the admin alert) can say when the data feed is the reason for silence
+    system = load_json(SYSTEM_FILE, dict)
+    system["scan_cursor"] = cursors
+    scan_stats["deferred"] = sorted(set(scan_stats["deferred"]))
+    system["last_scan_stats"] = {**scan_stats, "time": datetime.now().isoformat(), "feed": eng.td_budget_status()}
+    save_json(SYSTEM_FILE, system)
+    if scan_stats["analyzed"] and scan_stats["data_errors"] >= max(2, scan_stats["analyzed"] // 2):
+        alert_admin("data_feed", f"⚠️ Agent 35 data feed problem: {scan_stats['data_errors']} of {scan_stats['analyzed']} symbols had no data this scan "
+                    f"({scan_stats['last_data_error']}). Signals are paused for the affected pairs. Feed: {eng.td_budget_status()['calls_today']}/{eng.td_budget_status()['daily_limit']} credits used today.")
+    return jsonify({"sent":sent,"skipped":skipped,"daily_counts":daily_counts,"daily_limit_per_user":MAX_SIGNALS_PER_DAY,"scan":scan_stats})
+
+
+@app.after_request
+def _cron_heartbeat(resp):
+    """Remember when each /cron/ job last ran (only calls that carried the right secret), so the System Check page can
+    show which cron-job.org jobs are alive, dead, or pointing at a wrong URL."""
+    try:
+        if request.path.startswith("/cron/") and request.args.get("secret") == os.getenv("CRON_SECRET") and os.getenv("CRON_SECRET"):
+            system = load_json(SYSTEM_FILE, dict); runs = system.get("cron_runs", {})
+            runs[request.path] = {"at": datetime.now().isoformat(), "status": resp.status_code}
+            system["cron_runs"] = runs; save_json(SYSTEM_FILE, system)
+    except Exception as e:
+        print(f"[HEARTBEAT] {e}", file=sys.stderr)
+    return resp
+
+EXPECTED_CRONS = [("/cron/scan", 30, "finds signals"), ("/cron/track-check", 5, "detects TP / SL hits"),
+                  ("/cron/news-check", 10, "news alerts + digests"), ("/cron/check-expiry", 60, "clears stale trades"),
+                  ("/cron/daily-reset", 1440, "resets daily counters")]
+
+@app.route("/system-check")
+def system_check():
+    """Admin-only: one page that says whether every part of the bot is alive and in sync, and what is blocking signals."""
+    if session.get("user") != "admin@agent35.com": return redirect("/login")
+    now = datetime.now(); system = load_json(SYSTEM_FILE, dict); issues = []; rows = []
+    def row(name, ok, detail):
+        rows.append(f"<tr><td>{'🟢' if ok is True else ('🟡' if ok is None else '🔴')}</td><td><b>{_esc(name)}</b></td><td>{detail}</td></tr>")
+    # --- environment ---
+    row("Supabase storage", supabase is not None, "active - data survives redeploys" if supabase else "NOT active - data is wiped on every redeploy")
+    if not supabase: issues.append("Supabase is not active: users, trades and settings are lost on redeploy.")
+    row("Telegram bot token", bool(os.getenv("TELEGRAM_BOT_TOKEN")), "set" if os.getenv("TELEGRAM_BOT_TOKEN") else "missing")
+    row("Cron secret", bool(os.getenv("CRON_SECRET")), "set" if os.getenv("CRON_SECRET") else "missing - every cron job is rejected")
+    # --- data feed ---
+    fd = eng.td_budget_status(); pct = round(100 * fd["calls_today"] / max(1, fd["daily_limit"]))
+    feed_ok = not fd["paused"] and fd["calls_today"] < fd["daily_limit"] * 0.9
+    row("Twelve Data feed (this server's own count)", feed_ok, f"{fd['calls_today']}/{fd['daily_limit']} credits used today UTC ({pct}%), {fd['keys']} key(s), quota hits today {fd['quota_hits_today']}, errors {fd['errors_today']}" + (f"<br>PAUSED: {_esc(fd['paused_reason'])} - {_esc(str(fd['last_error'])[:160])}" if fd["paused"] else "") + (f"<br>last error: {_esc(str(fd['last_error'])[:160])}" if fd["last_error"] and not fd["paused"] else ""))
+    if not feed_ok: issues.append("The Twelve Data credits are (nearly) used up or the feed is paused - the bot goes silent until 00:00 UTC (02:00 SAST) when credits reset. That matches signals only appearing around 2-3am.")
+    if request.args.get("probe") and eng.KEYS:
+        try:
+            u = requests.get("https://api.twelvedata.com/api_usage", params={"apikey": eng.KEYS[0]}, timeout=12).json()
+            used = u.get("current_usage", u.get("daily_usage")); lim = u.get("plan_limit", u.get("plan_daily_limit"))
+            bad = isinstance(used, (int, float)) and isinstance(lim, (int, float)) and used >= lim * 0.9
+            row("Twelve Data (their own counter)", not bad, f"used {used} of {lim} {'(credits include any other tool/backtest using the same key)' if used is not None else _esc(str(u)[:200])}")
+            if bad: issues.append("Twelve Data says the key is at/near its limit - something else may be using the same key too.")
+        except Exception as e:
+            row("Twelve Data (their own counter)", None, f"probe failed: {_esc(str(e)[:120])}")
+    else:
+        row("Twelve Data (their own counter)", None, "<a href='/system-check?probe=1' style='color:#3b82f6'>run the free usage probe</a> (does not cost credits)")
+    # --- cron jobs ---
+    runs = system.get("cron_runs", {})
+    for path, mins, what in EXPECTED_CRONS:
+        r = runs.get(path); last = _safe_dt(r["at"]) if r else None
+        if not last: row(f"cron {path}", False, f"NEVER seen ({what}) - check the cron-job.org URL: it must be https://YOUR-APP.onrender.com{path}?secret=..."); issues.append(f"{path} has never run - {what} is not working."); continue
+        age = (now - last).total_seconds() / 60; ok = age <= mins * 3 + 5 and r.get("status") == 200
+        row(f"cron {path}", ok, f"last ran {int(age)} min ago, HTTP {r.get('status')} (expected every ~{mins} min) - {what}")
+        if not ok: issues.append(f"{path} is stale or failing (last {int(age)} min ago, HTTP {r.get('status')}).")
+    # --- last scan ---
+    st = system.get("last_scan_stats") or {}
+    if st:
+        ok = st.get("data_errors", 0) < max(2, st.get("analyzed", 0) // 2)
+        row("Last scan", ok, f"{_esc(str(st.get('time',''))[:19])}: analysed {st.get('analyzed')}, no-data {st.get('data_errors')}" + (f" ({_esc(', '.join(st.get('deferred', [])[:8]))})" if st.get("deferred") else "") + (f"<br>{_esc(str(st.get('last_data_error'))[:160])}" if st.get("last_data_error") else ""))
+    else:
+        row("Last scan", None, "no scan recorded yet since the last deploy")
+    # --- news ---
+    try:
+        cs = nc.status_summary(); row("News calendar", bool(cs.get("event_count")), f"{cs.get('event_count')} events, source {_esc(str(cs.get('source')))}" + (f"<br>{_esc(str(cs.get('last_error'))[:160])}" if cs.get("error") else ""))
+    except Exception as e: row("News calendar", None, _esc(str(e)[:120]))
+    # --- engine ---
+    row("Engine thresholds", True, f"regular mode needs {REGULAR_MIN_SCORE}/10, scalp needs {MIN_SCORE}; pullback signals are on by default")
+    # --- users ---
+    tg = load_json(TG_FILE, dict); tracked = load_json(TRACK_FILE, dict); pending = load_json(PENDING_FILE, dict); urows = []
+    for email, d in tg.items():
+        us = get_user_settings(email); tr = [(i, v) for i, v in tracked.items() if v.get("email") == email]; pe = [v for v in pending.values() if v.get("email") == email]
+        cnt = get_daily_signal_count(email); blockers = []
+        if not d.get("chat_id"): blockers.append("no Telegram chat linked")
+        if len(tr) >= MAX_TRACKED: blockers.append(f"AT TRACKING LIMIT {len(tr)}/{MAX_TRACKED} - no new signals until a trade closes")
+        if cnt >= MAX_SIGNALS_PER_DAY: blockers.append("daily signal cap reached")
+        old = [v for _, v in tr if (_safe_dt(v.get("time", "")) and (now - _safe_dt(v["time"])).total_seconds() > TRADE_EXPIRY_HOURS.get(v.get("mode", "regular"), 168) * 3600)]
+        if old: blockers.append(f"{len(old)} tracked trade(s) older than the expiry (run /cron/check-expiry)")
+        if blockers: issues.append(f"{_mask_email(email)}: " + "; ".join(blockers))
+        trs = "<br>".join(f"{_esc(v.get('symbol',''))} {_esc(str(v.get('bias',''))[:4])} since {_esc(str(v.get('time',''))[5:16])}" for _, v in tr) or "-"
+        urows.append(f"<tr><td>{'🟢' if not blockers else '🔴'}</td><td>{_esc(_mask_email(email))}</td><td>{us.get('trading_mode')} · {len(us.get('symbols', []))} pairs · pullback {'on' if us.get('pullback_trades', True) else 'off'} · news-avoid {'off' if us.get('trade_news', True) else 'on'}</td><td>tracked {len(tr)}/{MAX_TRACKED}, pending {len(pe)}, today {cnt}/{MAX_SIGNALS_PER_DAY}<br>{trs}</td><td>{_esc('; '.join(blockers)) or 'ok'}</td></tr>")
+    verdict = ("<div style='background:rgba(239,68,68,.12);border:1px solid #ef4444;border-radius:12px;padding:14px;margin-bottom:14px'><b>Problems found:</b><ul style='margin:8px 0 0 18px'>" + "".join(f"<li>{_esc(i)}</li>" for i in issues) + "</ul></div>") if issues else "<div style='background:rgba(16,185,129,.12);border:1px solid #10b981;border-radius:12px;padding:14px;margin-bottom:14px'><b>Everything checked is healthy.</b> If signals are still quiet, the market has no setup that passes the checklist.</div>"
+    body = f"""<div style='max-width:1000px;margin:24px auto;padding:0 12px'><h2 style='margin:0 0 4px'>System check</h2><p style='color:#94a3b8;font-size:12px;margin:0 0 14px'>{now.strftime('%Y-%m-%d %H:%M:%S')} server time</p>{verdict}
+<div class='card' style='overflow-x:auto'><table style='width:100%;font-size:13px;border-collapse:collapse'>{''.join(rows)}</table></div>
+<h3 style='margin:18px 0 8px'>Users</h3><div class='card' style='overflow-x:auto'><table style='width:100%;font-size:12px;border-collapse:collapse'><tr><td></td><td><b>User</b></td><td><b>Settings</b></td><td><b>Trades</b></td><td><b>Blockers</b></td></tr>{''.join(urows) or '<tr><td>No linked users</td></tr>'}</table></div></div>"""
+    return pro_layout(body, "Admin", is_admin=True)
 
 @app.route("/health")
 def health():
-    test=cached_analysis("BTCUSD", {"trade_news":True,"currency":"ZAR","trading_mode":"regular"})
     tracked=load_json(TRACK_FILE, dict)
     # FIXED: "threshold" used to be a hardcoded 5, left over from before
     # min_score was lowered to 2 — a stale value in a health/status endpoint
@@ -2356,7 +2492,7 @@ def health():
     # to debug. Now reads the real live value straight from the engine's
     # own confluence config instead of a second, hand-maintained number.
     system = load_json(SYSTEM_FILE, dict)
-    return jsonify({"ok":True,"last_scan":system.get("last_scan"),"total_scans":system.get("total_scans",0),"calendar":nc.status_summary(),"cron_secret_set":bool(os.getenv("CRON_SECRET")),"telegram_token_set":bool(os.getenv("TELEGRAM_BOT_TOKEN")),"twelve_data_keys":len(eng.KEYS),"version":"V24 - per-user signal delivery & tracking","symbols":len(ALL_SYMBOLS),"tracked_total_all_users":len(tracked),"per_user_limit":MAX_TRACKED,"btc_test":test,"min_score":eng.DEFAULT_WEIGHTS.get("min_score"),"max_opposing":eng.DEFAULT_WEIGHTS.get("max_opposing"),"modes":["regular","scalp"]})
+    return jsonify({"ok":True,"last_scan":system.get("last_scan"),"total_scans":system.get("total_scans",0),"calendar":nc.status_summary(),"cron_secret_set":bool(os.getenv("CRON_SECRET")),"telegram_token_set":bool(os.getenv("TELEGRAM_BOT_TOKEN")),"twelve_data_keys":len(eng.KEYS),"version":"V24 - per-user signal delivery & tracking","symbols":len(ALL_SYMBOLS),"tracked_total_all_users":len(tracked),"per_user_limit":MAX_TRACKED,"data_feed":eng.td_budget_status(),"last_scan_stats":system.get("last_scan_stats"),"last_track_check":system.get("last_track_check"),"min_score":eng.DEFAULT_WEIGHTS.get("min_score"),"max_opposing":eng.DEFAULT_WEIGHTS.get("max_opposing"),"modes":["regular","scalp"]})
 
 @app.route("/debug-signal")
 def debug_signal():
