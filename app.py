@@ -269,6 +269,9 @@ def drop_ghost_sessions():
 
 # ================= ACCOUNT PROTECTION =================
 # No strategy wins every trade; what stops a client "blowing" an account in a bad run is limiting how much any run can cost.
+MAX_SYMBOLS_PER_USER = int(os.getenv("MAX_SYMBOLS_PER_USER", "6"))   # watchlist cap: every watched pair costs Twelve Data credits on each scan
+SESSION_HOURS_UTC = {"Asia": (0, 9), "London": (8, 17), "New York": (13, 22)}
+ALL_SESSIONS = list(SESSION_HOURS_UTC)
 MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "2"))      # no account risks more than this per trade (was unlimited: 5% per trade loses 40% in 10 losses)
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))    # after this many stop-outs in one day, no new signals until tomorrow
 LOSS_STREAK_PAUSE = int(os.getenv("LOSS_STREAK_PAUSE", "3"))      # this many losses in a row ...
@@ -316,11 +319,15 @@ def maybe_send_pause_notice(email, chat_id, why):
 
 def get_user_settings(email):
     settings = load_json(SETTINGS_FILE, dict)
-    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":["London","New York"],"symbols":ALL_SYMBOLS[:10],"risk_percent":1.0,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":True}
+    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":list(ALL_SESSIONS),"symbols":ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"risk_percent":1.0,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":True}
     s = settings.get(email, default)
     for k,v in default.items():
         if k not in s: s[k]=v
     if "trading_method" in s: s.pop("trading_method",None)
+    syms = [x for x in (s.get("symbols") or []) if x in ALL_SYMBOLS][:MAX_SYMBOLS_PER_USER]
+    s["symbols"] = syms or ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER]          # existing users with a longer list are trimmed to the first 6
+    if not s.get("sessions_set") or not [x for x in (s.get("sessions") or []) if x in ALL_SESSIONS]:
+        s["sessions"] = list(ALL_SESSIONS)                               # never chose sessions -> signals at any time, as before
     try: s["risk_percent"] = max(0.1, min(float(s.get("risk_percent", 1) or 1), MAX_RISK_PERCENT))
     except (TypeError, ValueError): s["risk_percent"] = 1.0
     return s
@@ -569,13 +576,25 @@ def generate_ref_code(email):
     while code in code_file: code = f"{base}{random.randint(10,99)}"
     code_file[email]=code; code_file[code]=email; save_json(REF_CODE_FILE, code_file); return code
 
+def paid_referee_emails():
+    """Emails with at least one payment that the ADMIN APPROVED (USERS_FILE record status "active" on a paid plan).
+    A plan_status of "ACTIVE ..." alone is not proof of payment - it is also what a free referral reward, a creator
+    grant or a manual edit looks like - so the referral count never relies on it."""
+    out = set()
+    for rec in load_json(USERS_FILE, dict).values():
+        if isinstance(rec, dict) and rec.get("status") == "active" and rec.get("plan") in ("yearly", "lifetime") and rec.get("user"):
+            out.add(rec["user"])
+    return out
+
+def referees_of(code, referrer_email, auth):
+    return [e for e, info in auth.items() if e != referrer_email and str(info.get("referred_by", "")).upper() == str(code).upper() and code]
+
 def get_ref_count_and_auto_upgrade(referrer_email):
     auth = load_json(AUTH_FILE); ref_codes = load_json(REF_CODE_FILE, dict)
     referrer_code = ref_codes.get(referrer_email,"")
     if not referrer_code: return 0
-    count=0
-    for e,info in auth.items():
-        if info.get("referred_by","").upper()==referrer_code.upper() and "ACTIVE" in info.get("plan_status",""): count+=1
+    paid = paid_referee_emails()
+    count = sum(1 for e in referees_of(referrer_code, referrer_email, auth) if e in paid)
     if count>=10 and referrer_email in auth and "CREATOR" not in auth[referrer_email].get("plan_status",""):
         if "lifetime" not in auth[referrer_email].get("plan_status","").lower():
             auth[referrer_email]["plan_status"]="ACTIVE lifetime - FREE 10 Referrals"; auth[referrer_email]["expires"]=(datetime.now()+timedelta(days=36500)).isoformat(); save_json(AUTH_FILE, auth)
@@ -795,6 +814,12 @@ def get_active_sessions():
     if 13 <= utc_hour < 22: sessions.append("New York")
     if not sessions: sessions=["Closed"]
     return sessions
+
+def user_session_open(user_settings, now_utc=None):
+    """True when the current UTC hour falls inside at least one session the user chose to receive signals in."""
+    hr = (now_utc or datetime.utcnow()).hour
+    chosen = user_settings.get("sessions") or ALL_SESSIONS
+    return any(SESSION_HOURS_UTC[x][0] <= hr < SESSION_HOURS_UTC[x][1] for x in chosen if x in SESSION_HOURS_UTC)
 
 # ================= EMAIL (forgot password) =================
 
@@ -1022,11 +1047,12 @@ def settings_page():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"
     if request.method=="POST":
-        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":max(0.1,min(float(request.form.get("risk_percent",1) or 1),MAX_RISK_PERCENT)),"rr_ratio":float(request.form.get("rr_ratio",2.5)),"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":request.form.get("trading_mode","regular"),"pullback_trades":request.form.get("pullback_trades")=="yes","symbols":request.form.getlist("symbols") or ALL_SYMBOLS[:10]}
+        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":max(0.1,min(float(request.form.get("risk_percent",1) or 1),MAX_RISK_PERCENT)),"rr_ratio":float(request.form.get("rr_ratio",2.5)),"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":request.form.get("trading_mode","regular"),"pullback_trades":request.form.get("pullback_trades")=="yes","symbols":[x for x in request.form.getlist("symbols") if x in ALL_SYMBOLS][:MAX_SYMBOLS_PER_USER] or ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"sessions":[x for x in request.form.getlist("sessions") if x in ALL_SESSIONS] or list(ALL_SESSIONS),"sessions_set":True}
         save_user_settings(email,new_settings)
         return redirect("/dashboard")
     s=get_user_settings(email)
     symbols_html="".join([f"<label style='display:flex;align-items:center;gap:6px;background:#0b1220;border:1px solid #1e293b;padding:8px 10px;border-radius:10px;font-size:11px;cursor:pointer'><input type='checkbox' name='symbols' value='{sym}' {'checked' if sym in s.get('symbols',[]) else ''}> {sym}</label>" for sym in ALL_SYMBOLS])
+    sym_js = '<script>(function(){var M=__M__,b=[].slice.call(document.querySelectorAll("input[name=symbols]")),c=document.getElementById("symcount");function u(){var n=b.filter(function(x){return x.checked}).length;if(c)c.textContent=n+" / "+M+" selected"}b.forEach(function(x){x.addEventListener("change",function(){if(b.filter(function(y){return y.checked}).length>M){x.checked=false;alert("You can watch at most "+M+" symbols. Untick one first.")}u()})});u()})();</script>'.replace('__M__', str(MAX_SYMBOLS_PER_USER))
     curr=s.get('currency','ZAR'); mode=s.get('trading_mode','regular')
     currency_options="".join([f"<option value='{code}' {'selected' if curr==code else ''}>{code} - {info['symbol']} {info['name']}</option>" for code,info in CURRENCY_MAP.items()])
     content=f"""<div style='max-width:1100px;margin:0 auto;padding:14px'>
@@ -1038,7 +1064,7 @@ def settings_page():
 <option value='scalp' {'selected' if mode=='scalp' else ''}>⚡ SCALP (SMC, one timeframe lower) - 4H bias + 15m order block + 5m entry - London/New York only - Score {REGULAR_MIN_SCORE}+ send</option>
 </select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>
 <b>REGULAR (SMC):</b> The daily structure sets the ONLY direction. On the 1H chart the bot maps swing structure (BOS/CHoCH), the premium/discount range and unmitigated order blocks; it waits for price to tap an order block in the right half of the range, then needs a 15m structure shift (and ideally a 5m trigger) before sending. The stop sits beyond the order block, and the lot is sized so a stop-out costs your risk %. Best for Gold/Forex/Indices. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+<br><br>
-<b>SCALP:</b> M5 EMA9/21 + RSI + Sweep + OB + Engulfing as ONE. Fast, more signals. Best for R142 + Crypto 24/7.
+<b>SCALP:</b> the same SMC logic one timeframe lower: 4H sets the bias, a 15m order block is the zone and a 5m structure shift is the entry. Stops sit beyond the order block. London / New York hours only (crypto 24/7). Smaller targets, faster trades.
 </div></div>
 <div class='card'><div class='card-title'>Currency</div><select name='currency' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{currency_options}</select></div>
 <div class='card'><div class='card-title'>Account Size</div><input name='account_size' type='number' step='0.01' value='{s.get('account_size',142)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
@@ -1047,9 +1073,11 @@ def settings_page():
 <div class='card'><div class='card-title'>Leverage</div><select name='leverage' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{"".join([f"<option value='1:{lv}' {'selected' if s.get('leverage','1:500')==f'1:{lv}' else ''}>1:{lv}</option>" for lv in [10,20,30,50,100,200,400,500,1000,2000]])}</select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Caps how large a position your account can actually margin — if this is too low for your lot size, SL/TP will size the trade down automatically and flag it in the Telegram message.</div></div>
 <div class='card'><div class='card-title'>Risk Reward</div><select name='rr_ratio' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='1.5' {'selected' if str(s.get('rr_ratio'))=='1.5' else ''}>1:1.5 Scalp</option><option value='2' {'selected' if str(s.get('rr_ratio'))=='2' else ''}>1:2</option><option value='2.5' {'selected' if str(s.get('rr_ratio'))=='2.5' else ''}>1:2.5 Regular</option><option value='3' {'selected' if str(s.get('rr_ratio'))=='3' else ''}>1:3 SMC</option></select></div>
 <div class='card' style='border:2px solid #ef444455'><div class='card-title'>Avoid News</div><select name='trade_news' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='yes' {'selected' if s.get('trade_news',True) else ''}>🟢 Trade through news — no blackout</option><option value='no' {'selected' if not s.get('trade_news',True) else ''}>🔴 Avoid news — block signals + auto-flag tracked trades near high-impact events</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When set to Avoid, new signals are blocked ±15min around real high-impact events for correlated symbols, and you'll get a Telegram alert ~30min before. See the <a href='/news' style='color:#10b981'>News</a> tab for the live calendar.</div></div>
+<div class='card'><div class='card-title'>Sessions - when to receive signals</div><div style='display:flex;flex-direction:column;gap:8px;margin-top:10px'>{"".join(f"<label style='display:flex;align-items:center;gap:8px;background:#0b1220;border:1px solid #1e293b;padding:10px 12px;border-radius:10px;font-size:12px;cursor:pointer'><input type='checkbox' name='sessions' value='{nm}' {'checked' if nm in s.get('sessions',[]) else ''}> <b>{nm}</b> <span style='color:#64748b'>{(SESSION_HOURS_UTC[nm][0]+2)%24:02d}:00-{(SESSION_HOURS_UTC[nm][1]+2)%24:02d}:00 SAST</span></label>" for nm in ALL_SESSIONS)}</div><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>You only get new signals while one of your chosen sessions is open (trades already open keep being tracked at any time). Pick all three for signals around the clock. Fewer sessions also means fewer data credits used.</div></div>
 <div class='card'><div class='card-title'>Pullback trades (SMC)</div><select name='pullback_trades' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='no' {'selected' if not s.get('pullback_trades',True) else ''}>⚪ Off - only trade WITH the daily bias</option><option value='yes' {'selected' if s.get('pullback_trades',True) else ''}>🟢 On - also trade the 1H move toward the daily order block (recommended)</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Regular mode only. When the daily bias is bullish but the 1H is bearish and falling toward an untaken bullish order block / liquidity (or the reverse), the bot also sends the 1H trade: a SELL when price retests a 1H bearish order block or sweeps premium highs and the 15m turns down, with the take profit at that order block / liquidity. These trades go AGAINST the daily bias for the length of the move, so they are labelled PULLBACK and are riskier than daily-bias trades. Turn off to trade only with the daily bias.</div></div>
 </div>
-<div class='card' style='margin-top:12px'><div class='card-title'>Watchlist - {len(ALL_SYMBOLS)} Symbols Available - Score {MIN_SCORE}+ will be sent - Max Tracked {MAX_TRACKED}</div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;max-height:380px;overflow-y:auto;margin-top:10px;padding-right:4px'>{symbols_html}</div></div>
+<div class='card' style='margin-top:12px'><div class='card-title'>Watchlist - choose up to {MAX_SYMBOLS_PER_USER} of {len(ALL_SYMBOLS)} symbols - <span id='symcount' style='color:#10b981'></span></div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;max-height:380px;overflow-y:auto;margin-top:10px;padding-right:4px'>{symbols_html}</div></div>
+{sym_js}
 <button type='submit' class='btn-primary' style='margin-top:16px'>Save Settings - {mode.upper()} Mode</button>
 </form></div>"""
     return pro_layout(content,"Settings", is_admin=is_admin)
@@ -1466,8 +1494,9 @@ def referral_page():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"; my_code=generate_ref_code(email)
     ref_count=get_ref_count_and_auto_upgrade(email); auth=load_json(AUTH_FILE, dict)
-    my_refs=[{"email":e,"plan":info.get("plan_status","No Plan"),"date":info.get("created","")[:10]} for e,info in auth.items() if info.get("referred_by","").upper()==my_code.upper()]
-    ref_rows="".join([f"<tr><td style='font-weight:600'>{r['email'][:24]}</td><td><span class='pill { 'pill-win' if 'ACTIVE' in r['plan'] else 'pill-loss'}'>{r['plan'][:20]}</span></td><td style='color:#64748b'>{r['date']}</td></tr>" for r in my_refs[-20:]]) or "<tr><td colspan=3 style='text-align:center;color:#64748b;padding:16px'>No referrals yet. Share your link below.</td></tr>"
+    paid_set=paid_referee_emails(); pend_set={r.get("user") for r in load_json(USERS_FILE, dict).values() if isinstance(r, dict) and r.get("status")=="pending"}
+    my_refs=[{"email":e,"plan":("Paid ✅ counted" if e in paid_set else ("Payment pending approval" if e in pend_set else "Not paid yet")),"date":auth[e].get("created","")[:10]} for e in referees_of(my_code, email, auth)]
+    ref_rows="".join([f"<tr><td style='font-weight:600'>{r['email'][:24]}</td><td><span class='pill { 'pill-win' if r['plan'].startswith('Paid') else 'pill-loss'}'>{r['plan'][:20]}</span></td><td style='color:#64748b'>{r['date']}</td></tr>" for r in my_refs[-20:]]) or "<tr><td colspan=3 style='text-align:center;color:#64748b;padding:16px'>No referrals yet. Share your link below.</td></tr>"
     progress_pct = min(ref_count*10,100)
     content=f"""<div style='max-width:900px;margin:0 auto;padding:14px'>
 <h1 style='font-size:22px;font-weight:900;margin:0'>Referral Program</h1><p style='color:#64748b;font-size:13px;margin:6px 0 16px'>Invite 10 friends who buy a plan → Get Lifetime FREE worth R5000</p>
@@ -1480,7 +1509,7 @@ def referral_page():
 <div class='card-sub' style='margin-top:8px'>{'🎉 You unlocked FREE Lifetime! Contact admin for activation.' if ref_count>=10 else f'Need {10-ref_count} more paid referrals to unlock Lifetime worth R5000'}</div>
 <div style='margin-top:12px;display:flex;gap:6px;flex-wrap:wrap'><span class='pro-badge'>R500 = 1 Year</span><span class='pro-badge'>R5000 = Lifetime</span><span class='pro-badge'>10 Refs = Free Lifetime</span></div></div>
 </div>
-<div class='table-card' style='margin-top:12px'><h3 style='margin:0 0 12px;font-size:14px;font-weight:800'>Your Referrals ({len(my_refs)})</h3><table><tr><th>Email</th><th>Plan Status</th><th>Joined</th></tr>{ref_rows}</table></div>
+<div class='table-card' style='margin-top:12px'><h3 style='margin:0 0 12px;font-size:14px;font-weight:800'>Your Referrals ({len(my_refs)})</h3><table><tr><th>Email</th><th>Payment</th><th>Joined</th></tr>{ref_rows}</table></div>
 </div>"""
     return pro_layout(content,"Referral", is_admin=is_admin)
 
@@ -2417,11 +2446,13 @@ def cron_scan():
         if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
             skipped.append(f"{email} DAILY_LIMIT_REACHED"); continue
 
+        if not user_session_open(user_settings):
+            skipped.append(f"{email} OUTSIDE_CHOSEN_SESSIONS"); continue
         paused, why = protection_status(email)
         if paused:
             skipped.append(f"{email} PROTECTION_PAUSE: {why}"); maybe_send_pause_notice(email, chat_id, why); continue
         digest_lines = []
-        syms_all = user_settings.get("symbols", [])[:12]
+        syms_all = user_settings.get("symbols", [])[:MAX_SYMBOLS_PER_USER]
         cur = (system.get("scan_cursor") or {}).get(email)
         start = syms_all.index(cur) if cur in syms_all else 0
         order = syms_all[start:] + syms_all[:start]        # resume where the last run ran out of data budget
