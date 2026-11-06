@@ -272,7 +272,8 @@ def drop_ghost_sessions():
 MAX_SYMBOLS_PER_USER = int(os.getenv("MAX_SYMBOLS_PER_USER", "6"))   # watchlist cap: every watched pair costs Twelve Data credits on each scan
 SESSION_HOURS_UTC = {"Asia": (0, 9), "London": (8, 17), "New York": (13, 22)}
 ALL_SESSIONS = list(SESSION_HOURS_UTC)
-MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "2"))      # no account risks more than this per trade (was unlimited: 5% per trade loses 40% in 10 losses)
+MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "10"))     # hard ceiling per trade
+RECOMMENDED_RISK_PERCENT = 2.0                                      # what we tell users to use
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))    # after this many stop-outs in one day, no new signals until tomorrow
 LOSS_STREAK_PAUSE = int(os.getenv("LOSS_STREAK_PAUSE", "3"))      # this many losses in a row ...
 STREAK_COOLOFF_HOURS = int(os.getenv("STREAK_COOLOFF_HOURS", "12"))  # ... pauses new signals for this long after the last loss
@@ -319,7 +320,7 @@ def maybe_send_pause_notice(email, chat_id, why):
 
 def get_user_settings(email):
     settings = load_json(SETTINGS_FILE, dict)
-    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":list(ALL_SESSIONS),"symbols":ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"risk_percent":1.0,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":True}
+    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":list(ALL_SESSIONS),"symbols":ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"risk_percent":RECOMMENDED_RISK_PERCENT,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":True}
     s = settings.get(email, default)
     for k,v in default.items():
         if k not in s: s[k]=v
@@ -1069,7 +1070,7 @@ def settings_page():
 <div class='card'><div class='card-title'>Currency</div><select name='currency' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{currency_options}</select></div>
 <div class='card'><div class='card-title'>Account Size</div><input name='account_size' type='number' step='0.01' value='{s.get('account_size',142)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
 <div class='card'><div class='card-title'>Lot Size</div><input name='lot_size' type='number' step='0.01' value='{s.get('lot_size',0.01)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
-<div class='card'><div class='card-title'>Risk % per trade (max {MAX_RISK_PERCENT:g}%)</div><input name='risk_percent' type='number' step='0.1' value='{s.get('risk_percent',1)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'></div>
+<div class='card'><div class='card-title'>Risk % per trade (recommended {RECOMMENDED_RISK_PERCENT:g}%, max {MAX_RISK_PERCENT:g}%)</div><input name='risk_percent' type='number' step='0.1' min='0.1' max='{MAX_RISK_PERCENT:g}' value='{s.get('risk_percent',1)}' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;border:1px solid #1e293b;background:#0b1220;color:white'><div style='margin-top:8px;font-size:12px;color:#f59e0b'>Above {RECOMMENDED_RISK_PERCENT:g}% a losing streak can hurt fast: 5 losses in a row at 10% costs about 41% of the account.</div></div>
 <div class='card'><div class='card-title'>Leverage</div><select name='leverage' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{"".join([f"<option value='1:{lv}' {'selected' if s.get('leverage','1:500')==f'1:{lv}' else ''}>1:{lv}</option>" for lv in [10,20,30,50,100,200,400,500,1000,2000]])}</select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Caps how large a position your account can actually margin — if this is too low for your lot size, SL/TP will size the trade down automatically and flag it in the Telegram message.</div></div>
 <div class='card'><div class='card-title'>Risk Reward</div><select name='rr_ratio' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='1.5' {'selected' if str(s.get('rr_ratio'))=='1.5' else ''}>1:1.5 Scalp</option><option value='2' {'selected' if str(s.get('rr_ratio'))=='2' else ''}>1:2</option><option value='2.5' {'selected' if str(s.get('rr_ratio'))=='2.5' else ''}>1:2.5 Regular</option><option value='3' {'selected' if str(s.get('rr_ratio'))=='3' else ''}>1:3 SMC</option></select></div>
 <div class='card' style='border:2px solid #ef444455'><div class='card-title'>Avoid News</div><select name='trade_news' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='yes' {'selected' if s.get('trade_news',True) else ''}>🟢 Trade through news — no blackout</option><option value='no' {'selected' if not s.get('trade_news',True) else ''}>🔴 Avoid news — block signals + auto-flag tracked trades near high-impact events</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When set to Avoid, new signals are blocked ±15min around real high-impact events for correlated symbols, and you'll get a Telegram alert ~30min before. See the <a href='/news' style='color:#10b981'>News</a> tab for the live calendar.</div></div>
@@ -2429,6 +2430,8 @@ def cron_scan():
     tg_users = load_json(TG_FILE, dict)
     sent=[]; skipped=[]; daily_counts={}
     scan_stats = {"analyzed": 0, "data_errors": 0, "deferred": [], "last_data_error": None}; cursors = {}
+    if hasattr(eng, "td_set_patience"): eng.td_set_patience(80)    # wait for a free per-minute slot rather than skipping pairs
+    seen_analysis = {}
 
     for email, chat_data in tg_users.items():
         chat_id = chat_data.get("chat_id")
@@ -2466,6 +2469,8 @@ def cron_scan():
             try:
                 r = cached_analysis(sym, user_settings)
                 scan_stats["analyzed"] += 1
+                seen_analysis[sym] = {"reason": str(r.get("reason") or "")[:300], "bias": r.get("bias"), "score": r.get("score"), "signal": bool(r.get("signal")),
+                                      "stage": (r.get("details") or {}).get("waiting_for") or (r.get("details") or {}).get("phase") or "", "at": datetime.now().isoformat()}
                 if (r.get("details") or {}).get("data_error"):
                     scan_stats["data_errors"] += 1; scan_stats["deferred"].append(sym); scan_stats["last_data_error"] = r.get("reason")
                     if stopped_at is None: stopped_at = sym
@@ -2488,6 +2493,8 @@ def cron_scan():
     # record how healthy this run was, so /health (and the admin alert) can say when the data feed is the reason for silence
     system = load_json(SYSTEM_FILE, dict)
     system["scan_cursor"] = cursors
+    if hasattr(eng, "td_set_patience"): eng.td_set_patience(0)
+    la = system.get("last_analysis", {}); la.update(seen_analysis); system["last_analysis"] = la
     scan_stats["deferred"] = sorted(set(scan_stats["deferred"]))
     system["last_scan_stats"] = {**scan_stats, "time": datetime.now().isoformat(), "feed": td_status()}
     save_json(SYSTEM_FILE, system)
@@ -2560,6 +2567,10 @@ def system_check():
         row("Last scan", ok, f"{_esc(str(st.get('time',''))[:19])}: analysed {st.get('analyzed')}, no-data {st.get('data_errors')}" + (f" ({_esc(', '.join(st.get('deferred', [])[:8]))})" if st.get("deferred") else "") + (f"<br>{_esc(str(st.get('last_data_error'))[:160])}" if st.get("last_data_error") else ""))
     else:
         row("Last scan", None, "no scan recorded yet since the last deploy")
+    la = system.get("last_analysis") or {}
+    if la:
+        lines = "<br>".join(f"<b>{_esc(k)}</b> ({_esc(str(v.get('at',''))[11:16])}): {_esc(str(v.get('reason',''))[:230])}" for k, v in sorted(la.items()))
+        row("Why each pair has / has no signal (last scan)", None, lines)
     # --- news ---
     try:
         cs = nc.status_summary(); row("News calendar", bool(cs.get("event_count")), f"{cs.get('event_count')} events, source {_esc(str(cs.get('source')))}" + (f"<br>{_esc(str(cs.get('last_error'))[:160])}" if cs.get("error") else ""))
