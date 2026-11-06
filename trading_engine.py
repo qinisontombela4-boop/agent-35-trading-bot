@@ -84,12 +84,26 @@ def _td_note_error(r, now):
         else:                                          # per-minute limit -> back off for the rest of the minute
             _TD["blocked_until"] = max(_TD["blocked_until"], now + 20); _TD["blocked_reason"] = "minute"
 
+def td_set_patience(seconds):
+    """Let data requests wait (up to `seconds`) for a free per-minute slot instead of failing. Used by the scheduled scan only."""
+    _TD["patient_until"] = time.time() + max(0, seconds)
+    if seconds > 0 and _TD.get("blocked_reason") == "minute": _TD["blocked_until"] = 0.0
+
 def td_request(symbol, interval, outputsize=50):
     if not KEYS: return {"code":500,"message":"No keys"}
     now = time.time(); _td_roll_day(now); per_min, per_day = _td_limits()
+    if now < _TD["blocked_until"] and _TD["blocked_reason"] == "minute" and now < _TD.get("patient_until", 0):
+        time.sleep(min(15, _TD["blocked_until"] - now)); now = time.time()
     if now < _TD["blocked_until"]:
         return {"code":429,"message":f"data feed paused ({_TD['blocked_reason']} limit) - {_TD['last_error'] or ''}","local":True}
     _TD["mins"] = [t for t in _TD["mins"] if now - t < 60]
+    # PATIENT MODE (set by the scan): instead of dropping the symbol when this minute's calls are used, wait for a slot to free up.
+    # Before this, a cold scan (12 pairs x 4-5 timeframes) hit the per-minute cap and half the pairs were skipped as "no data".
+    _spins = 0
+    while len(_TD["mins"]) >= per_min and time.time() < _TD.get("patient_until", 0) and _spins < 30:
+        _spins += 1
+        wait = max(0.5, min(5.0, 60 - (time.time() - min(_TD["mins"])) + 0.2)); time.sleep(wait)
+        now = time.time(); _TD["mins"] = [t for t in _TD["mins"] if now - t < 60]
     if len(_TD["mins"]) >= per_min: return {"code":429,"message":"per-minute data budget used - will retry on the next run","local":True}
     if _TD["calls"] >= per_day: return {"code":429,"message":"daily data budget used (credits reset 00:00 UTC)","local":True}
     td_symbol=SYMBOL_MAP.get(symbol,symbol); last_error=None
@@ -99,7 +113,10 @@ def td_request(symbol, interval, outputsize=50):
         try:
             _TD["calls"] += 1; _TD["mins"].append(time.time())
             r=requests.get(url,timeout=12).json()
-            if "code" in r and r["code"]==429: last_error=r; continue
+            if "code" in r and r["code"]==429:
+                last_error=r
+                if "minute" in str(r.get("message","")).lower() and time.time() < _TD.get("patient_until", 0): time.sleep(12)   # provider says this minute is full: let it clear
+                continue
             if "values" in r: return r
             last_error=r
         except Exception as e: last_error={"code":500,"message":str(e)}; continue
