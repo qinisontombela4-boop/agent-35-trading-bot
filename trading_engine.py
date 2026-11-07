@@ -1163,6 +1163,20 @@ def find_grab(candles, swings, direction, d1, lookback=12):
     low, high = (best["level"], extreme) if hi else (extreme, best["level"])
     return {"index": best["index"], "low": low, "high": high, "kind": "sweep", "name": best["name"], "level": best["level"]}
 
+def _h1_rejection(h1, direction, poi, atr_h1, look=3):
+    """Hammer / engulfing on one of the last `look` CLOSED 1H candles that wicked into the zone and closed back out of its
+    near half (bullish: closed above the zone midpoint; bearish: below it)."""
+    if len(h1) < look + 4: return None
+    mid = (poi["low"] + poi["high"]) / 2.0; tol = 0.15 * atr_h1
+    for k in range(2, look + 2):                      # h1[-1] may still be forming, so start at h1[-2]
+        seg = h1[:len(h1) - k + 1]; cdl = seg[-1]
+        pats, _ = detect_candle(seg)
+        if direction == "BULLISH" and _bull_pat(pats) and cdl["low"] <= poi["high"] + tol and cdl["close"] > mid:
+            return [p for p in pats if p in ("Bull Engulf", "Hammer")][0]
+        if direction == "BEARISH" and _bear_pat(pats) and cdl["high"] >= poi["low"] - tol and cdl["close"] < mid:
+            return [p for p in pats if p in ("Bear Engulf", "Hang Man")][0]
+    return None
+
 def _m5_trigger(m5, direction, m5_events):
     if not m5: return None
     ev = [e for e in m5_events if e["direction"] == direction and e["index"] >= len(m5) - 24]
@@ -1278,9 +1292,12 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
         return out(f"{poi_txt} was closed through after the tap - order block invalidated")
     items["1H order block tapped"] = True; notes["1H order block tapped"] = f"{poi_txt} tapped"
     sw = find_swing_points(ltf, lookback=2); evs = detect_structure_events(ltf, sw)
-    mss = [e for e in evs if e["direction"] == direction and e["index"] >= tap and e["index"] >= len(ltf) - (12 if m15 else 36)]
+    mss = [e for e in evs if e["direction"] == direction and e["index"] >= tap and e["index"] >= len(ltf) - (16 if m15 else 48)]
     tf_name = "15m" if m15 else "5m"
     if mss: items["15m structure shift"] = True; notes["15m structure shift"] = f"{tf_name} {mss[-1]['kind']} {direction.lower()} after the tap"
+    else:
+        rej = _h1_rejection(h1, direction, poi, atr_h1)     # a clean 1H hammer / engulfing rejecting the zone counts as the confirmation too
+        if rej: items["15m structure shift"] = True; tf_name = "1H"; notes["15m structure shift"] = f"1H rejection at the zone ({rej})"
     m5_swings = find_swing_points(m5, lookback=2) if m5 else []
     m5_events = detect_structure_events(m5, m5_swings) if m5 else []
     trig = _m5_trigger(m5, direction, m5_events)
