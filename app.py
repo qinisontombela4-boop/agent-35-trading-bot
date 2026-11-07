@@ -70,7 +70,7 @@ if not NEWS_MODULE_OK:
 # here and formatting it into every UI string below means this can't drift
 # out of sync with the engine again.
 MIN_SCORE = eng.DEFAULT_WEIGHTS.get("min_score", 5)
-REGULAR_MIN_SCORE = eng.DEFAULT_WEIGHTS.get("regular_min_score", 6)
+REGULAR_MIN_SCORE = eng.DEFAULT_WEIGHTS.get("regular_min_score", 5)
 
 # --- SUPABASE: persistent storage. Data lives in a Supabase Postgres
 # table, entirely outside Render's ephemeral disk, so it survives every
