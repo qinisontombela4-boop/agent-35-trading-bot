@@ -642,7 +642,7 @@ DEFAULT_WEIGHTS.update({
     # call, not a backtested number — validate it with backtest.py once you
     # have real results, and adjust from there.
     "min_score": 2,        # strategies that must line up before a signal is sent
-    "regular_min_score": 6,  # REGULAR (SMC) mode: checklist items (of 10) needed; the 4 required gates already count
+    "regular_min_score": 5,  # REGULAR (SMC) mode: checklist items (of 10) needed (lowered from 6 by request); the 4 required gates already count
     "max_opposing": 2,     # if more than this many strategies vote the OTHER way, skip
     "zone_veto": True,     # never buy in premium / sell in discount unless a zone-appropriate OB backs it
 })
@@ -1346,6 +1346,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
     min_risk = c.get("min_stop_atr", 0.5) * atr_h1   # stop floor: a stop tighter than half a 1H ATR sits inside normal noise (seen in backtests as 2-5 pip stops)
     if 0 < risk < min_risk:
         risk = min_risk; stop = entry - risk if direction == "BULLISH" else entry + risk
+    liq_pool = None
     if pullback:
         # take the first (nearest, order blocks before liquidity pools) target that leaves enough room; the TP sits
         # AT an order block's near edge, or just before an untaken liquidity pool (which is where price is drawn to)
@@ -1363,13 +1364,23 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
     else:
         target = h1_range["high"] if direction == "BULLISH" else h1_range["low"]
         room = (target - entry) if direction == "BULLISH" else (entry - target)
+        # TAKE PROFIT AT UNTAKEN LIQUIDITY: price is drawn to resting stops (swing / equal highs-lows, previous-day and 5-day levels).
+        # Use the nearest untaken pool in the trade direction that leaves at least the user's reward ratio (and at most 6R), stopping just short of it. If none fits, fall back
+        # to the user's reward-ratio target below.
+        liq_pool = None
+        if risk > 0 and c.get("pools"):
+            side = "buy" if direction == "BULLISH" else "sell"
+            for lp in untaken_liquidity(c["pools"], entry, side, 6):
+                tl = lp["level"] - 0.1 * atr_h1 if direction == "BULLISH" else lp["level"] + 0.1 * atr_h1
+                rm = (tl - entry) if direction == "BULLISH" else (entry - tl)
+                if max(min_rr_of(c), c.get("rr", 2.0)) * risk <= rm <= 6.0 * risk: liq_pool, target, room = lp, tl, rm; break
     if risk <= 0: return out("Rejected: invalid stop distance", common)
     if risk > 3.0 * atr_h1: return out(f"Stop would be {risk/atr_h1:.1f} ATR wide (beyond the order block) - setup too wide to trade", common)
     if room < min_rr_of(c) * risk: return out(f"Only {room/risk:.1f}R of room to the target - need {min_rr_of(c):.1f}R", common)
     if score < c["min_score"] + (1 if pullback else 0):   # trading against the daily bias needs one more confirmation than a trade with it
         return out(f"{score}/10 checklist - need {c['min_score']}+ ({', '.join(k for k, v in items.items() if not v)} missing)", common)
     rr = c["rr"]
-    tp = target if pullback else (entry + risk * rr if direction == "BULLISH" else entry - risk * rr)
+    tp = target if (pullback or liq_pool) else (entry + risk * rr if direction == "BULLISH" else entry - risk * rr)
     if pullback:
         tgt_desc = (f"the untaken {pullback_target['name']} {pullback_target['low']:.5g}" if pullback_target["tf"] == "liquidity" else
                     f"the {pullback_target['tf']} {'Bull' if c['daily_bias']=='BULLISH' else 'Bear'} OB {pullback_target['low']:.5g}-{pullback_target['high']:.5g}")
@@ -1379,7 +1390,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
     if grab: why.append(grab)
     why.append(notes["15m structure shift"] + (f", {trig}" if trig else ""))
     why.append(f"{len(agree)}/10 strategies agree")
-    why.append(f"stop beyond the order block at {stop:.5g}; target {target:.5g} ({room/risk:.1f}R)")
+    why.append(f"stop beyond the order block at {stop:.5g}; target {target:.5g} ({room/risk:.1f}R)" + (f", just before the untaken {liq_pool['name']} {liq_pool['level']:.5g}" if liq_pool else ""))
     if pullback: why.append("this trades the 1H move toward the target while the daily bias is still " + c['daily_bias'].lower() + " - take profit at the target, then look for the trade back in the daily direction")
     return {
         "symbol": symbol, "signal": True, "score": score, "bias": direction, "bias_4h": c["bias_4h"], "entry": entry,
@@ -1388,7 +1399,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
         "rationale": ". ".join(why) + ".", "confluence": ("PULLBACK | " if pullback else "") + " | ".join(k for k, v in items.items() if v),
         "details": {"checklist": dict(items), "notes": notes, "regular_mode": True, "poi": poi, "zone": zone, "pullback": pullback,
                     **common, "stop": stop, "target_liquidity": target, "room_r": round(room / risk, 2), "tap_index": tap},
-        "mode": "regular", "structural": True, "mode_stage": "regular", "pullback": pullback, "tp_is_target": pullback,
+        "mode": "regular", "structural": True, "mode_stage": "regular", "pullback": pullback, "tp_is_target": bool(pullback or liq_pool), "tp_liquidity": (liq_pool or {}).get("name"),
         "factors": {**{n: (votes[n][0] == direction) for n in STRATEGY_NAMES}, "zone": zone, "zone_veto_blocked": False},
     }
 
@@ -1444,7 +1455,7 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
     c = {"symbol": symbol, "user_settings": user_settings, "historical": historical, "cache": cache, "now": now,
          "d1": d1, "h4": h4, "h1": h1, "_out": _out,
          "rr": float(user_settings.get("rr_ratio", 2.0) or 2.0), "min_rr": float(user_settings.get("min_risk_reward", 1.5) or 1.5),
-         "min_score": w.get("regular_min_score", 6), "min_stop_atr": 1.0 if scalp else 0.5}
+         "min_score": w.get("regular_min_score", 5), "min_stop_atr": 1.0 if scalp else 0.5}
     allow_pullback = bool(user_settings.get("pullback_trades", True))
 
     def wait(reason, bias="NEUTRAL", entry=0, pct=50, score=0, details=None):
@@ -1487,6 +1498,7 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
             if gap > 1.5 * atr_h1:
                 return wait(f"Daily {direction.lower()} (price in {dz}); 1H in {zone} - waiting for price to reach the 1H {poi_txt} ({gap/atr_h1:.1f} ATR away).{liq_txt}",
                             bias=direction, entry=price, pct=h1_pct, score=sum(base_items.values()), details={"poi": poi, "waiting_for": "poi", "liquidity": [_fmt_pool(p) for p in liq]})
+            c["pools"] = pools
             return _entry_from_poi(c, direction, poi)
 
     # ---- RETRACEMENT PHASE: daily bias intact, but the 1H is on the wrong side of its range (e.g. daily bullish, 1H in premium
