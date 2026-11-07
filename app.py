@@ -533,6 +533,7 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings, is_test=Fa
     mode = user_settings.get("trading_mode", "regular")
     sl, tp, sl_dist, tp_dist, risk_amt, lev_info = build_trade_plan(symbol, r, user_settings)
     if lev_info.get('too_risky'):
+        if not is_test: maybe_send_toowide_notice(email, chat_id, symbol, lev_info.get('actual_risk_pct'), acc, curr_sym)
         return False, {"error": f"skipped: stop is too wide for this account - the smallest lot (0.01) would risk {lev_info.get('actual_risk_pct')}% vs your {risk_percent}% limit"}
     if lev_info.get('structural'): lot = lev_info['effective_lot']; rr = lev_info.get('rr', rr)
 
@@ -558,6 +559,16 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings, is_test=Fa
     save_json(PENDING_FILE, pending)
     if not is_test: increment_daily_signal_count(email)
     return True, {"signal_id": signal_id, "telegram": {"ok": True, "message_id": (res.get("result") or {}).get("message_id")}}
+
+def maybe_send_toowide_notice(email, chat_id, symbol, pct, acc, curr_sym):
+    """Tell the user (max once per day) that a setup was skipped because 0.01 lot is too big for their balance - never silent."""
+    try:
+        now = datetime.utcnow(); today = now.strftime("%Y-%m-%d"); sent = load_json(HEADSUP_FILE, dict); key = f"{email}|TOOWIDE|{today}"
+        if key in sent: return False
+        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": f"ℹ️ A {symbol} setup was found but skipped: even the smallest lot (0.01) would risk {pct}% of your {curr_sym}{acc} account, above the {MAX_RISK_PERCENT:g}% maximum.\nIf your account size in Settings is wrong, update it. Otherwise this pair is too large for your balance - consider forex majors with tighter stops. (Sent once a day.)"})
+        if res.get("ok"): sent[key] = now.isoformat(); save_json(HEADSUP_FILE, sent); return True
+    except Exception as e: print(f"[TOOWIDE] {e}", file=sys.stderr)
+    return False
 
 def user_has_open_or_pending(email, symbol):
     tracked = load_json(TRACK_FILE, dict)
@@ -773,8 +784,15 @@ def build_trade_plan(symbol, r, user_settings):
     actual_risk = lot_f*dist*val/to_usd if to_usd else risk_usd
     if pip: sl_d, tp_d = dist/pip, dist*rr/pip
     else: sl_d, tp_d = dist, dist*rr
-    too_risky = actual_risk > 2.0*risk_usd/to_usd if to_usd else False   # even the smallest lot risks over twice the user's risk %
-    info = {"too_risky": too_risky, "actual_risk_pct": round(actual_risk/acc*100, 1) if acc else None, "leverage_capped": False, "effective_lot": lot_f, "max_lot": round(max_lot, 2), "sized_to_risk": True, "note": " | ".join(notes), "structural": True, "rr": rr}
+    actual_pct = (actual_risk/acc*100) if acc else 0.0
+    # Before: any setup where 0.01 lot risked more than 2x the user's risk % was silently dropped - so 0.01-lot users on small accounts
+    # got NO signals for gold, indices, crypto and often even EURUSD. Now it is sent with a loud warning, and only dropped above the
+    # system maximum (MAX_RISK_PERCENT). The user decides; the warning shows the real % at risk.
+    too_risky = actual_pct > MAX_RISK_PERCENT
+    if actual_pct > risk_percent*1.25 and not too_risky:
+        notes = [n for n in notes if "smallest lot" not in n]
+        notes.append(f"HIGH RISK: the smallest lot (0.01) risks {actual_pct:.1f}% of your account on this stop (your setting is {risk_percent:g}%). Take it only if you accept that, otherwise SKIP")
+    info = {"too_risky": too_risky, "actual_risk_pct": round(actual_pct, 1) if acc else None, "leverage_capped": False, "effective_lot": lot_f, "max_lot": round(max_lot, 2), "sized_to_risk": True, "note": " | ".join(notes), "structural": True, "rr": rr}
     return round(sl, dp), round(tp, dp), round(sl_d, 1), round(tp_d, 1), actual_risk, info
 
 def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale="", lev_info=None):
@@ -2483,7 +2501,9 @@ def cron_scan():
                     continue
                 ok, info = dispatch_signal_to_user(email, chat_id, sym, r, user_settings)
                 if ok: sent.append(f"{email}:{sym}")
-                else: skipped.append(f"{email}:{sym} {info.get('error')}")
+                else:
+                    skipped.append(f"{email}:{sym} {info.get('error')}")
+                    if sym in seen_analysis: seen_analysis[sym]["reason"] = f"SETUP FOUND BUT NOT DELIVERED to {email[:3]}***: {info.get('error')}"
             except Exception as e:
                 skipped.append(f"{email}:{sym} ERROR:{e}")
         cursors[email] = stopped_at or ""
