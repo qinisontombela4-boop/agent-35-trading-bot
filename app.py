@@ -172,6 +172,17 @@ CURRENCY_MAP = {"ZAR":{"symbol":"R","name":"Rand"},"USD":{"symbol":"$","name":"D
 # backend changed: Supabase when configured, local JSON files as a
 # fallback for local development without Supabase env vars set.
 
+JOURNAL_PER_USER = 100
+def _trim_journal(journal):
+    """Keep each user's most recent JOURNAL_PER_USER entries. The old rule kept the last 500 entries of ALL users combined, so with ~100
+    users (hundreds of results a day) everyone's history was wiped within a day or two."""
+    if len(journal) <= JOURNAL_PER_USER: return journal
+    counts, keep = {}, []
+    for j in reversed(journal):
+        e = j.get("email") or "_"; counts[e] = counts.get(e, 0) + 1
+        if counts[e] <= JOURNAL_PER_USER: keep.append(j)
+    keep.reverse(); return keep
+
 def _filename(p):
     return os.path.basename(p)
 
@@ -1847,13 +1858,13 @@ def telegram_webhook():
 
                 journal=load_json(JOURNAL_FILE, list)
                 journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":entry["symbol"],"status":"TOOK","result":f"Taken by {user_name} {entry['mode']} Score {entry['score']}/10","pnl":0,"entry":entry["entry"],"sl":entry["sl"],"tp":entry["tp"],"risk_amt":entry["risk_amt"],"rr":entry["rr"],"date":datetime.now().strftime("%Y-%m-%d"),"currency":entry["currency"],"email":entry["email"]})
-                save_json(JOURNAL_FILE, journal[-500:])
+                save_json(JOURNAL_FILE, _trim_journal(journal))
                 text=f"TOOK {entry['symbol']} {entry['entry']} — now tracking, you'll get a result when it hits SL/TP"
             else:  # SKIP
                 del pending[signal_id]; save_json(PENDING_FILE, pending)
                 journal=load_json(JOURNAL_FILE, list)
                 journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":entry["symbol"],"status":"MISS","result":f"Skipped by {user_name}","pnl":0,"date":datetime.now().strftime("%Y-%m-%d"),"email":entry.get("email")})
-                save_json(JOURNAL_FILE, journal[-500:])
+                save_json(JOURNAL_FILE, _trim_journal(journal))
                 text=f"SKIP {entry['symbol']}"
 
         if bot:
@@ -2160,7 +2171,7 @@ def cron_news_check():
                 "pnl": 0, "entry": entry.get("entry"),
                 "date": datetime.now().strftime("%Y-%m-%d"), "email": owner_email,
             })
-            save_json(JOURNAL_FILE, journal[-500:])
+            save_json(JOURNAL_FILE, _trim_journal(journal))
             owner_chat = entry.get("chat_id")
             del tracked[signal_id]
             closed_this_event.append(sym)
@@ -2287,7 +2298,7 @@ def cron_track_check():
                 "date": now.strftime("%Y-%m-%d"), "currency": entry.get("currency","ZAR"),
                 "email": entry.get("email"),
             })
-            save_json(JOURNAL_FILE, journal[-500:])
+            save_json(JOURNAL_FILE, _trim_journal(journal))
             del tracked[signal_id]
             resolved.append({"symbol": sym, "outcome": outcome, "pnl": pnl, "email": entry.get("email")})
             emoji = "✅" if outcome=="WIN" else "❌"
@@ -2327,7 +2338,7 @@ def cron_check_expiry():
                 "pnl": 0, "entry": entry.get("entry"), "date": now.strftime("%Y-%m-%d"),
                 "email": entry.get("email"),
             })
-            save_json(JOURNAL_FILE, journal[-500:])
+            save_json(JOURNAL_FILE, _trim_journal(journal))
             owner_chat = entry.get("chat_id")
             del tracked[signal_id]
             expired.append(entry.get("symbol"))
