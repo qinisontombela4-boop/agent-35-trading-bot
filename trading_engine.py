@@ -1270,9 +1270,18 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
         if details: d.update(details)
         return c["_out"](reason, score=sc, bias=direction, entry=price, pct=h1_pct, details=d, extra={"mode_stage": "regular"})
 
-    m15 = [] if (historical is not None and "15min" not in historical) else (get_values_cached(cache, symbol, "15min", 100, historical)[0] or [])
-    m5 = get_values_cached(cache, symbol, "5min", 100, historical)[0] or []
     price = c["price"]; h1_pct = c["h1_pct"]
+    # CREDIT SAVER (live only, regular mode): fetch the 5m candles first and run the SAME tap test on them (96 x 5m = the 8h window the 15m
+    # test uses). If the zone was not touched there is nothing to confirm, so the 15m fetch is skipped. Same result as before, one call fewer.
+    m5 = get_values_cached(cache, symbol, "5min", 100, historical)[0] or []
+    if historical is None and len(m5) >= 96:      # only when a full ~8h of 5m bars is in hand (a short cached copy would hide an older tap)
+        rec = m5   # all ~100 fetched 5m bars (about 8h20m) - slightly MORE than the 8h the 15m tap test looks at, so a tap can never be missed
+        touched = any(k["low"] <= poi["high"] for k in rec) if direction == "BULLISH" else any(k["high"] >= poi["low"] for k in rec)
+        if not touched:
+            _TD["lazy_skips"] = _TD.get("lazy_skips", 0) + 1
+            return out(f"{tag}{poi_txt} not tapped yet - waiting", {"waiting_for": "tap",
+                       "heads_up": {"key": f"{symbol}|tap|{direction}|{round(poi['low'],5)}", "text": f"{symbol}: price is approaching the {poi_txt}. Watching for a 15m structure shift {direction.lower()} after the tap before any signal."}})
+    m15 = [] if (historical is not None and "15min" not in historical) else (get_values_cached(cache, symbol, "15min", 100, historical)[0] or [])
     if not m15 and not m5:
         return out("No 15m/5m data to confirm the entry")
     ltf = m15 or m5
