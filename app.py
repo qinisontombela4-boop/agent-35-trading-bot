@@ -2459,10 +2459,22 @@ def cron_scan():
     tg_users = load_json(TG_FILE, dict)
     sent=[]; skipped=[]; daily_counts={}
     scan_stats = {"analyzed": 0, "data_errors": 0, "deferred": [], "last_data_error": None}; cursors = {}
-    if hasattr(eng, "td_set_patience"): eng.td_set_patience(80)    # wait for a free per-minute slot rather than skipping pairs
+    if hasattr(eng, "td_set_patience"): eng.td_set_patience(60)    # wait for a free per-minute slot rather than skipping pairs
     seen_analysis = {}
 
-    for email, chat_data in tg_users.items():
+    # FAIRNESS + TIME LIMIT. Users used to be scanned in one fixed order with no time limit while the server kills any request after 120s
+    # (gunicorn --timeout). A slow scan (cold data, per-minute waits) died partway through, so whoever was LAST in the list was never
+    # reached - scan after scan - while everyone before them kept getting signals. Now: the starting user rotates every scan, the scan
+    # stops cleanly at ~100s, and the next scan starts at the first user it did not reach.
+    _t0 = time.monotonic(); SCAN_DEADLINE_S = float(os.getenv("SCAN_DEADLINE_S", "100"))
+    _users = list(tg_users.items()); _n = len(_users)
+    _start = (int((load_json(SYSTEM_FILE, dict)).get("scan_user_cursor", 0)) % _n) if _n else 0
+    _users = _users[_start:] + _users[:_start]
+    reached = set(); not_reached = []; next_cursor = None
+    for _ui, (email, chat_data) in enumerate(_users):
+        if time.monotonic() - _t0 > SCAN_DEADLINE_S:
+            not_reached = [e for e, _ in _users[_ui:]]; next_cursor = (_start + _ui) % _n; break
+        reached.add(email)
         chat_id = chat_data.get("chat_id")
         if not chat_id: continue
         # FIXED: this used to skip any user without a saved settings row
@@ -2490,6 +2502,7 @@ def cron_scan():
         order = syms_all[start:] + syms_all[:start]        # resume where the last run ran out of data budget
         stopped_at = None
         for sym in order:
+            if time.monotonic() - _t0 > SCAN_DEADLINE_S: skipped.append(f"{email} SCAN_TIME_LIMIT (remaining pairs next run)"); break
             if get_daily_signal_count(email) >= MAX_SIGNALS_PER_DAY:
                 skipped.append(f"{email} DAILY_LIMIT_REACHED"); break
             if user_tracked_count(email) >= MAX_TRACKED: break
@@ -2524,14 +2537,33 @@ def cron_scan():
     # record how healthy this run was, so /health (and the admin alert) can say when the data feed is the reason for silence
     system = load_json(SYSTEM_FILE, dict)
     system["scan_cursor"] = cursors
+    system["scan_user_cursor"] = next_cursor if next_cursor is not None else ((_start + 1) % _n if _n else 0)   # rotate the start every scan
+    system["last_scan_seconds"] = round(time.monotonic() - _t0, 1)
     if hasattr(eng, "td_set_patience"): eng.td_set_patience(0)
     la = system.get("last_analysis", {}); la.update(seen_analysis); system["last_analysis"] = la
     scan_stats["deferred"] = sorted(set(scan_stats["deferred"]))
     system["last_scan_stats"] = {**scan_stats, "time": datetime.now().isoformat(), "feed": td_status()}
     save_json(SYSTEM_FILE, system)
-    if scan_stats["analyzed"] and scan_stats["data_errors"] >= max(2, scan_stats["analyzed"] // 2):
+    # Admin-only alert (users never get it). Off switch: DATA_FEED_ALERTS=off. A per-minute limit clears by itself on the next run, so it is never
+    # alerted; only a real outage / daily-limit problem is, and then once every 6 hours at most.
+    _err = str(scan_stats.get("last_data_error") or "").lower()
+    _self_heals = ("minute" in _err) and "daily" not in _err
+    if os.getenv("DATA_FEED_ALERTS", "on").lower() != "off" and not _self_heals and scan_stats["analyzed"] and scan_stats["data_errors"] >= max(2, scan_stats["analyzed"] // 2):
         alert_admin("data_feed", f"⚠️ Agent 35 data feed problem: {scan_stats['data_errors']} of {scan_stats['analyzed']} symbols had no data this scan "
                     f"({scan_stats['last_data_error']}). Signals are paused for the affected pairs. Feed: {td_status()['calls_today']}/{td_status()['daily_limit']} credits used today.")
+    # Remember, per user, why this scan did or did not send to them (shown on /system-check, so "user X got nothing" is answerable at a glance)
+    try:
+        sysd = load_json(SYSTEM_FILE, dict); us_scan = sysd.get("user_scan", {}); nowi = datetime.now().isoformat()
+        for email in tg_users:
+            rec = us_scan.get(email, {})
+            mine = [x.split(" ", 1)[1] if " " in x else x for x in skipped if x.startswith(email)]
+            if email in not_reached: mine = ["NOT REACHED: the scan hit its time limit before this user (starts with them next scan)"] + mine
+            got = [x for x in sent if x.startswith(email + ":") and "heads-up" not in x]
+            rec.update({"scan_at": nowi, "skips": mine[:4]})
+            if got: rec["last_signal"] = nowi; rec["last_signal_pairs"] = [g.split(":", 1)[1] for g in got][:3]
+            us_scan[email] = rec
+        sysd["user_scan"] = us_scan; save_json(SYSTEM_FILE, sysd)
+    except Exception as e: print(f"[USER SCAN NOTE] {e}", file=sys.stderr)
     return jsonify({"sent":sent,"skipped":skipped,"daily_counts":daily_counts,"daily_limit_per_user":MAX_SIGNALS_PER_DAY,"scan":scan_stats})
 
 
@@ -2598,6 +2630,7 @@ def system_check():
         row("Last scan", ok, f"{_esc(str(st.get('time',''))[:19])}: analysed {st.get('analyzed')}, no-data {st.get('data_errors')}" + (f" ({_esc(', '.join(st.get('deferred', [])[:8]))})" if st.get("deferred") else "") + (f"<br>{_esc(str(st.get('last_data_error'))[:160])}" if st.get("last_data_error") else ""))
     else:
         row("Last scan", None, "no scan recorded yet since the last deploy")
+    if system.get("last_scan_seconds") is not None: row("Last scan duration", system["last_scan_seconds"] < 100, f"{system['last_scan_seconds']}s (the scan stops itself at 100s; the server kills requests at 120s)")
     la = system.get("last_analysis") or {}
     if la:
         lines = "<br>".join(f"<b>{_esc(k)}</b> ({_esc(str(v.get('at',''))[11:16])}): {_esc(str(v.get('reason',''))[:230])}" for k, v in sorted(la.items()))
@@ -2622,6 +2655,10 @@ def system_check():
         if old: blockers.append(f"{len(old)} tracked trade(s) older than the expiry (run /cron/check-expiry)")
         if blockers: issues.append(f"{_mask_email(email)}: " + "; ".join(blockers))
         trs = "<br>".join(f"{_esc(v.get('symbol',''))} {_esc(str(v.get('bias',''))[:4])} since {_esc(str(v.get('time',''))[5:16])}" for _, v in tr) or "-"
+        _us = (load_json(SYSTEM_FILE, dict).get("user_scan") or {}).get(email, {})
+        _sess = "" if user_session_open(us) else "sessions closed right now; "
+        trs += f"<br><span style='color:#94a3b8'>{_sess}last signal sent: {_esc(str(_us.get('last_signal') or 'never since tracking began')[:16])}<br>last scan said: {_esc('; '.join(_us.get('skips') or ['nothing blocked'])[:260])}</span>"
+        if not _us.get("last_signal"): blockers.append("has not been sent a signal since this tracking began - see the 'last scan said' note")
         urows.append(f"<tr><td>{'🟢' if not blockers else '🔴'}</td><td>{_esc(_mask_email(email))}</td><td>{us.get('trading_mode')} · {len(us.get('symbols', []))} pairs · pullback {'on' if us.get('pullback_trades', True) else 'off'} · news-avoid {'off' if us.get('trade_news', True) else 'on'}</td><td>tracked {len(tr)}/{MAX_TRACKED}, pending {len(pe)}, today {cnt}/{MAX_SIGNALS_PER_DAY}<br>{trs}</td><td>{_esc('; '.join(blockers)) or 'ok'}</td></tr>")
     verdict = ("<div style='background:rgba(239,68,68,.12);border:1px solid #ef4444;border-radius:12px;padding:14px;margin-bottom:14px'><b>Problems found:</b><ul style='margin:8px 0 0 18px'>" + "".join(f"<li>{_esc(i)}</li>" for i in issues) + "</ul></div>") if issues else "<div style='background:rgba(16,185,129,.12);border:1px solid #10b981;border-radius:12px;padding:14px;margin-bottom:14px'><b>Everything checked is healthy.</b> If signals are still quiet, the market has no setup that passes the checklist.</div>"
     body = f"""<div style='max-width:1000px;margin:24px auto;padding:0 12px'><h2 style='margin:0 0 4px'>System check</h2><p style='color:#94a3b8;font-size:12px;margin:0 0 14px'>{now.strftime('%Y-%m-%d %H:%M:%S')} server time</p>{verdict}
