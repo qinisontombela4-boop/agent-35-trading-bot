@@ -183,6 +183,11 @@ def get_values_cached(cache, symbol, interval, outputsize=50, historical=None):
         _DATA_CACHE[(symbol, interval)] = (time.time(), result[0])
     return result
 
+def cached_candles(symbol, interval):
+    """Candles already fetched by earlier scans (no API call, no credit). [] when nothing is cached."""
+    hit = _DATA_CACHE.get((symbol, interval))
+    return list(hit[1]) if hit and hit[1] else []
+
 def is_market_open(symbol, as_of=None):
     # BACKTEST SUPPORT: as_of lets a backtest ask "was the market open at
     # THIS simulated point in time" instead of always checking right now.
