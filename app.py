@@ -171,6 +171,7 @@ PAIR_STATS_FILE = os.path.join(BASE_DIR, "pair_stats.json")           # what the
 TG_LINK_FILE = os.path.join(BASE_DIR, "tg_link_tokens.json")          # one-tap Telegram link tokens (30 min, single use)
 
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","EURCHF","GBPCHF","EURAUD","GBPAUD","EURCAD","GBPCAD","EURNZD","GBPNZD","AUDNZD","AUDCAD","NZDCAD","AUDCHF","NZDJPY","XAUUSD","XAGUSD","XTIUSD","XBRUSD","US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200","BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
+DEFAULT_WATCHLIST = [s for s in ("XAUUSD","EURUSD","NAS100","SPX500","US30","BTCUSD") if s in ALL_SYMBOLS] or ALL_SYMBOLS[:6]   # the pairs with a proven record in the backtests
 CURRENCY_MAP = {"ZAR":{"symbol":"R","name":"Rand"},"USD":{"symbol":"$","name":"Dollar"},"EUR":{"symbol":"€","name":"Euro"},"GBP":{"symbol":"£","name":"Pound"}}
 
 # ================= STORAGE =================
@@ -291,7 +292,7 @@ MAX_SYMBOLS_PER_USER = int(os.getenv("MAX_SYMBOLS_PER_USER", "6"))   # watchlist
 SESSION_HOURS_UTC = {"Asia": (0, 9), "London": (8, 17), "New York": (13, 22)}
 ALL_SESSIONS = list(SESSION_HOURS_UTC)
 MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "10"))     # hard ceiling per trade
-RECOMMENDED_RISK_PERCENT = 2.0                                      # what we tell users to use
+RECOMMENDED_RISK_PERCENT = 1.0                                      # what we tell users to use
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))    # after this many stop-outs in one day, no new signals until tomorrow
 LOSS_STREAK_PAUSE = int(os.getenv("LOSS_STREAK_PAUSE", "3"))      # this many losses in a row ...
 STREAK_COOLOFF_HOURS = int(os.getenv("STREAK_COOLOFF_HOURS", "12"))  # ... pauses new signals for this long after the last loss
@@ -354,7 +355,7 @@ def maybe_send_pause_notice(email, chat_id, why):
 
 def get_user_settings(email):
     settings = load_json(SETTINGS_FILE, dict)
-    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":list(ALL_SESSIONS),"symbols":ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"risk_percent":RECOMMENDED_RISK_PERCENT,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":False,"smooth_mode":False}
+    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":list(ALL_SESSIONS),"symbols":DEFAULT_WATCHLIST[:MAX_SYMBOLS_PER_USER],"risk_percent":RECOMMENDED_RISK_PERCENT,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":False,"smooth_mode":False}
     s = settings.get(email, default)
     for k,v in default.items():
         if k not in s: s[k]=v
@@ -1594,7 +1595,7 @@ def plans_page():
 ✅ Journal + Export<br>
 ✅ Up to 6 tracked trades<br>
 ✅ Cloud backup<br>
-✅ Built-in risk limits (2% recommended, 10% max)<br>
+✅ Built-in risk limits (1% recommended, 10% max)<br>
 </div><a href='/pay?plan=yearly' style='display:block;background:#10b981;color:white;text-align:center;padding:12px;border-radius:12px;text-decoration:none;font-weight:800;margin-top:16px'>Choose Yearly</a></div>
 <div class='card' style='border:1px solid #f59e0b44; background:linear-gradient(135deg,#1a1508 0%,#151e32 100%)'><div style='display:flex;justify-content:space-between;align-items:center'><h3 style='margin:0;font-size:16px'>Lifetime</h3><span style='background:#f59e0b;color:white;padding:4px 10px;border-radius:20px;font-size:10px;font-weight:800'>BEST VALUE</span></div><div class='card-value' style='margin:12px 0;color:#fbbf24'>{curr_sym}5000 <span style='font-size:13px;color:#94a3b8;font-weight:500'>once</span></div><div style='font-size:12px;color:#94a3b8;line-height:1.6'>
 🔥 Everything in Yearly PLUS<br>
@@ -2506,6 +2507,25 @@ SHADOW_MAX_OPEN = 40
 SHADOW_EXPIRY_H = {"CONT": 168, "PB": 168, "SCALP": 6}
 _NEUTRAL = {"trading_mode": "regular", "trade_news": True, "rr_ratio": 2.0, "min_risk_reward": 1.5}
 
+def news_state(sym):
+    """'before' (high-impact news for this pair in the next 2h), 'after' (released in the last 2h) or 'quiet'. Used as a learning feature."""
+    try:
+        ccy = nc.currencies_for_symbol(sym)
+        if not ccy: return "quiet"
+        now = datetime.utcnow()
+        for e in nc.upcoming_high_impact(hours_ahead=2, lookback_minutes=120):
+            if e.get("currency") in ccy:
+                return "before" if e["time"] >= now else "after"
+    except Exception: pass
+    return "quiet"
+
+def setup_features(sym, r, when=None):
+    """The learning features of a signal (direction, session, score band, checklist items, news state)."""
+    when = when or datetime.utcnow()
+    entry, sl, tp = float(r.get("entry") or 0), float(r.get("stop_loss") or 0), float(r.get("take_profit") or 0)
+    rr = abs(tp - entry) / abs(entry - sl) if entry and sl and entry != sl else 2.0
+    return pl.features_of(r.get("bias", ""), when.hour, r.get("score") or 0, rr, (r.get("details") or {}).get("checklist"), news_state(sym))
+
 def _cdt(k): return _safe_dt(str(k.get("time", "")).replace(" ", "T"))
 
 def shadow_open(sym, r, kind):
@@ -2517,7 +2537,7 @@ def shadow_open(sym, r, kind):
         if len(sh) >= SHADOW_MAX_OPEN or any(v.get("symbol") == sym for v in sh.values()): return False
         now = datetime.utcnow()
         sh[f"{sym}|{int(now.timestamp())}"] = {"symbol": sym, "kind": kind, "bias": "BULLISH" if bull else "BEARISH", "entry": entry, "sl": sl, "tp": tp,
-                                                "time": now.isoformat(), "last_check": now.isoformat(), "score": r.get("score")}
+                                                "time": now.isoformat(), "last_check": now.isoformat(), "score": r.get("score"), "feats": setup_features(sym, r, now)}
         save_json(SHADOW_FILE, sh); return True
     except Exception as e:
         print(f"[SHADOW OPEN] {sym}: {e}", file=sys.stderr); return False
@@ -2562,6 +2582,7 @@ def shadow_resolve():
             sp = eng.est_spread(sym, entry) if hasattr(eng, "est_spread") else None
             r_net = r_gross - ((sp / risk) if (sp and risk) else 0.0)
             pl.record(stats, sym, kind, r_net, datetime.utcnow().isoformat())
+            if v.get("feats"): pl.record_features(stats, sym, kind, v["feats"], r_net)
             rec = stats[pl.key(sym, kind)]; lg = rec.setdefault("log", [])
             lg.append({"t": datetime.utcnow().strftime("%m-%d %H:%M"), "dir": "BUY" if bull else "SELL", "out": out, "r": round(r_net, 2)}); rec["log"] = lg[-10:]
             del sh[sid]; n_done += 1; changed = True
@@ -2610,7 +2631,7 @@ def pair_learning_page():
     if pl is None:
         return pro_layout("<div style='max-width:900px;margin:0 auto;padding:14px'><h1 style='font-size:20px;font-weight:900'>Pair learning</h1><p style='color:#94a3b8'>pair_learning.py is not deployed on the server yet.</p></div>", "Pair learning", is_admin=is_admin)
     stats = load_json(PAIR_STATS_FILE, dict); shadow = load_json(SHADOW_FILE, dict)
-    syms = sorted(set(pl.PRIORS) | {k.split("|")[0] for k in stats})
+    syms = sorted(set(pl.PRIORS) | {(k.split("|")[1] if k.startswith("FEAT|") else k.split("|")[0]) for k in stats})
     icon = {"strong": "⭐", "proven": "⭐", "normal": "🟢", "learning": "🔵", "weak": "🟡", "paused": "⏸️", "blocked": "⛔"}
     what = {"strong": "sent - proven pair", "proven": "sent to users who turned pullbacks on", "normal": "sent", "learning": "sent (still learning)" , "weak": "only 7/10 or better",
             "paused": "paused - resumes when it recovers", "blocked": "not sent - not proven"}
@@ -2618,12 +2639,15 @@ def pair_learning_page():
         ev = pl.evaluate(stats, sym, kind)
         if ev["n"] == 0 and ev["status"] == "learning" and kind != "CONT": return "<td style='color:#64748b'>-</td>"
         return f"<td>{icon.get(ev['status'], '')} <b>{ev['avg']:+.2f}R</b> <span style='color:#64748b'>({ev['n']} trades, {ev['live_n']} live)</span><br><span style='font-size:11px;color:#94a3b8'>{what.get(ev['status'], '')}</span></td>"
-    rows = "".join(f"<tr><td style='font-weight:800'>{_esc(s)}</td>{cell(s,'CONT')}{cell(s,'PB')}{cell(s,'SCALP')}<td style='color:#94a3b8'>{'tracking now' if any(v.get('symbol')==s for v in shadow.values()) else ''}</td></tr>" for s in syms)
+    def rules_html(s):
+        rl = pl.learned_rules(stats, s)
+        return "".join(f"🚫 skips {_esc(pl.FEATURE_LABELS.get(fv, fv))} ({m:+.2f}R, {n} trades)<br>" for fv, n, m in rl)
+    rows = "".join(f"<tr><td style='font-weight:800'>{_esc(s)}</td>{cell(s,'CONT')}{cell(s,'PB')}{cell(s,'SCALP')}<td style='color:#94a3b8;font-size:12px'>{rules_html(s)}{'<br>tracking a setup now' if any(v.get('symbol')==s for v in shadow.values()) else ''}</td></tr>" for s in syms)
     last = (load_json(SYSTEM_FILE, dict)).get("last_learning") or {}
     content = f"""<div style='max-width:1000px;margin:0 auto;padding:14px'>
 <h1 style='font-size:22px;font-weight:900;margin:0'>🧠 Pair learning</h1>
 <p style='color:#94a3b8;font-size:13px;line-height:1.5;margin:8px 0 14px'>The bot privately tracks every setup it finds on every pair (no money involved) and keeps the score in R (profit in units of risk, after spread). It starts from the Mar-Nov 2026 backtests and updates with live results. It only ever becomes <b>more selective</b>: proven pairs are tagged ⭐, weak pairs need 7/10+, and a losing pair is paused until its record recovers. Pullback trades are only sent on pairs where they have proven positive. Pairs not listed here are still learning and use the standard rules.</p>
-<div class='card' style='overflow-x:auto'><table style='width:100%;font-size:13px;border-collapse:collapse'><tr style='text-align:left;color:#64748b'><th>Pair</th><th>Regular</th><th>Pullback</th><th>Scalp</th><th></th></tr>{rows}</table></div>
+<div class='card' style='overflow-x:auto'><table style='width:100%;font-size:13px;border-collapse:collapse'><tr style='text-align:left;color:#64748b'><th>Pair</th><th>Regular</th><th>Pullback</th><th>Scalp</th><th>Learned rules / status</th></tr>{rows}</table></div>
 <p style='color:#64748b;font-size:11px;margin-top:10px'>Paper trades open now: {len(shadow)} · last learning pass: {_esc(str(last.get('at',''))[:19]) or 'not yet'} (settled {last.get('settled', 0)}, new {last.get('opened', 0)}). Past results do not guarantee future results.</p></div>"""
     return pro_layout(content, "Pair learning", is_admin=is_admin)
 
@@ -2721,6 +2745,12 @@ def cron_scan():
                         if sym in seen_analysis: seen_analysis[sym]["reason"] = f"SETUP FOUND BUT HELD BACK by pair learning: {_why}"
                         maybe_send_learning_notice(email, chat_id, sym, _kind, _why); continue
                     if _why: r = {**r, "learn_note": _why}
+                    if _kind != "PB":                          # per-pair feature learning: hold back setups of a type that keeps losing on THIS pair
+                        _ok_f, _why_f = pl.gate_features(_pstats, sym, _kind, setup_features(sym, r))
+                        if not _ok_f:
+                            skipped.append(f"{email}:{sym} HELD_BY_PAIR_LEARNING: {_why_f}")
+                            if sym in seen_analysis: seen_analysis[sym]["reason"] = f"SETUP FOUND BUT HELD BACK by pair learning: {_why_f}"
+                            maybe_send_learning_notice(email, chat_id, sym, _kind + "-F", _why_f); continue
                 ok, info = dispatch_signal_to_user(email, chat_id, sym, r, user_settings)
                 if ok: sent.append(f"{email}:{sym}")
                 else:
