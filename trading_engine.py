@@ -660,7 +660,7 @@ REGULAR_STOP_FLOOR_ATR = 1.0   # stop is never tighter than 1.0 x 1H ATR (was 0.
 MAX_COST_R_SCALP = 0.08    # scalp stops are small, so costs bite harder: with this cap the scalp backtest went from -78R to about break-even on EURUSD/BTC/gold
 MAX_COST_R = 0.15          # skip a signal when the spread would cost more than 15% of the stop distance (ETHUSD lost 0.33R per trade to spread alone)
 # Typical broker spreads in PRICE units (from the user's MT5 exports). Anything not listed is estimated by asset class in est_spread().
-SPREAD_EST = {"EURUSD": 0.00018, "USDCHF": 0.00021, "XAUUSD": 0.36, "BTCUSD": 42.0, "ETHUSD": 8.1, "US30": 3.4, "NAS100": 29.0, "XTIUSD": 0.05, "XBRUSD": 0.05, "XAGUSD": 0.04}
+SPREAD_EST = {"EURUSD": 0.00018, "USDCHF": 0.00021, "XAUUSD": 0.36, "BTCUSD": 42.0, "ETHUSD": 8.1, "US30": 3.4, "NAS100": 29.0, "XTIUSD": 0.05, "XBRUSD": 0.05, "XAGUSD": 0.04, "USDZAR": 0.0073, "SPX500": 2.4}
 
 def est_spread(symbol, price, user_settings=None):
     """Estimated spread in price units, or None when unknown (then the cost check is skipped). Never lower than what the user configured."""
