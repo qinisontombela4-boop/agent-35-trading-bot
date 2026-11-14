@@ -46,6 +46,11 @@ def td_cache_fresh(interval, stored_at, now_ts):
     if hasattr(eng, "cache_fresh"): return eng.cache_fresh(interval, stored_at, now_ts)
     return now_ts - stored_at < {"1h": 3600, "15min": 900}.get(interval, 300)
 import news_calendar as nc
+try: import trade_mgmt as tm          # Smooth mode (profit-lock alerts) - new file in v25
+except Exception as _e: tm = None; print(f"[STARTUP] trade_mgmt.py missing - Smooth mode disabled: {_e}", file=sys.stderr)
+try: import pair_learning as pl       # per-pair learning - new file in v25
+except Exception as _e: pl = None; print(f"[STARTUP] pair_learning.py missing - pair learning disabled: {_e}", file=sys.stderr)
+LEARNING_ON = os.getenv("PAIR_LEARNING", "on").lower() != "off"
 
 if not os.getenv("CRON_SECRET"):
     print("[WARN] CRON_SECRET is not set — the /cron/* endpoints (scan, news-check, "
@@ -161,6 +166,8 @@ DAILY_COUNT_FILE = os.path.join(BASE_DIR, "daily_signal_count.json")
 NEWS_CACHE_FILE = os.path.join(BASE_DIR, "news_calendar_cache.json")  # last good calendar, survives restarts
 NEWS_CALLS_FILE = os.path.join(BASE_DIR, "news_calls.json")           # every news lean logged + its scored outcome
 HEADSUP_FILE = os.path.join(BASE_DIR, "headsup_sent.json")            # "price is approaching an order block" heads-ups already sent (one per setup per day)
+SHADOW_FILE = os.path.join(BASE_DIR, "shadow_trades.json")            # private "paper" copies of every engine signal, used only to learn how each pair behaves
+PAIR_STATS_FILE = os.path.join(BASE_DIR, "pair_stats.json")           # what the bot has learned per pair (resolved shadow results, in R)
 TG_LINK_FILE = os.path.join(BASE_DIR, "tg_link_tokens.json")          # one-tap Telegram link tokens (30 min, single use)
 
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","EURCHF","GBPCHF","EURAUD","GBPAUD","EURCAD","GBPCAD","EURNZD","GBPNZD","AUDNZD","AUDCAD","NZDCAD","AUDCHF","NZDJPY","XAUUSD","XAGUSD","XTIUSD","XBRUSD","US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200","BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
@@ -331,7 +338,7 @@ def maybe_send_pause_notice(email, chat_id, why):
 
 def get_user_settings(email):
     settings = load_json(SETTINGS_FILE, dict)
-    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":list(ALL_SESSIONS),"symbols":ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"risk_percent":RECOMMENDED_RISK_PERCENT,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":False}
+    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":list(ALL_SESSIONS),"symbols":ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"risk_percent":RECOMMENDED_RISK_PERCENT,"rr_ratio":2.5,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":False,"smooth_mode":False}
     s = settings.get(email, default)
     for k,v in default.items():
         if k not in s: s[k]=v
@@ -551,8 +558,18 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings, is_test=Fa
     if lev_info.get('structural'): lot = lev_info['effective_lot']; rr = lev_info.get('rr', rr)
 
     signal_id = generate_signal_id()
+    smooth_on = bool(user_settings.get("smooth_mode")) and tm is not None
+    footer = ""
+    if r.get("learn_note"): footer += f"\n\n{r['learn_note']}"
+    if smooth_on:
+        try:
+            _rules = tm.stage_rules(float(rr))
+            if _rules:
+                _txt = "stop to breakeven at +1R" + (f", then lock +{_rules[-1][1]:g}R at +{_rules[-1][0]:.1f}R" if len(_rules) > 1 else "")
+                footer += f"\n\n🔒 Smooth mode: I'll message you to move your {_txt}."
+        except Exception: pass
     try:
-        res = send_telegram_pro(chat_id, signal_id, symbol, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''), lev_info)
+        res = send_telegram_pro(chat_id, signal_id, symbol, r.get('score',0), r.get('bias',''), entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot, lev, acc, r.get('confluence',''), curr_sym, mode, r.get('rationale',''), lev_info, footer)
     except Exception as e:
         return False, {"error": f"Could not build/send the message: {type(e).__name__}: {e}"}
     # Only a CONFIRMED Telegram delivery gets recorded — a failed send must
@@ -565,7 +582,7 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings, is_test=Fa
         "email": email, "chat_id": chat_id, "symbol": symbol,
         "bias": r.get('bias'), "score": r.get('score'), "entry": entry,
         "sl": sl, "tp": tp, "risk_amt": risk_amt, "rr": rr,
-        "currency": user_settings.get("currency","ZAR"), "mode": mode,
+        "currency": user_settings.get("currency","ZAR"), "mode": mode, "smooth": smooth_on,
         "sent_at": datetime.now().isoformat(),
         "test": bool(is_test),
     }
@@ -808,7 +825,7 @@ def build_trade_plan(symbol, r, user_settings):
     info = {"too_risky": too_risky, "actual_risk_pct": round(actual_pct, 1) if acc else None, "leverage_capped": False, "effective_lot": lot_f, "max_lot": round(max_lot, 2), "sized_to_risk": True, "note": " | ".join(notes), "structural": True, "rr": rr}
     return round(sl, dp), round(tp, dp), round(sl_d, 1), round(tp_d, 1), actual_risk, info
 
-def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale="", lev_info=None):
+def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl_dist, tp_dist, rr, risk_amt, risk_percent, lot_size, leverage, account_size, confluence_text, currency_symbol="R", mode_name="", rationale="", lev_info=None, footer=""):
     """FIXED: now sends to ONE specific chat_id (the user who's actually
     watching this symbol), not broadcast to every linked chat. callback_data
     carries the unique signal_id so the webhook can attribute TOOK/SKIP to
@@ -832,7 +849,7 @@ def send_telegram_pro(chat_id, signal_id, symbol, score, bias, entry, sl, tp, sl
     if lev_info.get("note"): lev_note += f"\n⚠️ {lev_info['note']}"
     try: risk_pct_shown = round(float(risk_amt)/float(account_size)*100, 2) if lev_info.get("structural") else risk_percent
     except Exception: risk_pct_shown = risk_percent
-    text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}{lev_note}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_pct_shown}%){rationale_line}\n\n🔍 {confluence_text}\n\n⏰ {sast_now}"
+    text=f"{mode_emoji} {symbol} {signal_type} | {score}/10 {strength} | {mode_name.upper()}\n\n📊 {currency_symbol}{account_size} Lot {lot_size} Lev {leverage}{lev_note}\n💰 Entry: {entry_fmt}\n🛑 SL: {sl_fmt} ({sl_dist})\n🎯 TP: {tp_fmt} ({tp_dist})\n📊 RR 1:{rr} | Risk {currency_symbol}{risk_amt:.2f} ({risk_pct_shown}%){rationale_line}\n\n🔍 {confluence_text}{footer}\n\n⏰ {sast_now}"
     keyboard={"inline_keyboard": [[{"text":"✅ TOOK ENTRY","callback_data":f"TOOK_{signal_id}"},{"text":"❌ SKIP","callback_data":f"SKIP_{signal_id}"}],[{"text":"📊 Journal","url":"https://agent-35-trading-bot.onrender.com/journal"}]]}
     res = telegram_post("sendMessage", {"chat_id":chat_id,"text":text,"reply_markup":keyboard})
     if not res.get("ok"): return {"error": res.get("error", "Telegram send failed")}
@@ -1056,7 +1073,7 @@ def dashboard():
     if not journal: rows="<tr><td colspan=5 style='text-align:center;color:#64748b;padding:24px'>No trades yet. Take first signal via Telegram.</td></tr>"
     else:
         for t in reversed(journal[-6:]):
-            cls="pill-took" if t.get("status")=="TOOK" else "pill-win" if "WIN" in t.get("result","") else "pill-loss"
+            cls="pill-took" if t.get("status") in ("TOOK","BE") else "pill-win" if "WIN" in t.get("result","") else "pill-loss"
             pnl=t.get("pnl",0)
             rows+=f"<tr><td style='color:#94a3b8'>{t.get('time')}</td><td style='font-weight:700'>{t.get('symbol')}</td><td><span class='pill {cls}'>{t.get('status')}</span></td><td>{t.get('result')}</td><td style='font-weight:700'>{curr_sym}{pnl}</td></tr>"
     tg_status="✅ Connected" if email in tg_users else "⚠️ Not linked"
@@ -1079,7 +1096,7 @@ def settings_page():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"
     if request.method=="POST":
-        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":max(0.1,min(float(request.form.get("risk_percent",1) or 1),MAX_RISK_PERCENT)),"rr_ratio":float(request.form.get("rr_ratio",2.5)),"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":request.form.get("trading_mode","regular"),"pullback_trades":request.form.get("pullback_trades")=="yes","pullback_v25":True,"symbols":[x for x in request.form.getlist("symbols") if x in ALL_SYMBOLS][:MAX_SYMBOLS_PER_USER] or ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"sessions":[x for x in request.form.getlist("sessions") if x in ALL_SESSIONS] or list(ALL_SESSIONS),"sessions_set":True}
+        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":max(0.1,min(float(request.form.get("risk_percent",1) or 1),MAX_RISK_PERCENT)),"rr_ratio":float(request.form.get("rr_ratio",2.5)),"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":request.form.get("trading_mode","regular"),"pullback_trades":request.form.get("pullback_trades")=="yes","pullback_v25":True,"smooth_mode":request.form.get("smooth_mode")=="yes","symbols":[x for x in request.form.getlist("symbols") if x in ALL_SYMBOLS][:MAX_SYMBOLS_PER_USER] or ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"sessions":[x for x in request.form.getlist("sessions") if x in ALL_SESSIONS] or list(ALL_SESSIONS),"sessions_set":True}
         save_user_settings(email,new_settings)
         return redirect("/dashboard")
     s=get_user_settings(email)
@@ -1108,6 +1125,7 @@ def settings_page():
 <div class='card'><div class='card-title'>Sessions - when to receive signals</div><div style='display:flex;flex-direction:column;gap:8px;margin-top:10px'>{"".join(f"<label style='display:flex;align-items:center;gap:8px;background:#0b1220;border:1px solid #1e293b;padding:10px 12px;border-radius:10px;font-size:12px;cursor:pointer'><input type='checkbox' name='sessions' value='{nm}' {'checked' if nm in s.get('sessions',[]) else ''}> <b>{nm}</b> <span style='color:#64748b'>{(SESSION_HOURS_UTC[nm][0]+2)%24:02d}:00-{(SESSION_HOURS_UTC[nm][1]+2)%24:02d}:00 SAST</span></label>" for nm in ALL_SESSIONS)}</div><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>You only get new signals while one of your chosen sessions is open (trades already open keep being tracked at any time). Pick all three for signals around the clock. Fewer sessions also means fewer data credits used.</div></div>
 <div class='card'><div class='card-title'>Pullback trades (SMC)</div><select name='pullback_trades' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='no' {'selected' if not s.get('pullback_trades',False) else ''}>⚪ Off - only trade WITH the daily bias (recommended)</option><option value='yes' {'selected' if s.get('pullback_trades',False) else ''}>🧪 On - EXPERIMENTAL: also trade the 1H move toward the daily order block (lower win rate in testing)</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Regular mode only. When the daily bias is bullish but the 1H is bearish and falling toward an untaken bullish order block / liquidity (or the reverse), the bot also sends the 1H trade: a SELL when price retests a 1H bearish order block or sweeps premium highs and the 15m turns down, with the take profit at that order block / liquidity. These trades go AGAINST the daily bias for the length of the move, so they are labelled PULLBACK and are riskier than daily-bias trades. Turn off to trade only with the daily bias.</div></div>
 </div>
+<div class='card'><div class='card-title'>Smooth mode - protect your profits</div><select name='smooth_mode' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='no' {'selected' if not s.get('smooth_mode',False) else ''}>⚪ Off - I manage my own stop</option><option value='yes' {'selected' if s.get('smooth_mode',False) else ''}>🔒 On - tell me when to move my stop</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When ON, the bot messages you while a trade you TOOK is running: at +1R it tells you to move your stop to breakeven, and when price is about 80% of the way to the target it tells you to lock in profit (for a 3R target: at +2.4R move your stop to +1.2R, so a normal pullback does not shake you out). More trades finish at breakeven or a small win instead of a full loss, at the cost of sometimes giving back part of a big winner. Follow the messages for the results shown in your journal to be accurate. <a href='/pair-learning' style='color:#3b82f6'>See what the bot has learned about each pair</a>.</div></div>
 <div class='card' style='margin-top:12px'><div class='card-title'>Watchlist - choose up to {MAX_SYMBOLS_PER_USER} of {len(ALL_SYMBOLS)} symbols - <span id='symcount' style='color:#10b981'></span></div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;max-height:380px;overflow-y:auto;margin-top:10px;padding-right:4px'>{symbols_html}</div></div>
 {sym_js}
 <button type='submit' class='btn-primary' style='margin-top:16px'>Save Settings - {mode.upper()} Mode</button>
@@ -1560,7 +1578,7 @@ def plans_page():
 ✅ Journal + Export<br>
 ✅ Up to 6 tracked trades<br>
 ✅ Cloud backup<br>
-✅ 65%+ win rate<br>
+✅ Built-in risk limits (2% recommended, 10% max)<br>
 </div><a href='/pay?plan=yearly' style='display:block;background:#10b981;color:white;text-align:center;padding:12px;border-radius:12px;text-decoration:none;font-weight:800;margin-top:16px'>Choose Yearly</a></div>
 <div class='card' style='border:1px solid #f59e0b44; background:linear-gradient(135deg,#1a1508 0%,#151e32 100%)'><div style='display:flex;justify-content:space-between;align-items:center'><h3 style='margin:0;font-size:16px'>Lifetime</h3><span style='background:#f59e0b;color:white;padding:4px 10px;border-radius:20px;font-size:10px;font-weight:800'>BEST VALUE</span></div><div class='card-value' style='margin:12px 0;color:#fbbf24'>{curr_sym}5000 <span style='font-size:13px;color:#94a3b8;font-weight:500'>once</span></div><div style='font-size:12px;color:#94a3b8;line-height:1.6'>
 🔥 Everything in Yearly PLUS<br>
@@ -1724,7 +1742,7 @@ def send_signal():
             rr = lev_info.get('rr', rr)
             tracked=load_json(TRACK_FILE, dict)
             signal_id = generate_signal_id()
-            tracked[signal_id]={"email":email,"chat_id":None,"symbol":sym,"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode}
+            tracked[signal_id]={"email":email,"chat_id":None,"symbol":sym,"time":datetime.now().isoformat(),"bias":r.get('bias'),"entry":entry,"sl":sl,"tp":tp,"risk_amt":risk_amt,"rr":rr,"score":r.get('score'),"currency":user_set.get("currency","ZAR"),"mode":mode,"smooth":bool(user_set.get("smooth_mode")) and tm is not None}
             save_json(TRACK_FILE, tracked)
             increment_daily_signal_count(email)
             msg=f"Tracked {sym} directly (no Telegram linked — link one in Settings to use TOOK/SKIP confirmation)"
@@ -1853,7 +1871,7 @@ def telegram_webhook():
                     "email": entry["email"], "chat_id": entry["chat_id"], "symbol": entry["symbol"],
                     "time": datetime.now().isoformat(), "bias": entry["bias"], "entry": entry["entry"],
                     "sl": entry["sl"], "tp": entry["tp"], "risk_amt": entry["risk_amt"], "rr": entry["rr"],
-                    "score": entry["score"], "currency": entry["currency"], "mode": entry["mode"],
+                    "score": entry["score"], "currency": entry["currency"], "mode": entry["mode"], "smooth": bool(entry.get("smooth")),
                 }
                 save_json(TRACK_FILE, tracked)
                 del pending[signal_id]; save_json(PENDING_FILE, pending)
@@ -2251,7 +2269,7 @@ def cron_track_check():
     if request.args.get("secret")!=os.getenv("CRON_SECRET"): return jsonify({"error":"bad secret"})
     tracked = load_json(TRACK_FILE, dict)
     now = datetime.now()
-    resolved = []
+    resolved = []; dirty = False
     system = load_json(SYSTEM_FILE, dict); system["last_track_check"] = now.isoformat(); save_json(SYSTEM_FILE, system)   # proves the cron is firing
 
     # one candle fetch per symbol per run, deep enough to cover the oldest open trade on that symbol
@@ -2288,30 +2306,53 @@ def cron_track_check():
         candles = candles_for(sym)
         if not candles:
             continue
-        outcome, current = check_trade_outcome(entry, candles, sl, tp)
+        mres = None
+        if entry.get("smooth") and tm is not None:
+            # SMOOTH MODE: replay the candles with the stop-tightening stages (breakeven at +1R, profit lock near the target)
+            is_bull_t = "BULLISH" in str(bias).upper()
+            mres = tm.manage(entry.get("entry"), sl, tp, is_bull_t, candles, _safe_dt(entry.get("time", "")),
+                             lambda k: _safe_dt(str(k.get("time", "")).replace(" ", "T")), smooth=True)
+            outcome, current = mres["outcome"], mres["price"]
+            if not outcome and mres["stage"] > int(entry.get("stage", 0) or 0):
+                try:
+                    trig, lock = mres["rules"][mres["stage"] - 1]; d_ = 1.0 if is_bull_t else -1.0
+                    rsk = abs(float(entry.get("entry")) - sl); new_sl = float(entry.get("entry")) + d_ * lock * rsk
+                    entry["stage"] = mres["stage"]; entry["sl_live"] = new_sl; dirty = True
+                    if entry.get("chat_id") and os.getenv("TELEGRAM_BOT_TOKEN"):
+                        telegram_post("sendMessage", {"chat_id": entry["chat_id"], "text": tm.stage_message(sym, is_bull_t, float(entry.get("entry")), new_sl, trig, lock, tp, eng.price_decimals(sym))})
+                except Exception as e: print(f"[SMOOTH ALERT] {sym}: {e}", file=sys.stderr)
+        else:
+            outcome, current = check_trade_outcome(entry, candles, sl, tp)
 
         if outcome:
-            pnl = round(risk_amt * rr, 2) if outcome == "WIN" else round(-risk_amt, 2)
+            if outcome == "WIN": pnl = round(risk_amt * rr, 2)
+            elif outcome == "LOSS": pnl = round(-risk_amt, 2)
+            elif outcome == "LOCKED": pnl = round(risk_amt * (mres or {}).get("lock_r", 0), 2)
+            else: pnl = 0.0                                    # BE: stopped at the moved-to-breakeven stop
+            j_status = "WIN" if outcome == "LOCKED" else outcome
+            j_result = {"BE": f"Auto-detected BE (stop at breakeven, as advised) @ {current}",
+                        "LOCKED": f"Auto-detected WIN (stopped at locked profit +{(mres or {}).get('lock_r', 0):g}R) @ {current}"}.get(outcome, f"Auto-detected {outcome} @ {current}")
             journal = load_json(JOURNAL_FILE, list)
             journal.append({
                 "time": now.strftime("%m-%d %H:%M"), "symbol": sym,
-                "status": outcome, "result": f"Auto-detected {outcome} @ {current}",
+                "status": j_status, "result": j_result,
                 "pnl": pnl, "entry": entry.get("entry"), "sl": sl, "tp": tp,
                 "date": now.strftime("%Y-%m-%d"), "currency": entry.get("currency","ZAR"),
                 "email": entry.get("email"),
             })
             save_json(JOURNAL_FILE, _trim_journal(journal))
-            del tracked[signal_id]
+            del tracked[signal_id]; dirty = True
             resolved.append({"symbol": sym, "outcome": outcome, "pnl": pnl, "email": entry.get("email")})
-            emoji = "✅" if outcome=="WIN" else "❌"
+            emoji = {"WIN": "✅", "LOCKED": "✅", "BE": "🟰"}.get(outcome, "❌")
+            word = {"LOCKED": "WIN (locked profit)", "BE": "BREAKEVEN"}.get(outcome, outcome)
             owner_chat = entry.get("chat_id")
             if owner_chat:
                 bot=os.getenv("TELEGRAM_BOT_TOKEN")
                 if bot:
-                    try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":owner_chat,"text":f"{emoji} {sym} {outcome} — closed @ {current}, PnL {pnl:+.2f}"}, timeout=10)
+                    try: requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":owner_chat,"text":f"{emoji} {sym} {word} — closed @ {current}, PnL {pnl:+.2f}"}, timeout=10)
                     except Exception: pass
 
-    if resolved:
+    if resolved or dirty:
         save_json(TRACK_FILE, tracked)
     return jsonify({"resolved": resolved, "still_open": len(tracked)})
 
@@ -2442,6 +2483,134 @@ def maybe_send_digest(email, chat_id, lines):
         print(f"[DIGEST] {email}: {e}", file=sys.stderr)
     return False
 
+# ================= PAIR LEARNING (shadow tracking) =================
+# Every signal the engine produces is also logged as a private paper trade (independent of any user), resolved against candles the
+# scans have ALREADY fetched (zero extra API credits), and its result in R is added to that pair's record. See pair_learning.py.
+SHADOW_MAX_OPEN = 40
+SHADOW_EXPIRY_H = {"CONT": 168, "PB": 168, "SCALP": 6}
+_NEUTRAL = {"trading_mode": "regular", "trade_news": True, "rr_ratio": 2.0, "min_risk_reward": 1.5}
+
+def _cdt(k): return _safe_dt(str(k.get("time", "")).replace(" ", "T"))
+
+def shadow_open(sym, r, kind):
+    try:
+        entry, sl, tp = float(r.get("entry") or 0), float(r.get("stop_loss") or 0), float(r.get("take_profit") or 0)
+        bull = "BULLISH" in str(r.get("bias", "")).upper()
+        if not (entry and sl and tp) or (bull and not (sl < entry < tp)) or ((not bull) and not (tp < entry < sl)): return False
+        sh = load_json(SHADOW_FILE, dict)
+        if len(sh) >= SHADOW_MAX_OPEN or any(v.get("symbol") == sym for v in sh.values()): return False
+        now = datetime.utcnow()
+        sh[f"{sym}|{int(now.timestamp())}"] = {"symbol": sym, "kind": kind, "bias": "BULLISH" if bull else "BEARISH", "entry": entry, "sl": sl, "tp": tp,
+                                                "time": now.isoformat(), "last_check": now.isoformat(), "score": r.get("score")}
+        save_json(SHADOW_FILE, sh); return True
+    except Exception as e:
+        print(f"[SHADOW OPEN] {sym}: {e}", file=sys.stderr); return False
+
+def _shadow_candles(sym, since):
+    """Finest cached candles that reach back to `since` (so a gap between scans cannot hide a hit); else the coarsest we have."""
+    best = []
+    for iv in ("5min", "15min", "1h"):
+        c = eng.cached_candles(sym, iv) if hasattr(eng, "cached_candles") else []
+        if not c: continue
+        best = c
+        first = _cdt(c[0])
+        if first and since and first <= since: return c
+    return best
+
+def shadow_resolve():
+    """Settle open shadow trades whose SL/TP has been touched (or that expired). Returns how many were settled."""
+    if pl is None: return 0
+    sh = load_json(SHADOW_FILE, dict)
+    if not sh: return 0
+    stats = load_json(PAIR_STATS_FILE, dict); n_done = 0; changed = False
+    for sid in list(sh.keys()):
+        v = sh[sid]
+        try:
+            sym, kind = v["symbol"], v["kind"]; entry, sl, tp = float(v["entry"]), float(v["sl"]), float(v["tp"])
+            bull = v["bias"] == "BULLISH"; opened = _safe_dt(v["time"]); since = _safe_dt(v.get("last_check") or v["time"])
+            candles = _shadow_candles(sym, since)
+            risk = abs(entry - sl); out = None; px = None; last_t = since
+            for k in candles:
+                kt = _cdt(k)
+                if not kt or kt < since or (opened and kt < opened): continue
+                last_t = max(last_t, kt)
+                hi, lo = float(k["high"]), float(k["low"])
+                if (lo <= sl) if bull else (hi >= sl): out, px = "LOSS", sl; break
+                if (hi >= tp) if bull else (lo <= tp): out, px = "WIN", tp; break
+            if not out and (datetime.utcnow() - opened).total_seconds() / 3600 >= SHADOW_EXPIRY_H.get(kind, 168):
+                out, px = "EXPIRED", (float(candles[-1]["close"]) if candles else entry)
+            if not out:
+                v["last_check"] = last_t.isoformat(); changed = True; continue
+            d = 1.0 if bull else -1.0
+            r_gross = (px - entry) * d / risk if risk else 0.0
+            sp = eng.est_spread(sym, entry) if hasattr(eng, "est_spread") else None
+            r_net = r_gross - ((sp / risk) if (sp and risk) else 0.0)
+            pl.record(stats, sym, kind, r_net, datetime.utcnow().isoformat())
+            rec = stats[pl.key(sym, kind)]; lg = rec.setdefault("log", [])
+            lg.append({"t": datetime.utcnow().strftime("%m-%d %H:%M"), "dir": "BUY" if bull else "SELL", "out": out, "r": round(r_net, 2)}); rec["log"] = lg[-10:]
+            del sh[sid]; n_done += 1; changed = True
+        except Exception as e:
+            print(f"[SHADOW RESOLVE] {sid}: {e}", file=sys.stderr)
+    if changed:
+        save_json(SHADOW_FILE, sh)
+        if n_done: save_json(PAIR_STATS_FILE, stats)
+    return n_done
+
+def learning_pass(regular_syms, scalp_syms, t0, budget_s):
+    """Run after a scan: settle old shadow trades, then log new engine signals for the pairs that were just analysed (candles are cached, so no credits)."""
+    out = {"settled": 0, "opened": 0}
+    if pl is None or not LEARNING_ON: return out
+    try: out["settled"] = shadow_resolve()
+    except Exception as e: print(f"[LEARNING] resolve: {e}", file=sys.stderr)
+    open_syms = {v.get("symbol") for v in load_json(SHADOW_FILE, dict).values()}
+    jobs = [(s, "regular") for s in sorted(regular_syms)] + [(s, "scalp") for s in sorted(scalp_syms - regular_syms)]
+    for sym, mode in jobs:
+        if time.monotonic() - t0 > budget_s: break
+        if sym in open_syms: continue
+        try:
+            r = cached_analysis(sym, {**_NEUTRAL, "trading_mode": mode, "pullback_trades": mode == "regular"})
+            if (r.get("details") or {}).get("data_error") or not r.get("signal"): continue
+            kind = "SCALP" if mode == "scalp" else ("PB" if r.get("pullback") else "CONT")
+            if shadow_open(sym, r, kind): out["opened"] += 1; open_syms.add(sym)
+        except Exception as e:
+            print(f"[LEARNING] {sym}: {e}", file=sys.stderr)
+    return out
+
+def maybe_send_learning_notice(email, chat_id, sym, kind, why):
+    """Tell the user (max once per pair per day) why a setup on their watchlist was held back, so it is never silent."""
+    try:
+        today = datetime.utcnow().strftime("%Y-%m-%d"); sent = load_json(HEADSUP_FILE, dict); key = f"{email}|LEARN|{sym}|{kind}|{today}"
+        if key in sent: return False
+        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": f"🧠 {sym}: a setup was found but held back.\n{why}.\nThis is the bot's pair learning - it only sends what has been working on each pair. (Sent once a day.)"})
+        if res.get("ok"): sent[key] = datetime.utcnow().isoformat(); save_json(HEADSUP_FILE, sent); return True
+    except Exception as e: print(f"[LEARN NOTICE] {e}", file=sys.stderr)
+    return False
+
+@app.route("/pair-learning")
+def pair_learning_page():
+    """What the bot has learned about each pair: its record per setup type, and what that changes (sent / only best setups / paused)."""
+    if not session.get("user"): return redirect("/login")
+    is_admin = session.get("user") == "admin@agent35.com"
+    if pl is None:
+        return pro_layout("<div style='max-width:900px;margin:0 auto;padding:14px'><h1 style='font-size:20px;font-weight:900'>Pair learning</h1><p style='color:#94a3b8'>pair_learning.py is not deployed on the server yet.</p></div>", "Pair learning", is_admin=is_admin)
+    stats = load_json(PAIR_STATS_FILE, dict); shadow = load_json(SHADOW_FILE, dict)
+    syms = sorted(set(pl.PRIORS) | {k.split("|")[0] for k in stats})
+    icon = {"strong": "⭐", "proven": "⭐", "normal": "🟢", "learning": "🔵", "weak": "🟡", "paused": "⏸️", "blocked": "⛔"}
+    what = {"strong": "sent - proven pair", "proven": "sent to users who turned pullbacks on", "normal": "sent", "learning": "sent (still learning)" , "weak": "only 7/10 or better",
+            "paused": "paused - resumes when it recovers", "blocked": "not sent - not proven"}
+    def cell(sym, kind):
+        ev = pl.evaluate(stats, sym, kind)
+        if ev["n"] == 0 and ev["status"] == "learning" and kind != "CONT": return "<td style='color:#64748b'>-</td>"
+        return f"<td>{icon.get(ev['status'], '')} <b>{ev['avg']:+.2f}R</b> <span style='color:#64748b'>({ev['n']} trades, {ev['live_n']} live)</span><br><span style='font-size:11px;color:#94a3b8'>{what.get(ev['status'], '')}</span></td>"
+    rows = "".join(f"<tr><td style='font-weight:800'>{_esc(s)}</td>{cell(s,'CONT')}{cell(s,'PB')}{cell(s,'SCALP')}<td style='color:#94a3b8'>{'tracking now' if any(v.get('symbol')==s for v in shadow.values()) else ''}</td></tr>" for s in syms)
+    last = (load_json(SYSTEM_FILE, dict)).get("last_learning") or {}
+    content = f"""<div style='max-width:1000px;margin:0 auto;padding:14px'>
+<h1 style='font-size:22px;font-weight:900;margin:0'>🧠 Pair learning</h1>
+<p style='color:#94a3b8;font-size:13px;line-height:1.5;margin:8px 0 14px'>The bot privately tracks every setup it finds on every pair (no money involved) and keeps the score in R (profit in units of risk, after spread). It starts from the Mar-Nov 2026 backtests and updates with live results. It only ever becomes <b>more selective</b>: proven pairs are tagged ⭐, weak pairs need 7/10+, and a losing pair is paused until its record recovers. Pullback trades are only sent on pairs where they have proven positive. Pairs not listed here are still learning and use the standard rules.</p>
+<div class='card' style='overflow-x:auto'><table style='width:100%;font-size:13px;border-collapse:collapse'><tr style='text-align:left;color:#64748b'><th>Pair</th><th>Regular</th><th>Pullback</th><th>Scalp</th><th></th></tr>{rows}</table></div>
+<p style='color:#64748b;font-size:11px;margin-top:10px'>Paper trades open now: {len(shadow)} · last learning pass: {_esc(str(last.get('at',''))[:19]) or 'not yet'} (settled {last.get('settled', 0)}, new {last.get('opened', 0)}). Past results do not guarantee future results.</p></div>"""
+    return pro_layout(content, "Pair learning", is_admin=is_admin)
+
 @app.route("/cron/scan")
 def cron_scan():
     """FIXED: scans EACH linked user's own watchlist using THEIR OWN
@@ -2463,6 +2632,8 @@ def cron_scan():
     scan_stats = {"analyzed": 0, "data_errors": 0, "deferred": [], "last_data_error": None}; cursors = {}
     if hasattr(eng, "td_set_patience"): eng.td_set_patience(60)    # wait for a free per-minute slot rather than skipping pairs
     seen_analysis = {}
+    regular_syms, scalp_syms = set(), set()
+    _pstats = load_json(PAIR_STATS_FILE, dict) if pl is not None else {}
 
     # FAIRNESS + TIME LIMIT. Users used to be scanned in one fixed order with no time limit while the server kills any request after 120s
     # (gunicorn --timeout). A slow scan (cold data, per-minute waits) died partway through, so whoever was LAST in the list was never
@@ -2520,11 +2691,20 @@ def cron_scan():
                     if stopped_at is None: stopped_at = sym
                     if not td_available(): break      # out of calls for now: stop, the next run continues from here
                     continue
+                (scalp_syms if user_settings.get("trading_mode") == "scalp" else regular_syms).add(sym)
                 digest_lines.append(_digest_line(sym, r))
                 if not r.get('signal'):
                     hu = (r.get('details') or {}).get('heads_up')
                     if hu and maybe_send_heads_up(email, chat_id, sym, hu): sent.append(f"{email}:{sym} heads-up")
                     continue
+                if pl is not None and LEARNING_ON:         # PAIR LEARNING gate: only send what has been working on this pair
+                    _kind = "PB" if r.get("pullback") else ("SCALP" if user_settings.get("trading_mode") == "scalp" else "CONT")
+                    _ok_l, _why = pl.gate(_pstats, sym, _kind, r.get("score"))
+                    if not _ok_l:
+                        skipped.append(f"{email}:{sym} HELD_BY_PAIR_LEARNING: {_why}")
+                        if sym in seen_analysis: seen_analysis[sym]["reason"] = f"SETUP FOUND BUT HELD BACK by pair learning: {_why}"
+                        maybe_send_learning_notice(email, chat_id, sym, _kind, _why); continue
+                    if _why: r = {**r, "learn_note": _why}
                 ok, info = dispatch_signal_to_user(email, chat_id, sym, r, user_settings)
                 if ok: sent.append(f"{email}:{sym}")
                 else:
@@ -2536,8 +2716,10 @@ def cron_scan():
         if digest_lines and maybe_send_digest(email, chat_id, digest_lines): sent.append(f"{email}: daily market watch")
         daily_counts[email] = get_daily_signal_count(email)
 
+    learn = learning_pass(regular_syms, scalp_syms, _t0, SCAN_DEADLINE_S + 12)
     # record how healthy this run was, so /health (and the admin alert) can say when the data feed is the reason for silence
     system = load_json(SYSTEM_FILE, dict)
+    system["last_learning"] = {**learn, "at": datetime.now().isoformat()}
     system["scan_cursor"] = cursors
     system["scan_user_cursor"] = next_cursor if next_cursor is not None else ((_start + 1) % _n if _n else 0)   # rotate the start every scan
     system["last_scan_seconds"] = round(time.monotonic() - _t0, 1)
@@ -2599,6 +2781,10 @@ def system_check():
         issues.append("The engine file on the server is outdated (missing the Twelve Data credit guard). Deploy smc_trading_engine_v24.py together with app.py.")
     row("Supabase storage", supabase is not None, "active - data survives redeploys" if supabase else "NOT active - data is wiped on every redeploy")
     if not supabase: issues.append("Supabase is not active: users, trades and settings are lost on redeploy.")
+    row("Smooth mode + pair learning files", (tm is not None and pl is not None), "trade_mgmt.py and pair_learning.py loaded" if (tm is not None and pl is not None) else "MISSING - upload trade_mgmt.py and pair_learning.py next to app.py (Smooth mode / pair learning are disabled until then)")
+    if pl is not None:
+        _ll = system.get("last_learning") or {}
+        row("Pair learning", None if LEARNING_ON else False, (f"on - {len(load_json(SHADOW_FILE, dict))} paper trades open, last pass {_esc(str(_ll.get('at',''))[:19]) or 'not yet'} (settled {_ll.get('settled',0)}, new {_ll.get('opened',0)}). <a href='/pair-learning' style='color:#3b82f6'>per-pair record</a>") if LEARNING_ON else "switched OFF (PAIR_LEARNING=off)")
     row("Telegram bot token", bool(os.getenv("TELEGRAM_BOT_TOKEN")), "set" if os.getenv("TELEGRAM_BOT_TOKEN") else "missing")
     row("Cron secret", bool(os.getenv("CRON_SECRET")), "set" if os.getenv("CRON_SECRET") else "missing - every cron job is rejected")
     # --- data feed ---
