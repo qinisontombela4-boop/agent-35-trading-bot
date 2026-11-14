@@ -306,19 +306,35 @@ def _journal_results(email):
         out.append((ts, j))
     out.sort(key=lambda x: x[0]); return out
 
+MAX_PAUSES_PER_24H = int(os.getenv("MAX_PAUSES_PER_24H", "1"))       # at most this many protection pauses may START in any rolling 24 hours (0 = no limit)
+STREAK_WINDOW_HOURS = int(os.getenv("STREAK_WINDOW_HOURS", "24"))     # a "streak" is losses in a row that all fall within this many hours
+
+def _pause_episodes(res):
+    """Replay a user's closed trades in order and return every protection pause that would have started: [(start, end, reason)].
+    Rules: (1) MAX_LOSSES_PER_DAY stop-outs on one calendar day -> paused until tomorrow; (2) LOSS_STREAK_PAUSE losses in a row, all within
+    STREAK_WINDOW_HOURS of each other -> paused STREAK_COOLOFF_HOURS; (3) a pause resets the streak, so the same losses cannot trigger the next pause;
+    (4) no more than MAX_PAUSES_PER_24H pauses may start in any rolling 24 hours."""
+    eps, streak, per_day = [], [], {}
+    for ts, j in res:
+        if j.get("status") == "WIN":
+            streak = []; continue
+        streak = [t for t in streak if (ts - t).total_seconds() <= STREAK_WINDOW_HOURS * 3600] + [ts]
+        per_day[ts.date()] = per_day.get(ts.date(), 0) + 1
+        if any(s <= ts < e for s, e, _ in eps): continue                      # an open trade closing during a pause: already paused
+        if MAX_PAUSES_PER_24H > 0 and sum(1 for s, _, _ in eps if (ts - s).total_seconds() < 86400) >= MAX_PAUSES_PER_24H: continue
+        if per_day[ts.date()] >= MAX_LOSSES_PER_DAY:
+            end = datetime.combine(ts.date() + timedelta(days=1), datetime.min.time())
+            eps.append((ts, end, f"{per_day[ts.date()]} stop-outs today - new signals resume tomorrow")); streak = []
+        elif len(streak) >= LOSS_STREAK_PAUSE:
+            end = ts + timedelta(hours=STREAK_COOLOFF_HOURS)
+            eps.append((ts, end, f"{len(streak)} losses in a row - cooling off until {end.strftime('%H:%M')} server time")); streak = []
+    return eps
+
 def protection_status(email, now=None):
     """(blocked, reason). Pauses NEW signals for a user after a bad run; open trades keep being tracked as normal."""
-    now = now or datetime.now(); res = _journal_results(email)
-    today_losses = sum(1 for ts, j in res if j["status"] == "LOSS" and ts.date() == now.date())
-    if today_losses >= MAX_LOSSES_PER_DAY:
-        return True, f"{today_losses} stop-outs today - new signals resume tomorrow"
-    streak, last_loss = 0, None
-    for ts, j in reversed(res):
-        if j["status"] != "LOSS": break
-        streak += 1; last_loss = last_loss or ts
-    if streak >= LOSS_STREAK_PAUSE and last_loss and (now - last_loss).total_seconds() < STREAK_COOLOFF_HOURS * 3600:
-        back = last_loss + timedelta(hours=STREAK_COOLOFF_HOURS)
-        return True, f"{streak} losses in a row - cooling off until {back.strftime('%H:%M')} server time"
+    now = now or datetime.now()
+    for s, e, why in _pause_episodes(_journal_results(email)):
+        if s <= now < e: return True, why
     return False, ""
 
 def symbol_in_cooldown(email, symbol, now=None):
