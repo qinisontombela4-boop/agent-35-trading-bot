@@ -645,7 +645,35 @@ DEFAULT_WEIGHTS.update({
     "regular_min_score": 5,  # REGULAR (SMC) mode: checklist items (of 10) needed (lowered from 6 by request); the 4 required gates already count
     "max_opposing": 2,     # if more than this many strategies vote the OTHER way, skip
     "zone_veto": True,     # never buy in premium / sell in discount unless a zone-appropriate OB backs it
+    "require_fvg": True,   # REGULAR mode: the move must have left a fair value gap (imbalance). Backtest (8 pairs, 293 continuation trades): with FVG 41% win / +32R, without 34% / -14R
+    "scalp_require_fvg": True,
 })
+
+# ---- v25 rework constants (all from the Mar-Nov 2026 MT5 backtests on 8 pairs) ----
+LIQ_MAX_R = 3.0            # liquidity take-profit is only used when it is within 3R. Targets of 5R+ won just 6-13% of the time; 2-3R targets were profitable
+REGULAR_STOP_FLOOR_ATR = 1.0   # stop is never tighter than 1.0 x 1H ATR (was 0.5): trades stopped out inside 4h won only 2-8%
+MAX_COST_R_SCALP = 0.08    # scalp stops are small, so costs bite harder: with this cap the scalp backtest went from -78R to about break-even on EURUSD/BTC/gold
+MAX_COST_R = 0.15          # skip a signal when the spread would cost more than 15% of the stop distance (ETHUSD lost 0.33R per trade to spread alone)
+# Typical broker spreads in PRICE units (from the user's MT5 exports). Anything not listed is estimated by asset class in est_spread().
+SPREAD_EST = {"EURUSD": 0.00018, "USDCHF": 0.00021, "XAUUSD": 0.36, "BTCUSD": 42.0, "ETHUSD": 8.1, "US30": 3.4, "NAS100": 29.0, "XTIUSD": 0.05, "XBRUSD": 0.05, "XAGUSD": 0.04}
+
+def est_spread(symbol, price, user_settings=None):
+    """Estimated spread in price units, or None when unknown (then the cost check is skipped). Never lower than what the user configured."""
+    try:
+        if symbol in SPREAD_EST: base = SPREAD_EST[symbol]
+        elif symbol.endswith("JPY"): base = 0.02
+        elif symbol.startswith("XAU"): base = 0.36
+        elif symbol[:3] in ("BTC", "ETH", "SOL", "BNB", "XRP", "ADA", "DOG", "DOT", "AVA", "LIN", "MAT", "LTC"): base = 0.003 * price
+        elif symbol in ("US30", "NAS100", "SPX500", "GER40", "UK100", "FRA40", "ESP35", "ITA40", "JPN225", "AUS200"): return None
+        else: base = 0.00020
+        us = user_settings or {}
+        cfg = None
+        if symbol.startswith("XAU"): cfg = us.get("spread_gold")
+        elif symbol.endswith("JPY"): cfg = (us.get("spread_forex") or 0) * 0.01 if us.get("spread_forex") else None
+        elif len(symbol) == 6 and not symbol.startswith(("BTC", "ETH", "XAG", "XTI", "XBR")): cfg = (us.get("spread_forex") or 0) * 0.0001 if us.get("spread_forex") else None
+        return max(base, float(cfg)) if cfg else base
+    except Exception:
+        return None
 
 # ---------------- shared helpers ----------------
 
@@ -1374,7 +1402,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
         target = h1_range["high"] if direction == "BULLISH" else h1_range["low"]
         room = (target - entry) if direction == "BULLISH" else (entry - target)
         # TAKE PROFIT AT UNTAKEN LIQUIDITY: price is drawn to resting stops (swing / equal highs-lows, previous-day and 5-day levels).
-        # Use the nearest untaken pool in the trade direction that leaves at least the user's reward ratio (and at most 6R), stopping just short of it. If none fits, fall back
+        # Use the nearest untaken pool in the trade direction that leaves at least the user's reward ratio (and at most LIQ_MAX_R = 3R), stopping just short of it. If none fits, fall back
         # to the user's reward-ratio target below.
         liq_pool = None
         if risk > 0 and c.get("pools"):
@@ -1382,10 +1410,16 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
             for lp in untaken_liquidity(c["pools"], entry, side, 6):
                 tl = lp["level"] - 0.1 * atr_h1 if direction == "BULLISH" else lp["level"] + 0.1 * atr_h1
                 rm = (tl - entry) if direction == "BULLISH" else (entry - tl)
-                if max(min_rr_of(c), c.get("rr", 2.0)) * risk <= rm <= 6.0 * risk: liq_pool, target, room = lp, tl, rm; break
+                if max(min_rr_of(c), c.get("rr", 2.0)) * risk <= rm <= LIQ_MAX_R * risk: liq_pool, target, room = lp, tl, rm; break
     if risk <= 0: return out("Rejected: invalid stop distance", common)
     if risk > 3.0 * atr_h1: return out(f"Stop would be {risk/atr_h1:.1f} ATR wide (beyond the order block) - setup too wide to trade", common)
     if room < min_rr_of(c) * risk: return out(f"Only {room/risk:.1f}R of room to the target - need {min_rr_of(c):.1f}R", common)
+    _sp = est_spread(symbol, entry, c.get("user_settings"))
+    _cap = MAX_COST_R_SCALP if c.get("scalp") else MAX_COST_R
+    if _sp and risk > 0 and _sp / risk > _cap:
+        return out(f"Spread (~{_sp:.5g}) would cost {_sp/risk:.0%} of the stop distance - skipped (over {_cap:.0%} of the risk is lost to costs)", {**common, "cost_skip": True})
+    if c.get("require_fvg") and not pullback and not items["FVG / imbalance"]:
+        return out(f"{poi_txt} tapped and {tf_name} confirmed, but the move left no fair value gap (imbalance) - skipped ({score}/10)", {**common, "waiting_for": "fvg"})
     if score < c["min_score"] + (1 if pullback else 0):   # trading against the daily bias needs one more confirmation than a trade with it
         return out(f"{score}/10 checklist - need {c['min_score']}+ ({', '.join(k for k, v in items.items() if not v)} missing)", common)
     rr = c["rr"]
@@ -1464,8 +1498,9 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
     c = {"symbol": symbol, "user_settings": user_settings, "historical": historical, "cache": cache, "now": now,
          "d1": d1, "h4": h4, "h1": h1, "_out": _out,
          "rr": float(user_settings.get("rr_ratio", 2.0) or 2.0), "min_rr": float(user_settings.get("min_risk_reward", 1.5) or 1.5),
-         "min_score": w.get("regular_min_score", 5), "min_stop_atr": 1.0 if scalp else 0.5}
-    allow_pullback = bool(user_settings.get("pullback_trades", True))
+         "min_score": w.get("regular_min_score", 5), "scalp": scalp, "min_stop_atr": 1.0 if scalp else REGULAR_STOP_FLOOR_ATR,
+         "require_fvg": bool(w.get("scalp_require_fvg", True) if scalp else w.get("require_fvg", True))}
+    allow_pullback = bool(user_settings.get("pullback_trades", False))   # default OFF: 733 backtested pullback trades on 8 pairs lost -174R
 
     def wait(reason, bias="NEUTRAL", entry=0, pct=50, score=0, details=None):
         d = {"regular_mode": True}
