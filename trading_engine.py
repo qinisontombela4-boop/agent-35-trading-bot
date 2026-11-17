@@ -650,9 +650,23 @@ DEFAULT_WEIGHTS.update({
     "regular_min_score": 5,  # REGULAR (SMC) mode: checklist items (of 10) needed (lowered from 6 by request); the 4 required gates already count
     "max_opposing": 2,     # if more than this many strategies vote the OTHER way, skip
     "zone_veto": True,     # never buy in premium / sell in discount unless a zone-appropriate OB backs it
+    "fixed_tp_r": 0,       # 0 = off. HIGH-WIN-RATE profile: set e.g. 1.0 to use a fixed 1R target
+    "trend_cont": False,   # OFF: backtest (11 pairs, Mar-Nov 2026) of the TREND-CONTINUATION entry (daily+4H+1H agree, price at the far end of the range): 388 extra regular trades 31% win / -57R, scalp -55R. Opt in per user with user_settings["trend_trades"]=True
+    "tc_ext_pct": 35,      # price must be within this % of the range extreme (<=35% for sells, >=65% for buys)
+    "tc_extra_score": 0,   # extra checklist points a trend-continuation setup needs on top of regular_min_score
     "require_fvg": True,   # REGULAR mode: the move must have left a fair value gap (imbalance). Backtest (8 pairs, 293 continuation trades): with FVG 41% win / +32R, without 34% / -14R
     "scalp_require_fvg": True,
 })
+# ---- BOT PROFILE (set BOT_PROFILE on a SECOND deployment to run a higher-win-rate bot; unset = the main bot) ----
+# Same signals, same stops - only the take-profit is a fixed small multiple of the risk. Backtest (11 pairs, Mar-Nov 2026, learning + pauses):
+#   default (1:2 / liquidity up to 3R): ~41% win, +58R, 12% max drawdown      <- best profit, the main bot
+#   balanced (1.5R target):             ~47% win, +30R, 13% drawdown
+#   steady   (1.0R target):             ~55% win, +16R, 21% drawdown
+#   (a 0.75R target reached ~61% win but made no profit after costs, so it is not offered)
+BOT_PROFILE = (os.getenv("BOT_PROFILE", "default") or "default").lower()
+PROFILE_TP_R = {"default": 0.0, "balanced": 1.5, "steady": 1.0}
+DEFAULT_WEIGHTS["fixed_tp_r"] = float(os.getenv("FIXED_TP_R") or PROFILE_TP_R.get(BOT_PROFILE, 0.0))
+
 
 # ---- v25 rework constants (all from the Mar-Nov 2026 MT5 backtests on 8 pairs) ----
 LIQ_MAX_R = 3.0            # liquidity take-profit is only used when it is within 3R. Targets of 5R+ won just 6-13% of the time; 2-3R targets were profitable
@@ -1110,7 +1124,7 @@ def _ob_for_event(candles, ev, direction):
     idx = start + m; c = candles[idx]
     return {"index": idx, "low": c["low"], "high": c["high"], "break_index": e, "kind": ev["kind"]}
 
-def find_h1_poi(h1, events, direction, rng, atr, price):
+def find_h1_poi(h1, events, direction, rng, atr, price, zone_free=False):
     """Nearest UNMITIGATED 1H order block (not closed through since it formed), sitting in
     the correct half of the dealing range, of sane size."""
     best = None
@@ -1120,14 +1134,14 @@ def find_h1_poi(h1, events, direction, rng, atr, price):
         after = h1[ev["index"] + 1:]
         if direction == "BULLISH" and any(c["close"] < ob["low"] for c in after): continue
         if direction == "BEARISH" and any(c["close"] > ob["high"] for c in after): continue
-        if not ob_in_zone((ob["low"], ob["high"]), direction, rng): continue
+        if not zone_free and not ob_in_zone((ob["low"], ob["high"]), direction, rng): continue
         if (ob["high"] - ob["low"]) > 3.0 * atr: continue
         dist = (price - ob["high"]) if direction == "BULLISH" else (ob["low"] - price)   # >0: price still on the approach side
         key = abs(dist)
         if best is None or key < best[0]: best = (key, ob)
     return best[1] if best else None
 
-def find_mitigation_block(h1, events, direction, rng, atr, price):
+def find_mitigation_block(h1, events, direction, rng, atr, price, zone_free=False):
     """Mitigation block / breaker: an order block of the OPPOSITE direction that price has since closed through
     (e.g. a bullish OB that broke down becomes bearish supply when price rallies back up into it). Valid while
     price has not closed back through it, sitting in the right half of the range, of sane size."""
@@ -1143,17 +1157,17 @@ def find_mitigation_block(h1, events, direction, rng, atr, price):
         later = h1[broke + 1:]
         if direction == "BEARISH" and any(k["close"] > ob["high"] for k in later): continue
         if direction == "BULLISH" and any(k["close"] < ob["low"] for k in later): continue
-        if not ob_in_zone((ob["low"], ob["high"]), direction, rng): continue
+        if not zone_free and not ob_in_zone((ob["low"], ob["high"]), direction, rng): continue
         dist = (price - ob["high"]) if direction == "BULLISH" else (ob["low"] - price)
         if best is None or abs(dist) < best[0]: best = (abs(dist), {**ob, "type": "MB", "kind": "mitigation"})
     return best[1] if best else None
 
-def best_poi(h1, events, direction, rng, atr, price):
+def best_poi(h1, events, direction, rng, atr, price, zone_free=False):
     """Nearest 1H point of interest: an unmitigated order block OR a mitigation block."""
     cands = []
-    ob = find_h1_poi(h1, events, direction, rng, atr, price)
+    ob = find_h1_poi(h1, events, direction, rng, atr, price, zone_free)
     if ob: cands.append({**ob, "type": "OB"})
-    mb = find_mitigation_block(h1, events, direction, rng, atr, price)
+    mb = find_mitigation_block(h1, events, direction, rng, atr, price, zone_free)
     if mb: cands.append(mb)
     if not cands: return None
     dist = lambda o: abs((price - o["high"]) if direction == "BULLISH" else (o["low"] - price))
@@ -1278,7 +1292,7 @@ def htf_pois(direction, d1, h4, h1, price):
 
 def _fmt_pool(p): return f"{p['name']} {p['level']:.5g}"
 
-def _entry_from_poi(c, direction, poi, pullback_target=None):
+def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
     """Stage 3+4 for ONE direction/POI: tap -> 15m structure shift -> 5m trigger -> structural stop -> room check."""
     symbol, h1, d1, h4, now, cache, historical = c["symbol"], c["h1"], c["d1"], c["h4"], c["now"], c["cache"], c["historical"]
     atr_h1, h1_range, h1_swings, h1_events = c["atr_h1"], c["h1_range"], c["h1_swings"], c["h1_events"]
@@ -1295,7 +1309,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
     is_sweep = poi.get("kind") == "sweep"
     poi_txt = (f"1H sweep of {poi['name']} {poi['level']:.5g}" if is_sweep else
                f"1H {'Bull' if direction=='BULLISH' else 'Bear'} {poi.get('type','OB')} {poi['low']:.5g}-{poi['high']:.5g}")
-    tag = "PULLBACK " if pullback else ""
+    tag = "PULLBACK " if pullback else ("TREND " if trend else "")
 
     def out(reason, details=None, score=None):
         sc = sum(items.values()) if score is None else score
@@ -1406,6 +1420,8 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
     else:
         target = h1_range["high"] if direction == "BULLISH" else h1_range["low"]
         room = (target - entry) if direction == "BULLISH" else (entry - target)
+        if trend:   # price is already at the far end of the range: there is no range target ahead, so aim at the reward ratio (or untaken liquidity within 3R)
+            target = entry + risk * c["rr"] if direction == "BULLISH" else entry - risk * c["rr"]; room = risk * c["rr"]
         # TAKE PROFIT AT UNTAKEN LIQUIDITY: price is drawn to resting stops (swing / equal highs-lows, previous-day and 5-day levels).
         # Use the nearest untaken pool in the trade direction that leaves at least the user's reward ratio (and at most LIQ_MAX_R = 3R), stopping just short of it. If none fits, fall back
         # to the user's reward-ratio target below.
@@ -1416,6 +1432,8 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
                 tl = lp["level"] - 0.1 * atr_h1 if direction == "BULLISH" else lp["level"] + 0.1 * atr_h1
                 rm = (tl - entry) if direction == "BULLISH" else (entry - tl)
                 if max(min_rr_of(c), c.get("rr", 2.0)) * risk <= rm <= LIQ_MAX_R * risk: liq_pool, target, room = lp, tl, rm; break
+    if c.get("fixed_tp") and not pullback and risk > 0:   # HIGH-WIN-RATE profile: a fixed small target (k x risk) instead of the reward ratio / liquidity target
+        target = entry + risk * c["fixed_tp"] if direction == "BULLISH" else entry - risk * c["fixed_tp"]; room = risk * c["fixed_tp"]; liq_pool = None
     if risk <= 0: return out("Rejected: invalid stop distance", common)
     if risk > 3.0 * atr_h1: return out(f"Stop would be {risk/atr_h1:.1f} ATR wide (beyond the order block) - setup too wide to trade", common)
     if room < min_rr_of(c) * risk: return out(f"Only {room/risk:.1f}R of room to the target - need {min_rr_of(c):.1f}R", common)
@@ -1425,15 +1443,16 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
         return out(f"Spread (~{_sp:.5g}) would cost {_sp/risk:.0%} of the stop distance - skipped (over {_cap:.0%} of the risk is lost to costs)", {**common, "cost_skip": True})
     if c.get("require_fvg") and not pullback and not items["FVG / imbalance"]:
         return out(f"{poi_txt} tapped and {tf_name} confirmed, but the move left no fair value gap (imbalance) - skipped ({score}/10)", {**common, "waiting_for": "fvg"})
-    if score < c["min_score"] + (1 if pullback else 0):   # trading against the daily bias needs one more confirmation than a trade with it
+    if score < c["min_score"] + (1 if pullback else 0) + (c.get("tc_extra", 0) if trend else 0):   # trading against the daily bias needs one more confirmation than a trade with it
         return out(f"{score}/10 checklist - need {c['min_score']}+ ({', '.join(k for k, v in items.items() if not v)} missing)", common)
     rr = c["rr"]
-    tp = target if (pullback or liq_pool) else (entry + risk * rr if direction == "BULLISH" else entry - risk * rr)
+    tp = target if (pullback or liq_pool or c.get("fixed_tp")) else (entry + risk * rr if direction == "BULLISH" else entry - risk * rr)
     if pullback:
         tgt_desc = (f"the untaken {pullback_target['name']} {pullback_target['low']:.5g}" if pullback_target["tf"] == "liquidity" else
                     f"the {pullback_target['tf']} {'Bull' if c['daily_bias']=='BULLISH' else 'Bear'} OB {pullback_target['low']:.5g}-{pullback_target['high']:.5g}")
         why = [f"PULLBACK {direction.lower()} with the 1H move, against the daily {c['daily_bias'].lower()} bias: price is heading toward {tgt_desc}",
                f"1H: {poi_txt}" + (" then rejected" if is_sweep else " tapped")]
+    elif trend: why = [f"TREND CONTINUATION {direction.lower()}: daily, 4H and 1H all {direction.lower()}, price at {h1_pct:.0f}% of the 1H range (the far end of the move)", f"1H: {poi_txt} tapped on the retrace"]
     else: why = [f"Daily {direction.lower()} bias" + (", 4H agrees" if items["4H agrees"] else ""), f"1H: price in {zone} ({h1_pct:.0f}% of range), {poi_txt} tapped"]
     if grab: why.append(grab)
     why.append(notes["15m structure shift"] + (f", {trig}" if trig else ""))
@@ -1444,10 +1463,10 @@ def _entry_from_poi(c, direction, poi, pullback_target=None):
         "symbol": symbol, "signal": True, "score": score, "bias": direction, "bias_4h": c["bias_4h"], "entry": entry,
         "stop_loss": stop, "take_profit": tp, "risk_reward": round(abs(tp - entry) / risk, 2), "premium_pct": h1_pct,
         "reason": f"{tag}{score}/10 SMC checklist: " + ", ".join(k for k, v in items.items() if v),
-        "rationale": ". ".join(why) + ".", "confluence": ("PULLBACK | " if pullback else "") + " | ".join(k for k, v in items.items() if v),
+        "rationale": ". ".join(why) + ".", "confluence": ("PULLBACK | " if pullback else ("TREND | " if trend else "")) + " | ".join(k for k, v in items.items() if v),
         "details": {"checklist": dict(items), "notes": notes, "regular_mode": True, "poi": poi, "zone": zone, "pullback": pullback,
                     **common, "stop": stop, "target_liquidity": target, "room_r": round(room / risk, 2), "tap_index": tap},
-        "mode": "regular", "structural": True, "mode_stage": "regular", "pullback": pullback, "tp_is_target": bool(pullback or liq_pool), "tp_liquidity": (liq_pool or {}).get("name"),
+        "mode": "regular", "structural": True, "mode_stage": "regular", "pullback": pullback, "trend": trend, "tp_is_target": bool(pullback or liq_pool), "tp_liquidity": (liq_pool or {}).get("name"),
         "factors": {**{n: (votes[n][0] == direction) for n in STRATEGY_NAMES}, "zone": zone, "zone_veto_blocked": False},
     }
 
@@ -1504,7 +1523,9 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
          "d1": d1, "h4": h4, "h1": h1, "_out": _out,
          "rr": float(user_settings.get("rr_ratio", 2.0) or 2.0), "min_rr": float(user_settings.get("min_risk_reward", 1.5) or 1.5),
          "min_score": w.get("regular_min_score", 5), "scalp": scalp, "min_stop_atr": 1.0 if scalp else REGULAR_STOP_FLOOR_ATR,
-         "require_fvg": bool(w.get("scalp_require_fvg", True) if scalp else w.get("require_fvg", True))}
+         "require_fvg": bool(w.get("scalp_require_fvg", True) if scalp else w.get("require_fvg", True)),
+         "fixed_tp": float(w.get("fixed_tp_r") or 0)}
+    if c["fixed_tp"]: c["min_rr"] = min(c["min_rr"], c["fixed_tp"])
     allow_pullback = bool(user_settings.get("pullback_trades", False))   # default OFF: 733 backtested pullback trades on 8 pairs lost -174R
 
     def wait(reason, bias="NEUTRAL", entry=0, pct=50, score=0, details=None):
@@ -1550,6 +1571,24 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
             c["pools"] = pools
             return _entry_from_poi(c, direction, poi)
 
+    # ---- TREND CONTINUATION: daily + 4H + 1H all agree and price is at the FAR end of the range (a steady trend that never retraces into
+    #      premium/discount). Sell the retrace into a fresh 1H bearish block / breaker (buy for bullish), with the same tap + shift + FVG gates. ----
+    if bool(user_settings.get("trend_trades", w.get("trend_cont", False))) and not right_side and aligned_4h and base_items["1H structure agrees"]:
+        ext = h1_pct <= w.get("tc_ext_pct", 35) if direction == "BEARISH" else h1_pct >= 100 - w.get("tc_ext_pct", 35)
+        if ext:
+            tpoi = best_poi(h1, h1_events, direction, h1_range, atr_h1, price, zone_free=True)
+            if tpoi:
+                tgap = (price - tpoi["high"]) if direction == "BULLISH" else (tpoi["low"] - price)
+                if tgap <= 1.5 * atr_h1:
+                    c["pools"] = pools; c["tc_extra"] = w.get("tc_extra_score", 0)
+                    tres = _entry_from_poi(c, direction, tpoi, trend=True)
+                    if tres.get("signal"): return tres
+                    tc_note = tres.get("reason")
+                else: tc_note = None
+            else: tc_note = None
+        else: tc_note = None
+    else: tc_note = None
+
     # ---- RETRACEMENT PHASE: daily bias intact, but the 1H is on the wrong side of its range (e.g. daily bullish, 1H in premium
     #      falling toward an untaken bullish order block). The bot knows WHERE it is heading and what liquidity is left to take. ----
     targets = htf_pois(direction, d1, h4, h1, price)
@@ -1585,6 +1624,7 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
                 det["pullback_status"] = res.get("reason"); reason += f" Pullback {counter.lower()} check: {res.get('reason')}"
                 if (res.get("details") or {}).get("heads_up") and "heads_up" not in det: det["heads_up"] = res["details"]["heads_up"]
                 break
+    if tc_note: reason += f" Trend-continuation check: {tc_note}"
     return wait(reason, bias=direction, entry=price, pct=h1_pct, score=sum(base_items.values()), details=det)
 
 def market_map(symbol, historical=None):
