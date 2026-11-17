@@ -35,6 +35,7 @@ JBLANKED_BASE_URL = "https://www.jblanked.com/news/api"
 JBLANKED_UTC_OFFSET_HOURS = float(os.getenv("JBLANKED_UTC_OFFSET_HOURS", "0") or 0)
 _FF_PRIMARY = os.getenv("FF_FEED_URL", "https://nfs.faireconomy.media/ff_calendar_thisweek.json")
 FF_FEED_URLS = [_FF_PRIMARY]   # the old cdn-nfs mirror host does not resolve (DNS error), so it is no longer tried
+CALENDAR_RELAY_URL = os.getenv("CALENDAR_RELAY_URL", "").strip()   # e.g. https://raw.githubusercontent.com/<you>/agent35-calendar/main/calendar.json
 NEWS_SOURCE = os.getenv("NEWS_SOURCE", "auto").strip().lower()  # "auto" (free feed first) or "jblanked"
 
 CACHE_TTL_MINUTES = 60       # the free feed allows only ~2 requests per 5 min PER IP and Render shares IPs, so fetch rarely; scheduled times almost never change
@@ -190,6 +191,27 @@ def _fetch_forex_factory_feed():
     return unique
 
 
+def _fetch_relay():
+    """Your own copy of the calendar, refreshed hourly by a GitHub Action (see
+    calendar.yml). Same JSON format as the Forex Factory feed (this + next week
+    merged), so no 429s: it is YOUR file, not the shared feed."""
+    if not CALENDAR_RELAY_URL:
+        raise RuntimeError("CALENDAR_RELAY_URL not set")
+    r = requests.get(CALENDAR_RELAY_URL, headers={"User-Agent": USER_AGENT}, timeout=HTTP_TIMEOUT)
+    if r.status_code != 200:
+        raise RuntimeError(f"HTTP {r.status_code} from relay URL")
+    raw = r.json()
+    if not isinstance(raw, list):
+        raise RuntimeError("relay file is not a JSON list")
+    events = _ff_rows_to_events(raw)
+    if not events:
+        raise RuntimeError("relay file had zero usable events")
+    newest = max(e["time"] for e in events)
+    if newest < datetime.utcnow() - timedelta(days=1):
+        raise RuntimeError(f"relay file is out of date (newest event {newest:%d %b}) — is the GitHub Action running?")
+    return events
+
+
 def _fetch_jblanked():
     if not JBLANKED_API_KEY:
         raise RuntimeError("JBLANKED_API_KEY not set")
@@ -243,9 +265,10 @@ def _parse_iso_to_utc(s):
 def _source_order():
     free = ("Forex Factory (free feed)", _fetch_forex_factory_feed)
     jb = ("JBlanked", _fetch_jblanked)
+    relay = ("Calendar relay (GitHub)", _fetch_relay)
     if NEWS_SOURCE == "jblanked":
         return [jb, free]
-    order = [free]
+    order = ([relay] if CALENDAR_RELAY_URL else []) + [free]
     if JBLANKED_API_KEY:
         order.append(jb)
     return order
@@ -329,7 +352,7 @@ def status_summary():
         "source": STATUS["source"], "ok": STATUS["ok"], "stale": STATUS["stale"], "event_count": STATUS["event_count"],
         "last_attempt_utc": iso(STATUS["last_attempt"]), "last_success_utc": iso(STATUS["last_success"]),
         "last_error": STATUS["last_error"], "next_week_note": STATUS.get("next_week_note", ""),
-        "jblanked_key_set": bool(JBLANKED_API_KEY), "news_source_setting": NEWS_SOURCE,
+        "jblanked_key_set": bool(JBLANKED_API_KEY), "relay_url_set": bool(CALENDAR_RELAY_URL), "news_source_setting": NEWS_SOURCE,
     }
 
 
