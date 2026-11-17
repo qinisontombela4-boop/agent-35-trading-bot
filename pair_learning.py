@@ -29,16 +29,17 @@ LIVE_WINDOW = 60            # only the latest 60 live results count (markets cha
 
 # {symbol: {kind: (backtest trades, average net R)}} - from the 8-pair MT5 backtests, Mar-Nov 2026
 PRIORS = {
-    "EURUSD": {"CONT": (40, 0.20), "PB": (83, -0.48)},
-    "XAUUSD": {"CONT": (30, 0.70), "PB": (91, 0.08), "SCALP": (80, -0.06)},
+    "EURUSD": {"CONT": (40, 0.20), "PB": (83, -0.48), "SCALP": (4, 0.43)},
+    "XAUUSD": {"CONT": (30, 0.70), "PB": (91, 0.08), "SCALP": (66, -0.03)},
     "NAS100": {"CONT": (34, 0.26), "PB": (97, -0.34)},
-    "BTCUSD": {"CONT": (75, 0.07), "PB": (105, -0.20), "SCALP": (46, -0.02)},
+    "BTCUSD": {"CONT": (75, 0.07), "PB": (105, -0.20), "SCALP": (41, -0.29)},
     "USDCHF": {"CONT": (32, -0.21), "PB": (96, -0.13)},
     "ETHUSD": {"CONT": (14, -0.16), "PB": (83, -0.48)},
-    "US30":   {"CONT": (42, 0.09), "PB": (84, -0.04)},
-    "USOIL":  {"CONT": (26, 0.07), "PB": (94, -0.33)},
-    "USDZAR": {"CONT": (38, -0.54)},
-    "SPX500": {"CONT": (39, 0.25)},
+    "US30":   {"CONT": (42, 0.09), "PB": (84, -0.04), "SCALP": (83, 0.02)},
+    "USOIL":  {"CONT": (26, 0.07), "PB": (94, -0.33), "SCALP": (54, -0.11)},
+    "USDZAR": {"CONT": (38, -0.54), "SCALP": (2, -1.08)},
+    "SPX500": {"CONT": (39, 0.25), "SCALP": (9, -0.73)},
+    "GBPUSD": {"CONT": (5, 0.11)},   # only ~7 weeks of data: too few trades to judge, so the bot treats it as "learning"
 }
 PRIOR_ALIASES = {"XTIUSD": "USOIL"}
 
@@ -216,3 +217,19 @@ def gate(stats, symbol, kind, score):
     if ev["status"] in ("strong", "proven"):
         tag = f"⭐ Proven pair: {ev['avg']:+.2f}R average over {ev['n']} tracked trades"
     return True, tag
+
+
+# ---- second-bot profiles (BOT_PROFILE env): their own backtest priors, because a fixed 1R / 1.5R target changes every pair's average R ----
+import os as _os
+_PROFILE = (_os.getenv("BOT_PROFILE", "default") or "default").lower()
+_PROFILE_CONT = {   # {pair: (trades, average net R)} - Mar-Nov 2026 MT5 backtests, regular mode, fixed target
+    "steady": {"XAUUSD": (41, 0.25), "EURUSD": (49, 0.08), "GBPUSD": (6, -0.09), "NAS100": (42, -0.02), "SPX500": (48, -0.03), "US30": (57, -0.10),
+               "BTCUSD": (97, 0.03), "ETHUSD": (15, -0.07), "USDCHF": (43, -0.12), "USOIL": (41, 0.10), "USDZAR": (49, -0.27)},
+    "balanced": {"XAUUSD": (36, 0.42), "EURUSD": (41, 0.02), "GBPUSD": (5, -0.09), "NAS100": (38, 0.04), "SPX500": (46, 0.12), "US30": (51, 0.06),
+                 "BTCUSD": (84, 0.01), "ETHUSD": (15, -0.18), "USDCHF": (37, -0.28), "USOIL": (33, 0.09), "USDZAR": (43, -0.35)},
+}
+if _PROFILE in _PROFILE_CONT:
+    PRIORS = {s: {"CONT": v} for s, v in _PROFILE_CONT[_PROFILE].items()}
+    PRIOR_FEATS = {}     # the default bot's feature priors do not describe this target, so this bot learns its own from live results
+    # a profile bot is tested in regular mode only: scalp and pullbacks have no record here, so they stay blocked until proven
+    STRONG_AVG = 0.15    # with a small fixed target the average R per trade is lower, so "proven" is a lower bar (best pairs only reach ~+0.25R)
