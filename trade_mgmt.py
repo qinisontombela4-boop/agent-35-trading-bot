@@ -1,4 +1,3 @@
-
 """
 SMOOTH MODE - profit-protection logic for a tracked trade (pure functions, no I/O, unit-testable).
 
