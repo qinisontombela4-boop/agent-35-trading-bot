@@ -1390,7 +1390,9 @@ def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
     score = sum(items.values())
     common = {"votes": {n: votes[n][0] for n in STRATEGY_NAMES}, "strategies_agree": agree, "strategies_against": against}
     if not items["15m structure shift"]:
-        return out(f"{tag}{poi_txt} tapped, but no {tf_name} structure shift {direction.lower()} yet - waiting for confirmation ({score}/10)", {**common, "waiting_for": "confirmation"})
+        _hu = None if (pullback or trend) else {"key": f"{symbol}|conf|{direction}|{round(poi['low'], 5)}",
+              "text": f"{symbol}: SETUP FORMING - price has tapped the {poi_txt} ({direction.lower()} setup). The bot is waiting for a {tf_name} structure shift {direction.lower()} before it will send a signal."}
+        return out(f"{tag}{poi_txt} tapped, but no {tf_name} structure shift {direction.lower()} yet - waiting for confirmation ({score}/10)", {**common, "waiting_for": "confirmation", **({"heads_up": _hu} if _hu else {})})
     if pullback and not is_sweep and not items["1H structure agrees"]:
         return out(f"Pullback {direction.lower()} setup rejected: the 1H structure hasn't turned {direction.lower()} yet", common)
 
@@ -1600,6 +1602,7 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
         det = {"phase": "retracement", "target_poi": tgt, "all_targets": targets, "liquidity": [_fmt_pool(p) for p in liq], "waiting_for": "retracement",
                "heads_up": {"key": f"{symbol}|retr|{direction}|{tgt['tf']}|{round(tgt['low'],5)}",
                             "text": f"{symbol}: daily bias is {direction.lower()}, but the 1H is retracing - price is heading toward the {tgt_txt}.{liq_txt}\nThe bot will only signal once price taps it and the 15m shifts {direction.lower()}."}}
+        if abs(tgt["dist"]) > 4 * atr_h1: det.pop("heads_up", None)     # a zone that is 4+ ATR away is not "forming" yet - no heads-up for it
     else:
         reason = f"Daily {direction.lower()} (price in {dz}), 1H in {zone} ({h1_pct:.0f}% of range) and no unmitigated {direction.lower()} order block to trade from yet - waiting"
         det = {"phase": "retracement", "waiting_for": "poi"}
