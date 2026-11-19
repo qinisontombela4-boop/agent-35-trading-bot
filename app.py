@@ -291,7 +291,7 @@ def drop_ghost_sessions():
 MAX_SYMBOLS_PER_USER = int(os.getenv("MAX_SYMBOLS_PER_USER", "6"))   # watchlist cap: every watched pair costs Twelve Data credits on each scan
 SESSION_HOURS_UTC = {"Asia": (0, 9), "London": (8, 17), "New York": (13, 22)}
 ALL_SESSIONS = list(SESSION_HOURS_UTC)
-MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "10"))     # hard ceiling per trade
+MAX_RISK_PERCENT = float(os.getenv("MAX_RISK_PERCENT", "25"))     # hard ceiling per trade
 RECOMMENDED_RISK_PERCENT = 1.0                                      # what we tell users to use
 MAX_LOSSES_PER_DAY = int(os.getenv("MAX_LOSSES_PER_DAY", "2"))    # after this many stop-outs in one day, no new signals until tomorrow
 LOSS_STREAK_PAUSE = int(os.getenv("LOSS_STREAK_PAUSE", "3"))      # this many losses in a row ...
@@ -576,9 +576,8 @@ def dispatch_signal_to_user(email, chat_id, symbol, r, user_settings, is_test=Fa
     acc = user_settings.get('account_size', 142); curr_sym = get_currency_symbol(user_settings.get("currency","ZAR"))
     mode = user_settings.get("trading_mode", "regular")
     sl, tp, sl_dist, tp_dist, risk_amt, lev_info = build_trade_plan(symbol, r, user_settings)
-    if lev_info.get('too_risky'):
-        if not is_test: maybe_send_toowide_notice(email, chat_id, symbol, lev_info.get('actual_risk_pct'), acc, curr_sym)
-        return False, {"error": f"skipped: stop is too wide for this account - the smallest lot (0.01) would risk {lev_info.get('actual_risk_pct')}% vs your {risk_percent}% limit"}
+    # A setup whose smallest lot (0.01) risks more than the user's limit is NO LONGER dropped: it is sent with a loud warning that shows the real
+    # % at risk (see build_trade_plan), and the user decides (TOOK / SKIP).
     if lev_info.get('structural'): lot = lev_info['effective_lot']; rr = lev_info.get('rr', rr)
 
     signal_id = generate_signal_id()
@@ -843,9 +842,12 @@ def build_trade_plan(symbol, r, user_settings):
     # got NO signals for gold, indices, crypto and often even EURUSD. Now it is sent with a loud warning, and only dropped above the
     # system maximum (MAX_RISK_PERCENT). The user decides; the warning shows the real % at risk.
     too_risky = actual_pct > MAX_RISK_PERCENT
-    if actual_pct > risk_percent*1.25 and not too_risky:
+    if actual_pct > risk_percent*1.25:
         notes = [n for n in notes if "smallest lot" not in n]
-        notes.append(f"HIGH RISK: the smallest lot (0.01) risks {actual_pct:.1f}% of your account on this stop (your setting is {risk_percent:g}%). Take it only if you accept that, otherwise SKIP")
+        if too_risky:
+            notes.append(f"VERY HIGH RISK 🚨: if you take this trade you risk {actual_pct:.1f}% of your account (your setting is {risk_percent:g}%, the system maximum is {MAX_RISK_PERCENT:g}%). The smallest lot (0.01) is already too big for this stop and a loss would hurt your balance badly. SKIP unless you accept that")
+        else:
+            notes.append(f"HIGH RISK: this trade risks {actual_pct:.1f}% of your account, above your {risk_percent:g}% setting (the smallest lot, 0.01, is already too big for this stop). A loss would be larger than you planned - take it only if you accept that, otherwise SKIP")
     info = {"too_risky": too_risky, "actual_risk_pct": round(actual_pct, 1) if acc else None, "leverage_capped": False, "effective_lot": lot_f, "max_lot": round(max_lot, 2), "sized_to_risk": True, "note": " | ".join(notes), "structural": True, "rr": rr}
     return round(sl, dp), round(tp, dp), round(sl_d, 1), round(tp_d, 1), actual_risk, info
 
@@ -1134,9 +1136,9 @@ def settings_page():
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:16px'>
 <div class='card' style='border:2px solid #10b981'><div class='card-title'>Trading Mode - 2 Modes Only</div><select name='trading_mode' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #10b981'>
 <option value='regular' {'selected' if mode=='regular' else ''}>🎯 REGULAR (SMC) - Daily bias + 1H order block + 15m/5m entry - Score {REGULAR_MIN_SCORE}+ send</option>
-<option value='scalp' {'selected' if mode=='scalp' else ''}>⚡ SCALP (SMC, one timeframe lower) - 4H bias + 15m order block + 5m entry - London/New York only - Score {REGULAR_MIN_SCORE}+ send</option>
+<option value='scalp' {'selected' if mode=='scalp' else ''}>⚡ SCALP (rare signals, not profitable in testing) (SMC, one timeframe lower) - 4H bias + 15m order block + 5m entry - London/New York only - Score {REGULAR_MIN_SCORE}+ send</option>
 </select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>
-<b>REGULAR (SMC):</b> The daily structure sets the ONLY direction. On the 1H chart the bot maps swing structure (BOS/CHoCH), the premium/discount range and unmitigated order blocks; it waits for price to tap an order block in the right half of the range, then needs a 15m structure shift (and ideally a 5m trigger) before sending. The stop sits beyond the order block, and the lot is sized so a stop-out costs your risk %. Best for Gold/Forex/Indices. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+<br><br>
+<div style='background:rgba(245,158,11,.12);border:1px solid #f59e0b;border-radius:8px;padding:8px;margin-bottom:8px;color:#fcd34d'>⚠️ <b>Scalp mode sends very few signals.</b> The spread is too big for its tiny stops on EURUSD, GBPUSD, USDCHF, ETHUSD, NAS100 and BTCUSD, so those pairs almost never qualify, and across all pairs it lost money in testing. Regular mode is recommended.</div><b>REGULAR (SMC):</b> The daily structure sets the ONLY direction. On the 1H chart the bot maps swing structure (BOS/CHoCH), the premium/discount range and unmitigated order blocks; it waits for price to tap an order block in the right half of the range, then needs a 15m structure shift (and ideally a 5m trigger) before sending. The stop sits beyond the order block, and the lot is sized so a stop-out costs your risk %. Best for Gold/Forex/Indices. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+<br><br>
 <b>SCALP:</b> the same SMC logic one timeframe lower: 4H sets the bias, a 15m order block is the zone and a 5m structure shift is the entry. Stops sit beyond the order block. London / New York hours only (crypto 24/7). Smaller targets, faster trades.
 </div></div>
 <div class='card'><div class='card-title'>Currency</div><select name='currency' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{currency_options}</select></div>
@@ -1602,7 +1604,7 @@ def plans_page():
 ✅ Journal + Export<br>
 ✅ Up to 6 tracked trades<br>
 ✅ Cloud backup<br>
-✅ Built-in risk limits (1% recommended, 10% max)<br>
+✅ Built-in risk limits (1% recommended, 25% max)<br>
 </div><a href='/pay?plan=yearly' style='display:block;background:#10b981;color:white;text-align:center;padding:12px;border-radius:12px;text-decoration:none;font-weight:800;margin-top:16px'>Choose Yearly</a></div>
 <div class='card' style='border:1px solid #f59e0b44; background:linear-gradient(135deg,#1a1508 0%,#151e32 100%)'><div style='display:flex;justify-content:space-between;align-items:center'><h3 style='margin:0;font-size:16px'>Lifetime</h3><span style='background:#f59e0b;color:white;padding:4px 10px;border-radius:20px;font-size:10px;font-weight:800'>BEST VALUE</span></div><div class='card-value' style='margin:12px 0;color:#fbbf24'>{curr_sym}5000 <span style='font-size:13px;color:#94a3b8;font-weight:500'>once</span></div><div style='font-size:12px;color:#94a3b8;line-height:1.6'>
 🔥 Everything in Yearly PLUS<br>
@@ -1666,8 +1668,26 @@ def creator_dashboard():
     pending={k:v for k,v in users.items() if v.get("status")=="pending"}
     pending_rows="".join([f"<tr><td style='font-family:monospace;font-size:10px'>{ref}</td><td>{pay.get('user','')[:24]}</td><td>{pay.get('plan','yearly')}</td><td>R{pay.get('price','')}</td><td><a href='/creator/action?act=approve_payment&ref={ref}&secret={secret_param}' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-weight:700;font-size:11px'>Approve</a> <a href='/creator/action?act=reject&ref={ref}&secret={secret_param}' style='background:#1e293b;border:1px solid #334155;color:#94a3b8;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Reject</a></td></tr>" for ref,pay in pending.items()]) or "<tr><td colspan=5 style='text-align:center;color:#64748b;padding:16px'>No pending payments ✅</td></tr>"
     user_rows="".join([f"<tr><td style='font-size:10px'>{e[:24]}</td><td style='font-size:10px'>{info.get('plan_status','')[:18]}</td><td style='font-size:10px'>{info.get('ref_code','')}</td><td style='font-size:10px'>{str(info.get('expires',''))[:10]}</td></tr>" for e,info in list(auth.items())[-15:]])
+    # ---- every registered user and whether signals can actually reach them (the same checks the scan uses) ----
+    tg_all = load_json(TG_FILE, dict); _usc = system.get("user_scan") or {}; deliv_rows = []; linked_n = 0; ok_n = 0
+    for _e in sorted(auth.keys()):
+        try:
+            _linked = bool((tg_all.get(_e) or {}).get("chat_id")); _us = get_user_settings(_e); _bl = []
+            if _linked: linked_n += 1
+            else: _bl.append("Telegram NOT linked - the scan skips this user")
+            if user_tracked_count(_e) >= MAX_TRACKED: _bl.append(f"at the {MAX_TRACKED}-open-trade limit")
+            if get_daily_signal_count(_e) >= MAX_SIGNALS_PER_DAY: _bl.append("daily signal cap reached")
+            _pz, _pw = protection_status(_e)
+            if _pz: _bl.append("protection pause: " + str(_pw)[:70])
+            if not user_session_open(_us): _bl.append("outside the sessions they chose (right now)")
+            if not _bl: ok_n += 1
+            _ls = (_usc.get(_e) or {}).get("last_signal")
+            deliv_rows.append(f"<tr><td>{'🟢' if not _bl else ('🔴' if not _linked else '🟡')}</td><td style='font-size:10px'>{_e[:26]}</td><td style='font-size:10px'>{'linked' if _linked else 'NOT linked'}</td><td style='font-size:10px'>{_us.get('trading_mode')} / {len(_us.get('symbols', []))} pairs</td><td style='font-size:10px'>{str(_ls or 'never')[:16]}</td><td style='font-size:10px'>{'; '.join(_bl) or 'ready'}</td></tr>")
+        except Exception as _ex:
+            deliv_rows.append(f"<tr><td>⚠️</td><td style='font-size:10px'>{_e[:26]}</td><td colspan=4 style='font-size:10px'>could not check: {str(_ex)[:80]}</td></tr>")
+    deliv_html = f"<div class='table-card' style='margin-top:12px;grid-column:1/-1'><h3 style='margin:0 0 6px;font-size:14px'>Signal delivery - all {len(auth)} users ({linked_n} Telegram-linked, {ok_n} ready right now)</h3><div style='font-size:11px;color:#94a3b8;margin-bottom:8px'>🟢 ready 🟡 linked but blocked right now (session, pause, limit) 🔴 Telegram not linked. \"Tracked\" at the top counts OPEN TRADES that users pressed TOOK on, not users.</div><table><tr><th></th><th>Email</th><th>Telegram</th><th>Mode</th><th>Last signal</th><th>Blockers</th></tr>{''.join(deliv_rows)}</table></div>"
     content=f"""<div style='max-width:1600px;margin:0 auto;padding:14px'>
-<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><h1 style='font-size:20px;font-weight:900;margin:0'>👑 Creator Master Panel - V24 Unified 2 Modes</h1><div style='display:flex;gap:6px;flex-wrap:wrap'><span class='pro-badge'>Users: {len(auth)}</span><span class='pro-badge'>Pending: {len(pending)}</span><span class='pro-badge'>Trades: {len(journal)}</span><span class='pro-badge'>Tracked (all users): {len(tracked)}</span><span class='pro-badge'>Awaiting TOOK/SKIP: {len(pending_signals)}</span></div></div>
+<div style='display:flex;justify-content:space-between;align-items:center;flex-wrap:wrap;gap:10px;margin-bottom:14px'><h1 style='font-size:20px;font-weight:900;margin:0'>👑 Creator Master Panel - V24 Unified 2 Modes</h1><div style='display:flex;gap:6px;flex-wrap:wrap'><span class='pro-badge'>Users: {len(auth)}</span><span class='pro-badge'>Pending: {len(pending)}</span><span class='pro-badge'>Trades: {len(journal)}</span><span class='pro-badge'>Telegram linked: {linked_n}/{len(auth)}</span><span class='pro-badge'>Open trades taken (all users): {len(tracked)}</span><span class='pro-badge'>Awaiting TOOK/SKIP: {len(pending_signals)}</span></div></div>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;margin-bottom:14px'>
 <div class='card'><div class='card-title'>Pending Payments</div><div class='card-value' style='font-size:20px;color:#f59e0b'>{len(pending)}</div></div>
 <div class='card'><div class='card-title'>Total Users</div><div class='card-value' style='font-size:20px'>{len(auth)}</div></div>
@@ -1676,6 +1696,7 @@ def creator_dashboard():
 </div>
 <div class='table-card'><div style='display:flex;justify-content:space-between;align-items:center;margin-bottom:12px'><h3 style='margin:0;font-size:14px;font-weight:800'>Pending Payments - Approve / Reject</h3><div style='display:flex;gap:6px'><a href='/backup-now' style='background:#10b981;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Force Backup</a><a href='/clear-tracked?scope=all&secret={secret_param}' style='background:#ef4444;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Clear Tracked (all users)</a><a href='/health' style='background:#1e293b;border:1px solid #334155;color:white;padding:6px 12px;border-radius:8px;text-decoration:none;font-size:11px'>Health</a></div></div><table><tr><th>Ref ID</th><th>Email</th><th>Plan</th><th>Price</th><th>Action</th></tr>{pending_rows}</table></div>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:12px;margin-top:12px'>
+{deliv_html}
 <div class='table-card'><h3 style='margin:0 0 12px;font-size:14px'>Recent Users (15)</h3><table><tr><th>Email</th><th>Plan</th><th>Ref Code</th><th>Expires</th></tr>{user_rows}</table></div>
 <div class='card'><h3 style='margin:0 0 10px;font-size:14px'>Tracked Trades, All Users ({len(tracked)})</h3><div style='font-size:11px;color:#cbd5e1;line-height:1.6;max-height:300px;overflow-y:auto'>{'<br>'.join([f"{v.get('symbol','?')} ({v.get('email','?')[:20]}): {v.get('bias')} {v.get('entry')} Score {v.get('score')}/10" for v in tracked.values()]) if tracked else "No tracked trades - clean"}</div><div style='margin-top:12px'><a href='/dashboard-scan' style='background:#10b981;color:white;padding:8px 14px;border-radius:8px;text-decoration:none;font-size:12px;font-weight:700'>View Signals</a></div></div>
 </div>
@@ -2881,7 +2902,7 @@ def system_check():
         cs = nc.status_summary(); row("News calendar", bool(cs.get("event_count")), f"{cs.get('event_count')} events, source {_esc(str(cs.get('source')))}" + (f"<br>{_esc(str(cs.get('last_error'))[:160])}" if cs.get("error") else ""))
     except Exception as e: row("News calendar", None, _esc(str(e)[:120]))
     # --- engine ---
-    row("Engine thresholds", True, f"regular and scalp both need {REGULAR_MIN_SCORE}/10; pullback signals are on by default")
+    row("Engine thresholds", True, f"regular and scalp both need {REGULAR_MIN_SCORE}/10; pullback trades are OFF by default (opt-in, proven pairs only); max risk {MAX_RISK_PERCENT:g}%")
     # --- users ---
     tg = load_json(TG_FILE, dict); tracked = load_json(TRACK_FILE, dict); pending = load_json(PENDING_FILE, dict); urows = []
     for email, d in tg.items():
