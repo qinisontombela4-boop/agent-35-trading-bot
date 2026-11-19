@@ -168,6 +168,7 @@ NEWS_CALLS_FILE = os.path.join(BASE_DIR, "news_calls.json")           # every ne
 HEADSUP_FILE = os.path.join(BASE_DIR, "headsup_sent.json")            # "price is approaching an order block" heads-ups already sent (one per setup per day)
 SHADOW_FILE = os.path.join(BASE_DIR, "shadow_trades.json")            # private "paper" copies of every engine signal, used only to learn how each pair behaves
 PAIR_STATS_FILE = os.path.join(BASE_DIR, "pair_stats.json")           # what the bot has learned per pair (resolved shadow results, in R)
+WEEKLOG_FILE = os.path.join(BASE_DIR, "weekly_log.json")              # per user, this week's sent signals and the setups the bot looked at but held back (for the Friday summary)
 TG_LINK_FILE = os.path.join(BASE_DIR, "tg_link_tokens.json")          # one-tap Telegram link tokens (30 min, single use)
 
 ALL_SYMBOLS = ["EURUSD","GBPUSD","USDJPY","USDCHF","AUDUSD","USDCAD","NZDUSD","EURJPY","GBPJPY","EURGBP","AUDJPY","CADJPY","CHFJPY","EURCHF","GBPCHF","EURAUD","GBPAUD","EURCAD","GBPCAD","EURNZD","GBPNZD","AUDNZD","AUDCAD","NZDCAD","AUDCHF","NZDJPY","XAUUSD","XAGUSD","XTIUSD","XBRUSD","US30","NAS100","SPX500","GER40","UK100","FRA40","ESP35","ITA40","JPN225","AUS200","BTCUSD","ETHUSD","SOLUSD","BNBUSD","XRPUSD","ADAUSD","DOGEUSD","DOTUSD","AVAXUSD","LINKUSD","MATICUSD","LTCUSD"]
@@ -1148,7 +1149,7 @@ def settings_page():
 <div class='card'><div class='card-title'>Leverage</div><select name='leverage' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>{"".join([f"<option value='1:{lv}' {'selected' if s.get('leverage','1:500')==f'1:{lv}' else ''}>1:{lv}</option>" for lv in [10,20,30,50,100,200,400,500,1000,2000]])}</select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Caps how large a position your account can actually margin — if this is too low for your lot size, SL/TP will size the trade down automatically and flag it in the Telegram message.</div></div>
 <div class='card'><div class='card-title'>Risk Reward</div><select name='rr_ratio' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='1.5' {'selected' if str(s.get('rr_ratio'))=='1.5' else ''}>1:1.5 Scalp</option><option value='2' {'selected' if str(s.get('rr_ratio')) in ('2','2.0') else ''}>1:2 Recommended (best tested)</option><option value='2.5' {'selected' if str(s.get('rr_ratio'))=='2.5' else ''}>1:2.5</option><option value='3' {'selected' if str(s.get('rr_ratio'))=='3' else ''}>1:3 SMC</option></select></div>
 <div class='card' style='border:2px solid #ef444455'><div class='card-title'>Avoid News</div><select name='trade_news' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='yes' {'selected' if s.get('trade_news',True) else ''}>🟢 Trade through news — no blackout</option><option value='no' {'selected' if not s.get('trade_news',True) else ''}>🔴 Avoid news — block signals + auto-flag tracked trades near high-impact events</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When set to Avoid, new signals are blocked ±15min around real high-impact events for correlated symbols, and you'll get a Telegram alert ~30min before. See the <a href='/news' style='color:#10b981'>News</a> tab for the live calendar.</div></div>
-<div class='card'><div class='card-title'>Sessions - when to receive signals</div><div style='display:flex;flex-direction:column;gap:8px;margin-top:10px'>{"".join(f"<label style='display:flex;align-items:center;gap:8px;background:#0b1220;border:1px solid #1e293b;padding:10px 12px;border-radius:10px;font-size:12px;cursor:pointer'><input type='checkbox' name='sessions' value='{nm}' {'checked' if nm in s.get('sessions',[]) else ''}> <b>{nm}</b> <span style='color:#64748b'>{(SESSION_HOURS_UTC[nm][0]+2)%24:02d}:00-{(SESSION_HOURS_UTC[nm][1]+2)%24:02d}:00 SAST</span></label>" for nm in ALL_SESSIONS)}</div><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>You only get new signals while one of your chosen sessions is open (trades already open keep being tracked at any time). Pick all three for signals around the clock. Fewer sessions also means fewer data credits used.</div></div>
+<div class='card'><div class='card-title'>Sessions - when to receive signals</div><div style='display:flex;flex-direction:column;gap:8px;margin-top:10px'>{"".join(f"<label style='display:flex;align-items:center;gap:8px;background:#0b1220;border:1px solid #1e293b;padding:10px 12px;border-radius:10px;font-size:12px;cursor:pointer'><input type='checkbox' name='sessions' value='{nm}' {'checked' if nm in s.get('sessions',[]) else ''}> <b>{nm}</b> <span style='color:#64748b'>{(SESSION_HOURS_UTC[nm][0]+2)%24:02d}:00-{(SESSION_HOURS_UTC[nm][1]+2)%24:02d}:00 SAST</span></label>" for nm in ALL_SESSIONS)}</div><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>You only get new signals while one of your chosen sessions is open (trades already open keep being tracked at any time). Pick all three for signals around the clock. </div></div>
 <div class='card'><div class='card-title'>Pullback trades (SMC)</div><select name='pullback_trades' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='no' {'selected' if not s.get('pullback_trades',False) else ''}>⚪ Off - only trade WITH the daily bias (recommended)</option><option value='yes' {'selected' if s.get('pullback_trades',False) else ''}>🧪 On - EXPERIMENTAL: also trade the 1H move toward the daily order block (lower win rate in testing)</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Regular mode only. When the daily bias is bullish but the 1H is bearish and falling toward an untaken bullish order block / liquidity (or the reverse), the bot also sends the 1H trade: a SELL when price retests a 1H bearish order block or sweeps premium highs and the 15m turns down, with the take profit at that order block / liquidity. These trades go AGAINST the daily bias for the length of the move, so they are labelled PULLBACK and are riskier than daily-bias trades. Turn off to trade only with the daily bias.</div></div>
 </div>
 <div class='card'><div class='card-title'>Smooth mode - protect your profits</div><select name='smooth_mode' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='no' {'selected' if not s.get('smooth_mode',False) else ''}>⚪ Off - I manage my own stop</option><option value='yes' {'selected' if s.get('smooth_mode',False) else ''}>🔒 On - tell me when to move my stop</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When ON, the bot messages you while a trade you TOOK is running: at +1R it tells you to move your stop to breakeven, and when price is about 80% of the way to the target it tells you to lock in profit (for a 3R target: at +2.4R move your stop to +1.2R, so a normal pullback does not shake you out). More trades finish at breakeven or a small win instead of a full loss, at the cost of sometimes giving back part of a big winner. Follow the messages for the results shown in your journal to be accurate. <a href='/pair-learning' style='color:#3b82f6'>See what the bot has learned about each pair</a>.</div></div>
@@ -1354,7 +1355,7 @@ def market_map_page():
         dp=eng.price_decimals(sym); f=lambda v:f"{v:.{dp}f}"
         atr_h1=m.get("atr_h1") or 1
         try: r=cached_analysis(sym, us); status=r.get("reason","")
-        except Exception as e: status=f"(analysis unavailable: {str(e)[:80]})"
+        except Exception as e: status="(analysis not available right now - try again in a minute)"
         def bias_chip(b): 
             col={"BULLISH":"#10b981","BEARISH":"#ef4444"}.get(b,"#94a3b8"); return f"<span class='pill' style='background:{col}22;color:{col};border:1px solid {col}44'>{b}</span>"
         z="".join(f"<tr><td style='font-weight:700'>{k}</td><td>{v['pct']}%</td><td>{v['zone']}</td><td style='color:#64748b'>{f(v['low'])} - {f(v['high'])}</td></tr>" for k,v in m["zones"].items())
@@ -1405,7 +1406,9 @@ def news_page():
 
     refresh_btn = f"<a href='/news?impact={quote(impact_filter)}&refresh=1' style='color:#10b981;font-size:11px;text-decoration:none;margin-left:8px'>↻ Refresh now</a>"
     import_link = " · <a href='/news-import' style='color:#10b981'>import by hand (admin)</a>" if is_admin else ""
-    if st["ok"]:
+    if not is_admin:
+        feed_banner = ""      # users do not need to see data-feed / calendar-feed problems (admin still sees them)
+    elif st["ok"]:
         feed_banner = f"<div style='font-size:11px;color:#64748b;margin:0 0 10px'>Source: {_esc(st['source'])} · {st['event_count']} events this week · updated {st['last_success_utc'][11:16]} UTC{refresh_btn}</div>"
     elif st["event_count"]:
         feed_banner = f"<div class='card' style='border:1px solid #f59e0b55;margin-bottom:12px'><div style='font-weight:800;color:#fbbf24'>⚠️ Showing an older calendar ({_esc(st['source'])})</div><div style='font-size:12px;color:#94a3b8;margin-top:6px;word-break:break-word'>Live feed problem: {_esc(st['last_error'])}</div><div style='font-size:11px;color:#64748b;margin-top:6px'>Scheduled times rarely change, so this is still useful. Retrying automatically.{refresh_btn}{import_link} · <a href='/news-status' style='color:#10b981'>details</a></div></div>"
@@ -2481,7 +2484,7 @@ def maybe_send_heads_up(email, chat_id, symbol, hu):
         key = f"{email}|{hu['key']}|{today}"
         if key in sent: return False
         if sum(1 for k in sent if k.startswith(email + "|") and k.endswith(today)) >= MAX_HEADSUPS_PER_DAY: return False
-        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": "📍 HEADS-UP (not a signal)\n" + hu["text"]})
+        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": "📍 SETUP FORMING - NOT A SIGNAL\n" + hu["text"] + "\n\n⚠️ This is NOT an official signal: the bot has not confirmed an entry and gives no stop loss or take profit. You may take it at your own risk - or wait for the official signal."})
         if res.get("ok"):
             sent[key] = datetime.now().isoformat(); save_json(HEADSUP_FILE, sent); return True
     except Exception as e:
@@ -2501,6 +2504,74 @@ def alert_admin(key, text, every_hours=6):
             al[key] = datetime.now().isoformat(); system["admin_alerts"] = al; save_json(SYSTEM_FILE, system); return True
     except Exception as e:
         print(f"[ADMIN ALERT] {e}", file=sys.stderr)
+    return False
+
+
+# ---- WEEKLY LOG + FRIDAY SUMMARY: so a quiet week is explained instead of looking like a dead bot ----
+_WEEK_LABELS = {"learning": "held back by pair learning (that pair's recent record was poor)",
+                "fvg": "rejected: no fair value gap (the move was not strong enough)",
+                "cost": "skipped: spread too large for the stop distance",
+                "unconfirmed": "zone reached but price never confirmed with a 15m shift"}
+
+def _week_start_str(now=None):
+    now = now or datetime.now(); return (now - timedelta(days=now.weekday())).strftime("%Y-%m-%d")
+
+def flush_week_events(events):
+    """events: list of (email, kind, key). Stored as unique keys per kind so repeated scans of the same setup count once."""
+    if not events: return
+    try:
+        wk = _week_start_str(); log = load_json(WEEKLOG_FILE, dict)
+        for email, kind, key in events:
+            rec = log.get(email)
+            if not isinstance(rec, dict) or rec.get("week") != wk: rec = {"week": wk, "ev": {}}
+            lst = rec["ev"].setdefault(kind, [])
+            if key not in lst: lst.append(key)
+            log[email] = rec
+        save_json(WEEKLOG_FILE, log)
+    except Exception as e: print(f"[WEEKLOG] {e}", file=sys.stderr)
+
+def _setup_events_from(email, sym, r, today):
+    """Which 'looked at but not sent' bucket (if any) this analysis belongs in."""
+    d = r.get("details") or {}
+    if d.get("cost_skip"): return [(email, "cost", f"{sym}|{today}")]
+    w = d.get("waiting_for")
+    if w == "fvg": return [(email, "fvg", f"{sym}|{today}")]
+    if w == "confirmation": return [(email, "unconfirmed", f"{sym}|{today}")]
+    return []
+
+def build_weekly_summary(email, user_settings):
+    wk = _week_start_str(); rec = (load_json(WEEKLOG_FILE, dict).get(email) or {})
+    ev = rec.get("ev", {}) if rec.get("week") == wk else {}
+    journal = [j for j in load_json(JOURNAL_FILE, list) if j.get("email") == email and str(j.get("date", "")) >= wk]
+    wins = sum(1 for j in journal if j.get("status") == "WIN"); losses = sum(1 for j in journal if j.get("status") == "LOSS"); be = sum(1 for j in journal if j.get("status") == "BE")
+    pnl = sum(float(j.get("pnl", 0) or 0) for j in journal if j.get("status") in ("WIN", "LOSS", "BE"))
+    cur = CURRENCY_MAP.get(user_settings.get("currency", "ZAR"), CURRENCY_MAP["ZAR"])["symbol"]
+    sent_n = len(ev.get("sent", []))
+    lines = ["📅 YOUR WEEK WITH AGENT 35", "", f"📨 Signals sent to you this week: {sent_n}"]
+    if wins + losses + be:
+        lines.append(f"📊 Your finished trades: {wins} won, {losses} lost" + (f", {be} breakeven" if be else "") + f" ({cur}{pnl:+.2f})")
+    elif sent_n:
+        lines.append("📊 Your finished trades: none closed yet this week")
+    held = [(k, len(ev.get(k, []))) for k in ("unconfirmed", "fvg", "cost", "learning") if ev.get(k)]
+    if held:
+        lines += ["", "🔍 Setups the bot looked at but did NOT send:"] + [f"• {n} {_WEEK_LABELS[k]}" for k, n in held]
+    lines += ["", "The bot only sends a signal when a full setup confirms, and it holds back anything weak on purpose. A quiet week with no signal is the filter doing its job, not the bot being switched off." if sent_n == 0 else
+              "Every signal above passed the full checklist. Weeks differ - judge the bot over many trades, not one week.",
+              "", "Have a great weekend. Trade safe."]
+    return "\n".join(lines)
+
+def maybe_send_weekly_summary(email, chat_id, user_settings):
+    """Friday after 15:00 UTC (17:00 SAST), once per user."""
+    try:
+        now = datetime.utcnow()
+        if now.weekday() != 4 or now.hour < 15: return False
+        today = now.strftime("%Y-%m-%d"); sent = load_json(HEADSUP_FILE, dict); key = f"{email}|WEEKLY|{today}"
+        if key in sent: return False
+        res = telegram_post("sendMessage", {"chat_id": chat_id, "text": build_weekly_summary(email, user_settings)})
+        if res.get("ok"):
+            sent = {k: v for k, v in sent.items() if k.split("|")[-1] >= (now - timedelta(days=2)).strftime("%Y-%m-%d")}
+            sent[key] = now.isoformat(); save_json(HEADSUP_FILE, sent); return True
+    except Exception as e: print(f"[WEEKLY] {email}: {e}", file=sys.stderr)
     return False
 
 def _digest_line(sym, r):
@@ -2711,7 +2782,7 @@ def cron_scan():
     _users = list(tg_users.items()); _n = len(_users)
     _start = (int((load_json(SYSTEM_FILE, dict)).get("scan_user_cursor", 0)) % _n) if _n else 0
     _users = _users[_start:] + _users[:_start]
-    reached = set(); not_reached = []; next_cursor = None
+    reached = set(); not_reached = []; next_cursor = None; week_events = []; _today_u = datetime.utcnow().strftime("%Y-%m-%d")
     for _ui, (email, chat_data) in enumerate(_users):
         if time.monotonic() - _t0 > SCAN_DEADLINE_S:
             not_reached = [e for e, _ in _users[_ui:]]; next_cursor = (_start + _ui) % _n; break
@@ -2761,6 +2832,7 @@ def cron_scan():
                     continue
                 (scalp_syms if user_settings.get("trading_mode") == "scalp" else regular_syms).add(sym)
                 digest_lines.append(_digest_line(sym, r))
+                if not r.get('signal'): week_events += _setup_events_from(email, sym, r, _today_u)
                 if not r.get('signal'):
                     hu = (r.get('details') or {}).get('heads_up')
                     if hu and maybe_send_heads_up(email, chat_id, sym, hu): sent.append(f"{email}:{sym} heads-up")
@@ -2769,18 +2841,18 @@ def cron_scan():
                     _kind = "PB" if r.get("pullback") else ("SCALP" if user_settings.get("trading_mode") == "scalp" else "CONT")
                     _ok_l, _why = pl.gate(_pstats, sym, _kind, r.get("score"))
                     if not _ok_l:
-                        skipped.append(f"{email}:{sym} HELD_BY_PAIR_LEARNING: {_why}")
+                        skipped.append(f"{email}:{sym} HELD_BY_PAIR_LEARNING: {_why}"); week_events.append((email, "learning", f"{sym}|{_today_u}"))
                         if sym in seen_analysis: seen_analysis[sym]["reason"] = f"SETUP FOUND BUT HELD BACK by pair learning: {_why}"
                         maybe_send_learning_notice(email, chat_id, sym, _kind, _why); continue
                     if _why: r = {**r, "learn_note": _why}
                     if _kind != "PB":                          # per-pair feature learning: hold back setups of a type that keeps losing on THIS pair
                         _ok_f, _why_f = pl.gate_features(_pstats, sym, _kind, setup_features(sym, r))
                         if not _ok_f:
-                            skipped.append(f"{email}:{sym} HELD_BY_PAIR_LEARNING: {_why_f}")
+                            skipped.append(f"{email}:{sym} HELD_BY_PAIR_LEARNING: {_why_f}"); week_events.append((email, "learning", f"{sym}|{_today_u}"))
                             if sym in seen_analysis: seen_analysis[sym]["reason"] = f"SETUP FOUND BUT HELD BACK by pair learning: {_why_f}"
                             maybe_send_learning_notice(email, chat_id, sym, _kind + "-F", _why_f); continue
                 ok, info = dispatch_signal_to_user(email, chat_id, sym, r, user_settings)
-                if ok: sent.append(f"{email}:{sym}")
+                if ok: sent.append(f"{email}:{sym}"); week_events.append((email, "sent", f"{sym}|{datetime.utcnow().strftime('%Y%m%d%H%M')}"))
                 else:
                     skipped.append(f"{email}:{sym} {info.get('error')}")
                     if sym in seen_analysis: seen_analysis[sym]["reason"] = f"SETUP FOUND BUT NOT DELIVERED to {email[:3]}***: {info.get('error')}"
@@ -2790,6 +2862,12 @@ def cron_scan():
         if digest_lines and maybe_send_digest(email, chat_id, digest_lines): sent.append(f"{email}: daily market watch")
         daily_counts[email] = get_daily_signal_count(email)
 
+    flush_week_events(week_events)
+    # Friday summary (after 15:00 UTC): sent from the scan itself, so no extra cron job is needed
+    if datetime.utcnow().weekday() == 4 and datetime.utcnow().hour >= 15:
+        for _e, _cd in tg_users.items():
+            if time.monotonic() - _t0 > SCAN_DEADLINE_S + 8: break
+            if _cd.get("chat_id") and maybe_send_weekly_summary(_e, _cd["chat_id"], get_user_settings(_e)): sent.append(f"{_e}: weekly summary")
     learn = learning_pass(regular_syms, scalp_syms, _t0, SCAN_DEADLINE_S + 12)
     # record how healthy this run was, so /health (and the admin alert) can say when the data feed is the reason for silence
     system = load_json(SYSTEM_FILE, dict)
@@ -2816,7 +2894,7 @@ def cron_scan():
             rec = us_scan.get(email, {})
             mine = [x.split(" ", 1)[1] if " " in x else x for x in skipped if x.startswith(email)]
             if email in not_reached: mine = ["NOT REACHED: the scan hit its time limit before this user (starts with them next scan)"] + mine
-            got = [x for x in sent if x.startswith(email + ":") and "heads-up" not in x]
+            got = [x for x in sent if x.startswith(email + ":") and not any(w in x for w in ("heads-up", "daily market watch", "weekly summary"))]
             rec.update({"scan_at": nowi, "skips": mine[:4]})
             if got: rec["last_signal"] = nowi; rec["last_signal_pairs"] = [g.split(":", 1)[1] for g in got][:3]
             us_scan[email] = rec
