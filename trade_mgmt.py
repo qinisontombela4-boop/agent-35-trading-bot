@@ -85,3 +85,39 @@ def stage_message(symbol, is_bull, entry, live_sl, trigger_r, lock_r, tp, dp):
                 f"Move your stop loss to BREAKEVEN ({live_sl:.{dp}f}) so this trade can no longer lose.\nTarget still {tp:.{dp}f}.")
     return (f"🔒 {symbol} {side}: price has reached +{trigger_r:.1f}R, close to your target ({tp:.{dp}f}).\n"
             f"Lock in profit: move your stop loss to {live_sl:.{dp}f} (that secures +{lock_r:g}R even if price turns around).")
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# MARKET-SHIFT GUARD - "the trade was nearly at target and then the market turned (news, reversal)".
+# Armed once the trade has run 70% of the way to the target (at least +1R). If price then gives back 85% of that peak profit
+# the bot tells the trader to close at market while there is still something left to secure.
+# Backtest (266 shipped trades, 11 pairs): win rate 41% -> 47%, total +57.5R -> +58.4R (unchanged), worst drawdown 11.8% -> 15.9%.
+# ---------------------------------------------------------------------------------------------------------------------
+SHIFT_ARM_FRAC = 0.70
+SHIFT_MIN_ARM_R = 1.0
+SHIFT_GIVEBACK = 0.85
+
+
+def shift_check(entry, sl, tp, is_bull, candles, opened, to_dt):
+    """Replay `candles` (oldest first, from `opened`). Returns None, or {"peak_r", "cur_r", "price"} when the guard fires on the
+    latest candle's close. Call it only for a trade whose stop/target have NOT been hit."""
+    entry, sl, tp = float(entry), float(sl), float(tp)
+    risk = abs(entry - sl)
+    if risk <= 0:
+        return None
+    d = 1.0 if is_bull else -1.0
+    arm = max(SHIFT_MIN_ARM_R, SHIFT_ARM_FRAC * abs(tp - entry) / risk)
+    peak, last = 0.0, None
+    for k in candles:
+        kt = to_dt(k)
+        if opened and kt and kt < opened:
+            continue
+        fav = float(k["high"]) if is_bull else float(k["low"])
+        peak = max(peak, (fav - entry) * d / risk)
+        last = k
+    if last is None or peak < arm:
+        return None
+    close = float(last["close"]); cur = (close - entry) * d / risk
+    if cur <= peak * (1 - SHIFT_GIVEBACK):
+        return {"peak_r": round(peak, 2), "cur_r": round(cur, 2), "price": close}
+    return None
