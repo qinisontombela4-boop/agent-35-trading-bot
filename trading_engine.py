@@ -1,6 +1,6 @@
 import os, time, requests
 from datetime import datetime, timedelta, timezone
-import re
+import re, threading
 import news_calendar
 
 def get_keys():
@@ -515,6 +515,17 @@ def detect_order_block(candles, bias=None):
 # silently changing how many decimals a symbol displays from one signal to
 # the next. This is fixed per-symbol instead, matching how real trading
 # platforms quote each instrument. ----
+# Prices shown in text (zones, levels, FVGs) use the PAIR'S OWN decimals (EURUSD 5, USDJPY 3, gold 2, indices 1 ...). They used to
+# be printed with 5 SIGNIFICANT figures, which cut digits off (EURUSD 1.0823 instead of 1.08234, US30 45124 instead of 45123.5).
+_TXT = threading.local()
+def _px(v):
+    sym = getattr(_TXT, "symbol", None)
+    try:
+        return f"{float(v):.{price_decimals(sym)}f}" if sym else f"{float(v):.5g}"
+    except (TypeError, ValueError):
+        return str(v)
+
+
 def price_decimals(symbol):
     if symbol == "XAUUSD": return 2
     if symbol == "XAGUSD": return 3
@@ -856,9 +867,9 @@ def strat_amd(x):
             poc = prof["poc"]
             for c in h1[-post:]:
                 if c["low"] < bl and c["close"] > bl and price > bl and abs(price - poc) <= 0.3 * height:
-                    return "BULLISH", f"box {bl:.5g}-{bh:.5g} lows swept, reclaimed, PoC {poc:.5g} retested"
+                    return "BULLISH", f"box {_px(bl)}-{_px(bh)} lows swept, reclaimed, PoC {_px(poc)} retested"
                 if c["high"] > bh and c["close"] < bh and price < bh and abs(price - poc) <= 0.3 * height:
-                    return "BEARISH", f"box {bl:.5g}-{bh:.5g} highs swept, reclaimed, PoC {poc:.5g} retested"
+                    return "BEARISH", f"box {_px(bl)}-{_px(bh)} highs swept, reclaimed, PoC {_px(poc)} retested"
     return None, ""
 
 def strat_smc(x):
@@ -947,11 +958,11 @@ def strat_wyckoff(x):
         if prior_avg > mid and c["low"] < rl and c["close"] > rl:
             test = any(a["low"] > c["low"] and a["low"] <= rl + 0.35 * height and quieter(a, c) for a in after)
             if test and tail[-1]["close"] > rl + 0.15 * height and x["price"] > c["close"]:
-                return "BULLISH", f"spring below {rl:.5g}, quiet higher-low test, last point of support"
+                return "BULLISH", f"spring below {_px(rl)}, quiet higher-low test, last point of support"
         if prior_avg < mid and c["high"] > rh and c["close"] < rh:
             test = any(a["high"] < c["high"] and a["high"] >= rh - 0.35 * height and quieter(a, c) for a in after)
             if test and tail[-1]["close"] < rh - 0.15 * height and x["price"] < c["close"]:
-                return "BEARISH", f"upthrust above {rh:.5g}, quiet lower-high test, last point of supply"
+                return "BEARISH", f"upthrust above {_px(rh)}, quiet lower-high test, last point of supply"
     return None, ""
 
 def strat_supply_demand(x):
@@ -970,7 +981,7 @@ def strat_supply_demand(x):
         zl, zh = zone
         if zl - 0.2 * atr <= price <= zh + 0.2 * atr:
             kind = "demand" if d == "BULLISH" else "supply"
-            return d, f"fresh {kind} zone {zl:.5g}-{zh:.5g}, power flip, engulfing"
+            return d, f"fresh {kind} zone {_px(zl)}-{_px(zh)}, power flip, engulfing"
     return None, ""
 
 def strat_volume_profile(x):
@@ -985,9 +996,9 @@ def strat_volume_profile(x):
     pats = set(x["m5_patterns"]) | set(x["h1_patterns"])
     src = "volume" if prof["uses_volume"] else "time-at-price"
     if _bull_pat(pats) and price <= prof["poc"] + tol:
-        return "BULLISH", f"rejection at {name} {level:.5g} ({src} profile), buying at/below fair value"
+        return "BULLISH", f"rejection at {name} {_px(level)} ({src} profile), buying at/below fair value"
     if _bear_pat(pats) and price >= prof["poc"] - tol:
-        return "BEARISH", f"rejection at {name} {level:.5g} ({src} profile), selling at/above fair value"
+        return "BEARISH", f"rejection at {name} {_px(level)} ({src} profile), selling at/above fair value"
     return None, ""
 
 def strat_breakout_retest(x):
@@ -1010,11 +1021,11 @@ def strat_breakout_retest(x):
         if c["close"] > rh and c["close"] > c["open"]:
             if any(a["low"] <= rh + 0.25 * atr and a["close"] > rh - 0.1 * atr for a in after) \
                and price > rh and price - rh <= 1.2 * atr:
-                return "BULLISH", f"strong breakout above {rh:.5g}, retest held"
+                return "BULLISH", f"strong breakout above {_px(rh)}, retest held"
         if c["close"] < rl and c["close"] < c["open"]:
             if any(a["high"] >= rl - 0.25 * atr and a["close"] < rl + 0.1 * atr for a in after) \
                and price < rl and rl - price <= 1.2 * atr:
-                return "BEARISH", f"strong breakdown below {rl:.5g}, retest rejected"
+                return "BEARISH", f"strong breakdown below {_px(rl)}, retest rejected"
     return None, ""
 
 def strat_trend_following(x):
@@ -1183,8 +1194,8 @@ def liquidity_grab(candles, swings, direction, d1, lookback=24):
         pd = d1[-2]; levels.append((pd["low"], "previous-day low") if direction == "BULLISH" else (pd["high"], "previous-day high"))
     for lvl, name in levels:
         for c in candles[start:]:
-            if direction == "BULLISH" and c["low"] < lvl < c["close"]: return f"{name} {lvl:.5g} swept"
-            if direction == "BEARISH" and c["high"] > lvl > c["close"]: return f"{name} {lvl:.5g} swept"
+            if direction == "BULLISH" and c["low"] < lvl < c["close"]: return f"{name} {_px(lvl)} swept"
+            if direction == "BEARISH" and c["high"] > lvl > c["close"]: return f"{name} {_px(lvl)} swept"
     return None
 
 def find_grab(candles, swings, direction, d1, lookback=12):
@@ -1290,7 +1301,7 @@ def htf_pois(direction, d1, h4, h1, price):
     out.sort(key=lambda p: abs(p["dist"]))
     return out
 
-def _fmt_pool(p): return f"{p['name']} {p['level']:.5g}"
+def _fmt_pool(p): return f"{p['name']} {_px(p['level'])}"
 
 def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
     """Stage 3+4 for ONE direction/POI: tap -> 15m structure shift -> 5m trigger -> structural stop -> room check."""
@@ -1307,8 +1318,8 @@ def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
     items["Right side of range"] = (zone == "discount") if direction == "BULLISH" else (zone == "premium")
     notes["Right side of range"] = f"price at {c['h1_pct']:.0f}% of the 1H range ({zone})"
     is_sweep = poi.get("kind") == "sweep"
-    poi_txt = (f"1H sweep of {poi['name']} {poi['level']:.5g}" if is_sweep else
-               f"1H {'Bull' if direction=='BULLISH' else 'Bear'} {poi.get('type','OB')} {poi['low']:.5g}-{poi['high']:.5g}")
+    poi_txt = (f"1H sweep of {poi['name']} {_px(poi['level'])}" if is_sweep else
+               f"1H {'Bull' if direction=='BULLISH' else 'Bear'} {poi.get('type','OB')} {_px(poi['low'])}-{_px(poi['high'])}")
     tag = "PULLBACK " if pullback else ("TREND " if trend else "")
 
     def out(reason, details=None, score=None):
@@ -1362,7 +1373,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
     if grab: items["Liquidity swept"] = True; notes["Liquidity swept"] = grab
     fvg = recent_fvg(ltf, direction, max_age=30, after_index=max(tap - 1, 2)) or recent_fvg(h1, direction, max_age=30)
     if fvg and ((fvg["bottom"] <= poi["high"] + atr_h1 and fvg["top"] >= poi["low"] - atr_h1) or mss):
-        items["FVG / imbalance"] = True; notes["FVG / imbalance"] = f"FVG {fvg['bottom']:.5g}-{fvg['top']:.5g}"
+        items["FVG / imbalance"] = True; notes["FVG / imbalance"] = f"FVG {_px(fvg['bottom'])}-{_px(fvg['top'])}"
     try:
         m5_l = m5 or []
         sw2 = find_swing_points(h1, 2)
@@ -1442,7 +1453,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
     _sp = est_spread(symbol, entry, c.get("user_settings"))
     _cap = MAX_COST_R_SCALP if c.get("scalp") else MAX_COST_R
     if _sp and risk > 0 and _sp / risk > _cap:
-        return out(f"Spread (~{_sp:.5g}) would cost {_sp/risk:.0%} of the stop distance - skipped (over {_cap:.0%} of the risk is lost to costs)", {**common, "cost_skip": True})
+        return out(f"Spread (~{_px(_sp)}) would cost {_sp/risk:.0%} of the stop distance - skipped (over {_cap:.0%} of the risk is lost to costs)", {**common, "cost_skip": True})
     if c.get("require_fvg") and not pullback and not items["FVG / imbalance"]:
         return out(f"{poi_txt} tapped and {tf_name} confirmed, but the move left no fair value gap (imbalance) - skipped ({score}/10)", {**common, "waiting_for": "fvg"})
     if score < c["min_score"] + (1 if pullback else 0) + (c.get("tc_extra", 0) if trend else 0):   # trading against the daily bias needs one more confirmation than a trade with it
@@ -1450,8 +1461,8 @@ def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
     rr = c["rr"]
     tp = target if (pullback or liq_pool or c.get("fixed_tp")) else (entry + risk * rr if direction == "BULLISH" else entry - risk * rr)
     if pullback:
-        tgt_desc = (f"the untaken {pullback_target['name']} {pullback_target['low']:.5g}" if pullback_target["tf"] == "liquidity" else
-                    f"the {pullback_target['tf']} {'Bull' if c['daily_bias']=='BULLISH' else 'Bear'} OB {pullback_target['low']:.5g}-{pullback_target['high']:.5g}")
+        tgt_desc = (f"the untaken {pullback_target['name']} {_px(pullback_target['low'])}" if pullback_target["tf"] == "liquidity" else
+                    f"the {pullback_target['tf']} {'Bull' if c['daily_bias']=='BULLISH' else 'Bear'} OB {_px(pullback_target['low'])}-{_px(pullback_target['high'])}")
         why = [f"PULLBACK {direction.lower()} with the 1H move, against the daily {c['daily_bias'].lower()} bias: price is heading toward {tgt_desc}",
                f"1H: {poi_txt}" + (" then rejected" if is_sweep else " tapped")]
     elif trend: why = [f"TREND CONTINUATION {direction.lower()}: daily, 4H and 1H all {direction.lower()}, price at {h1_pct:.0f}% of the 1H range (the far end of the move)", f"1H: {poi_txt} tapped on the retrace"]
@@ -1459,7 +1470,7 @@ def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
     if grab: why.append(grab)
     why.append(notes["15m structure shift"] + (f", {trig}" if trig else ""))
     why.append(f"{len(agree)}/10 strategies agree")
-    why.append(f"stop beyond the order block at {stop:.5g}; target {target:.5g} ({room/risk:.1f}R)" + (f", just before the untaken {liq_pool['name']} {liq_pool['level']:.5g}" if liq_pool else ""))
+    why.append(f"stop beyond the order block at {_px(stop)}; target {_px(target)} ({room/risk:.1f}R)" + (f", just before the untaken {liq_pool['name']} {_px(liq_pool['level'])}" if liq_pool else ""))
     if pullback: why.append("this trades the 1H move toward the target while the daily bias is still " + c['daily_bias'].lower() + " - take profit at the target, then look for the trade back in the daily direction")
     return {
         "symbol": symbol, "signal": True, "score": score, "bias": direction, "bias_4h": c["bias_4h"], "entry": entry,
@@ -1566,7 +1577,7 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
         poi = best_poi(h1, h1_events, direction, h1_range, atr_h1, price)
         if poi:
             gap = (price - poi["high"]) if direction == "BULLISH" else (poi["low"] - price)
-            poi_txt = f"{'Bull' if direction=='BULLISH' else 'Bear'} {poi.get('type','OB')} {poi['low']:.5g}-{poi['high']:.5g}"
+            poi_txt = f"{'Bull' if direction=='BULLISH' else 'Bear'} {poi.get('type','OB')} {_px(poi['low'])}-{_px(poi['high'])}"
             if gap > 1.5 * atr_h1:
                 return wait(f"Daily {direction.lower()} (price in {dz}); 1H in {zone} - waiting for price to reach the 1H {poi_txt} ({gap/atr_h1:.1f} ATR away).{liq_txt}",
                             bias=direction, entry=price, pct=h1_pct, score=sum(base_items.values()), details={"poi": poi, "waiting_for": "poi", "liquidity": [_fmt_pool(p) for p in liq]})
@@ -1596,7 +1607,7 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
     targets = htf_pois(direction, d1, h4, h1, price)
     tgt = targets[0] if targets else None
     if tgt:
-        pips = abs(tgt["dist"]); tgt_txt = f"{tgt['tf']} {'Bull' if direction=='BULLISH' else 'Bear'} OB {tgt['low']:.5g}-{tgt['high']:.5g} ({abs(tgt['dist'])/atr_h1:.1f} ATR {'below' if direction=='BULLISH' else 'above'})"
+        pips = abs(tgt["dist"]); tgt_txt = f"{tgt['tf']} {'Bull' if direction=='BULLISH' else 'Bear'} OB {_px(tgt['low'])}-{_px(tgt['high'])} ({abs(tgt['dist'])/atr_h1:.1f} ATR {'below' if direction=='BULLISH' else 'above'})"
         reason = (f"Daily {direction.lower()} (price in {dz}), but the 1H is in {zone} ({h1_pct:.0f}% of its range): price is retracing toward the {tgt_txt}"
                   f".{liq_txt} Waiting for the tap + a 15m shift {direction.lower()}.")
         det = {"phase": "retracement", "target_poi": tgt, "all_targets": targets, "liquidity": [_fmt_pool(p) for p in liq], "waiting_for": "retracement",
@@ -1652,7 +1663,7 @@ def market_map(symbol, historical=None):
         if r2: tf_zone[name] = {"pct": round(fib_level(r2, price) * 100), "zone": zone_of(r2, price), "high": r2["high"], "low": r2["low"]}
     pools = liquidity_pools(h1, sw, d1)
     return {"symbol": symbol, "price": price, "daily_bias": daily_bias, "bias_4h": bias_4h, "atr_h1": atr_h1,
-            "zones": tf_zone, "last_1h_break": (f"{ev[-1]['kind']} {ev[-1]['direction'].lower()} @ {ev[-1]['level']:.5g}" if ev else None),
+            "zones": tf_zone, "last_1h_break": (f"{ev[-1]['kind']} {ev[-1]['direction'].lower()} @ {_px(ev[-1]['level'])}" if ev else None),
             "bull_obs": htf_pois("BULLISH", d1, h4, h1, price), "bear_obs": htf_pois("BEARISH", d1, h4, h1, price),
             "liquidity_below": untaken_liquidity(pools, price, "sell", 6), "liquidity_above": untaken_liquidity(pools, price, "buy", 6),
             "taken_recently": [p for p in pools if p["taken"] and p["name"] in ("previous-day high", "previous-day low", "5-day high", "5-day low")]}
@@ -1666,6 +1677,7 @@ def full_multi_tf_analysis(symbol, user_settings=None, historical=None, as_of=No
     diverge. as_of: the datetime a backtest is simulating as "now".
     weights: optional overrides of DEFAULT_WEIGHTS (per-strategy vote
     multipliers, min_score, max_opposing, zone_veto)."""
+    _TXT.symbol = symbol
     if user_settings is None: user_settings = {"trade_news": True, "trading_mode": "regular", "currency": "ZAR"}
     mode = user_settings.get("trading_mode", "regular")
     min_rr = user_settings.get("min_risk_reward", 1.5)
