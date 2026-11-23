@@ -3039,7 +3039,7 @@ def cron_scan():
     # alerted; only a real outage / daily-limit problem is, and then once every 6 hours at most.
     _err = str(scan_stats.get("last_data_error") or "").lower()
     _self_heals = ("minute" in _err) and "daily" not in _err
-    if os.getenv("DATA_FEED_ALERTS", "on").lower() != "off" and not _self_heals and scan_stats["analyzed"] and scan_stats["data_errors"] >= max(2, scan_stats["analyzed"] // 2):
+    if os.getenv("DATA_FEED_ALERTS", "off").lower() == "on" and not _self_heals and scan_stats["analyzed"] and scan_stats["data_errors"] >= max(2, scan_stats["analyzed"] // 2):
         alert_admin("data_feed", f"⚠️ Agent 35 data feed problem: {scan_stats['data_errors']} of {scan_stats['analyzed']} symbols had no data this scan "
                     f"({scan_stats['last_data_error']}). Signals are paused for the affected pairs. Feed: {td_status()['calls_today']}/{td_status()['daily_limit']} credits used today.")
     # Remember, per user, why this scan did or did not send to them (shown on /system-check, so "user X got nothing" is answerable at a glance)
