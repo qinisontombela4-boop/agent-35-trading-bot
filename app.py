@@ -145,6 +145,7 @@ else:
           f"falling back to local files under {BASE_DIR}, which will NOT "
           "survive a redeploy on most hosts.", file=sys.stderr)
 
+SCALP_LOCKED = True   # scalp mode is locked while it is being tested (set False to open it again)
 MAX_TRACKED = 6  # now PER-USER: how many taken/tracked trades one user can have open at once
 MAX_SIGNALS_PER_DAY = 20  # PER-USER cap, resets via /cron/daily-reset or the date rollover
 TRADE_EXPIRY_HOURS = {"scalp": 6, "regular": 168}  # per-mode max time a TAKEN trade can sit unresolved
@@ -356,7 +357,7 @@ def maybe_send_pause_notice(email, chat_id, why):
 
 def get_user_settings(email):
     settings = load_json(SETTINGS_FILE, dict)
-    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":list(ALL_SESSIONS),"symbols":DEFAULT_WATCHLIST[:MAX_SYMBOLS_PER_USER],"risk_percent":RECOMMENDED_RISK_PERCENT,"rr_ratio":2.0,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":False,"smooth_mode":False}
+    default = {"account_size":142.0,"lot_size":0.01,"leverage":"1:500","sessions":list(ALL_SESSIONS),"symbols":DEFAULT_WATCHLIST[:MAX_SYMBOLS_PER_USER],"risk_percent":RECOMMENDED_RISK_PERCENT,"rr_ratio":2.0,"trade_news":True,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":"ZAR","trading_mode":"regular","pullback_trades":False,"smooth_mode":False,"shift_guard":True}
     s = settings.get(email, default)
     for k,v in default.items():
         if k not in s: s[k]=v
@@ -374,6 +375,7 @@ def get_user_settings(email):
     try:
         _ftp = float(eng.DEFAULT_WEIGHTS.get("fixed_tp_r") or 0)
     except Exception: _ftp = 0.0
+    if SCALP_LOCKED: s["trading_mode"] = "regular"      # scalp is still being tested: nobody can run it for now
     if _ftp > 0:                           # second-bot profile (BOT_PROFILE=balanced|steady): fixed small target, regular mode only
         s["rr_ratio"] = _ftp; s["trading_mode"] = "regular"; s["pullback_trades"] = False
     return s
@@ -1109,6 +1111,7 @@ def dashboard():
     mode_badge = "⚡ SCALP MODE - Fast M5 - 10-20/day" if mode=="scalp" else "🎯 REGULAR MODE - Swing - 2-5/day"
     content=f"""
 <div class='main'>
+{_open_trades_html(email, curr_sym)}
 <div class='card'><div class='card-title'>Total Profit & Loss</div><div class='card-value' style='color:{pnl_color}'>{curr_sym}{stats['total_pnl']:.2f}</div><div style='background:#0b1220;border-radius:10px;padding:10px;margin-top:10px;display:grid;grid-template-columns:1fr 1fr;gap:8px'><div><div style='font-size:9px;color:#64748b'>TODAY</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['daily']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>WEEK</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['weekly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>MONTH</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['monthly']:.2f}</div></div><div><div style='font-size:9px;color:#64748b'>YEAR</div><div style='font-weight:700;font-size:12px'>{curr_sym}{stats['yearly']:.2f}</div></div></div><div class='card-sub'>{mode_badge}<br>Score /10: regular and scalp both need {REGULAR_MIN_SCORE}+ (7=strong, 8+=A+)</div></div>
 <div class='card'><div class='card-title'>Performance</div><div class='card-value'>{stats['total_trades']} Trades • {stats['win_rate']}% WR</div><div class='card-sub'>✅ Wins: {stats['wins']} ❌ Losses: {stats['losses']} ➖ BE: {stats['be']}<br><br>Telegram: {tg_status}<br>Referrals: {ref_count}/10 free lifetime<br>Tracked: {tracked_count}/{MAX_TRACKED} active (limit 6)</div></div>
 <div class='card'><div class='card-title'>Account Overview</div><div class='card-value'>{curr_sym}{user_settings.get('account_size',142)}</div><div class='card-sub'>Lot Size: {user_settings.get('lot_size',0.01)} • Lev {user_settings.get('leverage','1:500')}<br>Risk: {user_settings.get('risk_percent',1)}% • RR 1:{user_settings.get('rr_ratio',2.0)}<br>Currency: {user_settings.get('currency','ZAR')} {curr_sym}<br>Mode: {mode.upper()} - All strategies as ONE<br><a href='/settings' style='color:#10b981;text-decoration:none;font-weight:700'>Edit Settings →</a></div></div>
@@ -1123,7 +1126,7 @@ def settings_page():
     if not session.get("user"): return redirect("/login")
     email=session.get("user"); is_admin=email=="admin@agent35.com"
     if request.method=="POST":
-        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":max(0.1,min(float(request.form.get("risk_percent",1) or 1),MAX_RISK_PERCENT)),"rr_ratio":float(request.form.get("rr_ratio",2.0)),"rr_v26":True,"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":request.form.get("trading_mode","regular"),"pullback_trades":request.form.get("pullback_trades")=="yes","pullback_v25":True,"smooth_mode":request.form.get("smooth_mode")=="yes","symbols":[x for x in request.form.getlist("symbols") if x in ALL_SYMBOLS][:MAX_SYMBOLS_PER_USER] or ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"sessions":[x for x in request.form.getlist("sessions") if x in ALL_SESSIONS] or list(ALL_SESSIONS),"sessions_set":True}
+        new_settings={"account_size":float(request.form.get("account_size",142)),"lot_size":float(request.form.get("lot_size",0.01)),"leverage":request.form.get("leverage","1:500"),"risk_percent":max(0.1,min(float(request.form.get("risk_percent",1) or 1),MAX_RISK_PERCENT)),"rr_ratio":float(request.form.get("rr_ratio",2.0)),"rr_v26":True,"trade_news":True if request.form.get("trade_news")=="yes" else False,"spread_forex":0.7,"spread_gold":0.35,"spread_indices":2.0,"spread_crypto":10.0,"currency":request.form.get("currency","ZAR"),"trading_mode":("regular" if SCALP_LOCKED else request.form.get("trading_mode","regular")),"pullback_trades":request.form.get("pullback_trades")=="yes","pullback_v25":True,"smooth_mode":request.form.get("smooth_mode")=="yes","shift_guard":request.form.get("shift_guard")!="no","symbols":[x for x in request.form.getlist("symbols") if x in ALL_SYMBOLS][:MAX_SYMBOLS_PER_USER] or ALL_SYMBOLS[:MAX_SYMBOLS_PER_USER],"sessions":[x for x in request.form.getlist("sessions") if x in ALL_SESSIONS] or list(ALL_SESSIONS),"sessions_set":True}
         save_user_settings(email,new_settings)
         return redirect("/dashboard")
     s=get_user_settings(email)
@@ -1133,11 +1136,12 @@ def settings_page():
     currency_options="".join([f"<option value='{code}' {'selected' if curr==code else ''}>{code} - {info['symbol']} {info['name']}</option>" for code,info in CURRENCY_MAP.items()])
     content=f"""<div style='max-width:1100px;margin:0 auto;padding:14px'>
 <h1 style='font-size:20px;font-weight:900;margin-bottom:4px'>Settings - Unified Strategy</h1><p style='color:#64748b;font-size:12px;margin-top:0'>One strategy combining all 10 strategies as one score 0-10. Choose mode only. Score {MIN_SCORE}+ sends.</p>
+<div style='display:grid;grid-template-columns:1fr;gap:12px;margin-top:12px'>{_open_trades_html(email, get_currency_symbol(s.get('currency','ZAR'))) or "<div class='card'><div class='card-title'>Open trades</div><div style='font-size:11px;color:#94a3b8;margin-top:4px'>No open trades. When you take a trade and later close it yourself, you can tell the bot here (or with the Telegram button / /close).</div></div>"}</div>
 <form method='post'>
 <div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:12px;margin-top:16px'>
 <div class='card' style='border:2px solid #10b981'><div class='card-title'>Trading Mode - 2 Modes Only</div><select name='trading_mode' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #10b981'>
 <option value='regular' {'selected' if mode=='regular' else ''}>🎯 REGULAR (SMC) - Daily bias + 1H order block + 15m/5m entry - Score {REGULAR_MIN_SCORE}+ send</option>
-<option value='scalp' {'selected' if mode=='scalp' else ''}>⚡ SCALP (rare signals, not profitable in testing) (SMC, one timeframe lower) - 4H bias + 15m order block + 5m entry - London/New York only - Score {REGULAR_MIN_SCORE}+ send</option>
+<option value='scalp' disabled>🔒 SCALP - locked: still in testing, not available yet</option>
 </select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>
 <div style='background:rgba(245,158,11,.12);border:1px solid #f59e0b;border-radius:8px;padding:8px;margin-bottom:8px;color:#fcd34d'>⚠️ <b>Scalp mode sends very few signals.</b> The spread is too big for its tiny stops on EURUSD, GBPUSD, USDCHF, ETHUSD, NAS100 and BTCUSD, so those pairs almost never qualify, and across all pairs it lost money in testing. Regular mode is recommended.</div><b>REGULAR (SMC):</b> The daily structure sets the ONLY direction. On the 1H chart the bot maps swing structure (BOS/CHoCH), the premium/discount range and unmitigated order blocks; it waits for price to tap an order block in the right half of the range, then needs a 15m structure shift (and ideally a 5m trigger) before sending. The stop sits beyond the order block, and the lot is sized so a stop-out costs your risk %. Best for Gold/Forex/Indices. Choose: {MIN_SCORE}=takeable, 6=good, 7=strong, 8+=A+<br><br>
 <b>SCALP:</b> the same SMC logic one timeframe lower: 4H sets the bias, a 15m order block is the zone and a 5m structure shift is the entry. Stops sit beyond the order block. London / New York hours only (crypto 24/7). Smaller targets, faster trades.
@@ -1152,6 +1156,7 @@ def settings_page():
 <div class='card'><div class='card-title'>Sessions - when to receive signals</div><div style='display:flex;flex-direction:column;gap:8px;margin-top:10px'>{"".join(f"<label style='display:flex;align-items:center;gap:8px;background:#0b1220;border:1px solid #1e293b;padding:10px 12px;border-radius:10px;font-size:12px;cursor:pointer'><input type='checkbox' name='sessions' value='{nm}' {'checked' if nm in s.get('sessions',[]) else ''}> <b>{nm}</b> <span style='color:#64748b'>{(SESSION_HOURS_UTC[nm][0]+2)%24:02d}:00-{(SESSION_HOURS_UTC[nm][1]+2)%24:02d}:00 SAST</span></label>" for nm in ALL_SESSIONS)}</div><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>You only get new signals while one of your chosen sessions is open (trades already open keep being tracked at any time). Pick all three for signals around the clock. </div></div>
 <div class='card'><div class='card-title'>Pullback trades (SMC)</div><select name='pullback_trades' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='no' {'selected' if not s.get('pullback_trades',False) else ''}>⚪ Off - only trade WITH the daily bias (recommended)</option><option value='yes' {'selected' if s.get('pullback_trades',False) else ''}>🧪 On - EXPERIMENTAL: also trade the 1H move toward the daily order block (lower win rate in testing)</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>Regular mode only. When the daily bias is bullish but the 1H is bearish and falling toward an untaken bullish order block / liquidity (or the reverse), the bot also sends the 1H trade: a SELL when price retests a 1H bearish order block or sweeps premium highs and the 15m turns down, with the take profit at that order block / liquidity. These trades go AGAINST the daily bias for the length of the move, so they are labelled PULLBACK and are riskier than daily-bias trades. Turn off to trade only with the daily bias.</div></div>
 </div>
+<div class='card'><div class='card-title'>Market-shift alert - close before a reversal</div><select name='shift_guard' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='yes' {'selected' if s.get('shift_guard',True) else ''}>🛡️ On - warn me to close when the market turns</option><option value='no' {'selected' if not s.get('shift_guard',True) else ''}>⚪ Off - I only close at TP/SL</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When a trade you TOOK has run about 70% of the way to the target and then price turns (for example on news) and gives back almost all of that profit, the bot tells you to close it now. Example: a 3R target, price reaches +2.5R, then falls back near your entry - you get a CLOSE NOW message and the journal records the trade closed at that price. In testing it raised the win rate (41% to 47%) with the same total profit, but cuts a few trades that would have recovered to the target.</div></div>
 <div class='card'><div class='card-title'>Smooth mode - protect your profits</div><select name='smooth_mode' style='width:100%;padding:12px;margin-top:8px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'><option value='no' {'selected' if not s.get('smooth_mode',False) else ''}>⚪ Off - I manage my own stop</option><option value='yes' {'selected' if s.get('smooth_mode',False) else ''}>🔒 On - tell me when to move my stop</option></select><div style='font-size:11px;color:#94a3b8;margin-top:8px;line-height:1.4'>When ON, the bot messages you while a trade you TOOK is running: at +1R it tells you to move your stop to breakeven, and when price is about 80% of the way to the target it tells you to lock in profit (for a 3R target: at +2.4R move your stop to +1.2R, so a normal pullback does not shake you out). More trades finish at breakeven or a small win instead of a full loss, at the cost of sometimes giving back part of a big winner. Follow the messages for the results shown in your journal to be accurate. <a href='/pair-learning' style='color:#3b82f6'>See what the bot has learned about each pair</a>.</div></div>
 <div class='card' style='margin-top:12px'><div class='card-title'>Watchlist - choose up to {MAX_SYMBOLS_PER_USER} of {len(ALL_SYMBOLS)} symbols - <span id='symcount' style='color:#10b981'></span></div><div style='display:grid;grid-template-columns:repeat(auto-fit,minmax(100px,1fr));gap:6px;max-height:380px;overflow-y:auto;margin-top:10px;padding-right:4px'>{symbols_html}</div></div>
 {sym_js}
@@ -1728,6 +1733,107 @@ def creator_action():
         return redirect(f"/creator?secret={secret}")
     return redirect(f"/creator?secret={secret}")
 
+# ---------------------------------------------------------------------------
+# MANUAL CLOSE: a trader closes a trade on their own broker before TP/SL and tells the bot (dashboard or Telegram).
+# The journal then shows how the trade did from the moment they pressed TOOK to the price they closed at.
+# ---------------------------------------------------------------------------
+def _latest_price(sym):
+    """Latest close for a symbol (one 5m candle, 1 data credit); falls back to the cached tracker candles."""
+    try:
+        got = eng.get_values(sym, "5min", 2)[0]
+        if got: return float(got[-1]["close"])
+    except Exception as e: print(f"[CLOSE] price fetch {sym}: {e}", file=sys.stderr)
+    for (s_, iv), hit in list(_TRACK_CANDLES.items()):
+        if s_ == sym and hit and hit[1]: return float(hit[1][-1]["close"])
+    return None
+
+def _fmt_held(opened):
+    if not opened: return ""
+    mins = max(0, int((datetime.now() - opened).total_seconds() // 60))
+    d, rem = divmod(mins, 1440); h, m = divmod(rem, 60)
+    return (f"{d}d " if d else "") + (f"{h}h " if (h or d) else "") + f"{m}m"
+
+def close_tracked_trade(email, signal_id, close_price=None, auto=False):
+    """Closes ONE open tracked trade owned by `email`. Returns (ok, message, info). Never touches another user's trade."""
+    tracked = load_json(TRACK_FILE, dict)
+    entry = tracked.get(signal_id)
+    if not entry or entry.get("email") != email:
+        return False, "That trade is no longer open (it may already have closed on its own).", None
+    sym = entry.get("symbol")
+    try:
+        ent = float(entry.get("entry")); sl = float(entry.get("sl")); risk_amt = float(entry.get("risk_amt", 0) or 0)
+    except (TypeError, ValueError):
+        return False, "This trade has no valid entry/stop saved, so it can't be closed from here.", None
+    is_bull = "BULLISH" in str(entry.get("bias", "")).upper()
+    used_live = False
+    if close_price in (None, ""):
+        close_price = _latest_price(sym); used_live = True
+        if close_price is None:
+            return False, f"Couldn't get a live price for {sym} right now - enter the price you closed at instead.", None
+    try: close_price = float(close_price)
+    except (TypeError, ValueError): return False, "That price isn't a number.", None
+    if close_price <= 0 or abs(close_price - ent) > 0.25 * ent:
+        return False, "That price looks wrong for this pair (far from your entry). Check it and try again.", None
+    risk_px = abs(ent - sl)
+    if risk_px <= 0: return False, "This trade has no valid stop distance.", None
+    r = ((close_price - ent) if is_bull else (ent - close_price)) / risk_px
+    pnl = round(risk_amt * r, 2)
+    label = "BE" if abs(r) < 0.1 else ("WIN" if r > 0 else "LOSS")
+    dp = eng.price_decimals(sym); held = _fmt_held(_safe_dt(entry.get("time", "")))
+    now = datetime.now()
+    result = (f"{'Shift-guard' if auto else 'Manual'} {label}: closed " + ("on market-shift alert" if auto else "by trader") + f" @ {close_price:.{dp}f} ({r:+.2f}R){' after ' + held if held else ''}")
+    journal = load_json(JOURNAL_FILE, list)
+    journal.append({"time": now.strftime("%m-%d %H:%M"), "symbol": sym, "status": label, "result": result, "pnl": pnl,
+                    "entry": entry.get("entry"), "sl": entry.get("sl"), "tp": entry.get("tp"), "close_price": close_price, "r": round(r, 2),
+                    "manual_close": True, "date": now.strftime("%Y-%m-%d"), "currency": entry.get("currency", "ZAR"), "email": email})
+    save_json(JOURNAL_FILE, _trim_journal(journal))
+    tracked.pop(signal_id, None); save_json(TRACK_FILE, tracked)
+    curr = get_currency_symbol(entry.get("currency", "ZAR"))
+    emoji = {"WIN": "✅", "BE": "🟰"}.get(label, "❌")
+    msg = (f"{emoji} {sym} closed {'on the market-shift alert' if auto else 'manually'} @ {close_price:.{dp}f}{' (live price)' if used_live and not auto else ''}\n"
+           f"From your entry {ent:.{dp}f}: {r:+.2f}R = {curr}{pnl:+.2f}{(' - held ' + held) if held else ''}")
+    return True, msg, {"symbol": sym, "label": label, "r": r, "pnl": pnl, "price": close_price}
+
+def _open_trades_html(email, curr_sym):
+    tracked = {sid: v for sid, v in load_json(TRACK_FILE, dict).items() if v.get("email") == email}
+    if not tracked: return ""
+    rows = ""
+    for sid, v in tracked.items():
+        sym = v.get("symbol"); dp = eng.price_decimals(sym); bull = "BULLISH" in str(v.get("bias", "")).upper()
+        try: ent = f"{float(v.get('entry')):.{dp}f}"
+        except (TypeError, ValueError): ent = str(v.get("entry"))
+        held = _fmt_held(_safe_dt(v.get("time", "")))
+        rows += (f"<div style='display:flex;justify-content:space-between;align-items:center;gap:8px;padding:8px 0;border-top:1px solid #1e293b'>"
+                 f"<div style='font-size:12px'><b>{sym}</b> {'BUY' if bull else 'SELL'} @ {ent}<div style='color:#64748b;font-size:11px'>open {held}</div></div>"
+                 f"<a href='/close-trade?id={sid}' class='btn-secondary' style='padding:6px 10px;font-size:11px;white-space:nowrap'>🔒 I've closed it</a></div>")
+    return (f"<div class='card' style='grid-column:1/-1'><div class='card-title'>Open trades</div>"
+            f"<div style='font-size:11px;color:#94a3b8;margin:4px 0'>Closed a trade yourself before TP/SL? Tell the bot and your journal will record the result from when you took it to when you closed it.</div>{rows}</div>")
+
+@app.route("/close-trade", methods=["GET", "POST"])
+def close_trade_page():
+    if not session.get("user"): return redirect("/login")
+    email = session.get("user"); sid = request.values.get("id", "")
+    tracked = load_json(TRACK_FILE, dict); e = tracked.get(sid)
+    if not e or e.get("email") != email:
+        return pro_layout("<div style='max-width:560px;margin:50px auto;text-align:center'><div class='card'><h3>Trade not found</h3><p style='color:#94a3b8'>It may already have closed on its own.</p><a href='/dashboard' class='btn-secondary'>Back to dashboard</a></div></div>")
+    sym = e.get("symbol"); dp = eng.price_decimals(sym)
+    if request.method == "POST":
+        ok, msg, info = close_tracked_trade(email, sid, (request.form.get("price") or "").strip() or None)
+        if ok and e.get("chat_id") and os.getenv("TELEGRAM_BOT_TOKEN"):
+            try: telegram_post("sendMessage", {"chat_id": e["chat_id"], "text": msg}, timeout=5)
+            except Exception: pass
+        color = "#10b981" if ok else "#ef4444"
+        body = "".join(f"<div>{l}</div>" for l in msg.split("\n"))
+        return pro_layout(f"<div style='max-width:560px;margin:50px auto;text-align:center'><div class='card'><h3 style='color:{color}'>{'Trade closed' if ok else 'Could not close'}</h3><div style='color:#cbd5e1;margin:10px 0;line-height:1.6'>{body}</div><a href='/dashboard' class='btn-secondary'>Dashboard</a> <a href='/journal' class='btn-secondary'>Journal</a></div></div>")
+    bull = "BULLISH" in str(e.get("bias", "")).upper()
+    return pro_layout(f"""<div style='max-width:560px;margin:50px auto'><div class='card'><h3 style='margin:0 0 6px'>Close {sym} {'BUY' if bull else 'SELL'}</h3>
+<div style='font-size:12px;color:#94a3b8;line-height:1.6'>Entry {float(e.get('entry')):.{dp}f} - Stop {float(e.get('sl')):.{dp}f} - Target {float(e.get('tp')):.{dp}f}<br>First close the trade on your own broker/platform, then enter the price you closed at. Leave it blank to use the current market price.</div>
+<form method='POST' action='/close-trade' style='margin-top:12px'><input type='hidden' name='id' value='{sid}'>
+<input name='price' type='number' step='any' placeholder='Closed at price (optional)' style='width:100%;padding:12px;border-radius:10px;background:#0b1220;color:white;border:1px solid #1e293b'>
+<button type='submit' class='btn-primary' style='width:100%;margin-top:10px'>I've closed this trade</button></form>
+<a href='/dashboard' class='btn-secondary' style='margin-top:8px;display:inline-block'>Cancel</a></div></div>""")
+
+
 @app.route("/clear-tracked")
 def clear_tracked():
     if not session.get("user") and not request.args.get("secret"): return redirect("/login")
@@ -1888,13 +1994,33 @@ def telegram_webhook():
                     telegram_post("sendMessage", {"chat_id": chat_id, "text": f"That link expired or was already used. Open Link Telegram on the website and tap Connect again.\n\n(Manual option — your Chat ID is {chat_id})"}, timeout=5)
             else:
                 telegram_post("sendMessage", {"chat_id": chat_id, "text": f"AGENT 35 PRO - Your Chat ID: {chat_id}\n\nEasiest: open Link Telegram on the website and tap 'Connect with one tap'.\nOr paste this Chat ID there manually.\n\nUnified Strategy - 2 Modes - Score {MIN_SCORE}+ sends"}, timeout=5)
+        if bot and text_in.lower().startswith("/close"):
+            # "/close" lists your open trades with close buttons; "/close EURUSD 1.0850" closes at the price you give.
+            who = email_for_chat_id(chat_id)
+            if not who:
+                telegram_post("sendMessage", {"chat_id": chat_id, "text": "This chat isn't linked to an account yet."}, timeout=5)
+            else:
+                mine = {sid: v for sid, v in load_json(TRACK_FILE, dict).items() if v.get("email") == who}
+                args = text_in.split()[1:]
+                if not mine:
+                    telegram_post("sendMessage", {"chat_id": chat_id, "text": "You have no open trades."}, timeout=5)
+                elif args:
+                    sym_in = args[0].upper().replace("/", "")
+                    hits = [sid for sid, v in mine.items() if str(v.get("symbol", "")).upper().replace("/", "") == sym_in]
+                    if not hits: telegram_post("sendMessage", {"chat_id": chat_id, "text": f"No open {sym_in} trade found. Send /close to see your open trades."}, timeout=5)
+                    else:
+                        _ok, _m, _i = close_tracked_trade(who, hits[0], args[1] if len(args) > 1 else None)
+                        telegram_post("sendMessage", {"chat_id": chat_id, "text": _m}, timeout=5)
+                else:
+                    kb = {"inline_keyboard": [[{"text": f"🔒 Close {v.get('symbol')}", "callback_data": f"CLOSE_{sid}"}] for sid, v in mine.items()]}
+                    telegram_post("sendMessage", {"chat_id": chat_id, "text": "Which trade did you close? (Tap it - or send /close SYMBOL PRICE to give your exact closing price.)", "reply_markup": kb}, timeout=5)
     if "callback_query" in data:
         # FIXED: callback_data now carries a unique signal_id (TOOK_<id> /
         # SKIP_<id>) instead of a bare symbol name, so this looks up exactly
         # ONE pending signal — the one THIS chat's press refers to — rather
         # than a shared global entry any chat's button could have affected.
         cb=data["callback_query"]; cb_data=cb.get("data",""); cb_id=cb.get("id"); chat_id=cb["message"]["chat"]["id"]; user_name=cb["from"].get("first_name","User")
-        text="OK"
+        text="OK"; extra_markup=None
         owner_email = email_for_chat_id(chat_id)
 
         if cb_data.startswith("TOOK_") or cb_data.startswith("SKIP_"):
@@ -1927,7 +2053,8 @@ def telegram_webhook():
                 journal=load_json(JOURNAL_FILE, list)
                 journal.append({"time":datetime.now().strftime("%m-%d %H:%M"),"symbol":entry["symbol"],"status":"TOOK","result":f"Taken by {user_name} {entry['mode']} Score {entry['score']}/10","pnl":0,"entry":entry["entry"],"sl":entry["sl"],"tp":entry["tp"],"risk_amt":entry["risk_amt"],"rr":entry["rr"],"date":datetime.now().strftime("%Y-%m-%d"),"currency":entry["currency"],"email":entry["email"]})
                 save_json(JOURNAL_FILE, _trim_journal(journal))
-                text=f"TOOK {entry['symbol']} {entry['entry']} — now tracking, you'll get a result when it hits SL/TP"
+                text=f"TOOK {entry['symbol']} {entry['entry']} — now tracking, you'll get a result when it hits SL/TP.\nIf you close it yourself before then, tap the button below."
+                extra_markup={"inline_keyboard":[[{"text":"🔒 I've closed this trade","callback_data":f"CLOSE_{signal_id}"}]]}
             else:  # SKIP
                 del pending[signal_id]; save_json(PENDING_FILE, pending)
                 journal=load_json(JOURNAL_FILE, list)
@@ -1935,10 +2062,20 @@ def telegram_webhook():
                 save_json(JOURNAL_FILE, _trim_journal(journal))
                 text=f"SKIP {entry['symbol']}"
 
+        elif cb_data.startswith("CLOSE_"):
+            sid = cb_data.split("_", 1)[1]
+            tr = load_json(TRACK_FILE, dict).get(sid)
+            if not tr: text = "That trade is no longer open."
+            elif str(tr.get("chat_id")) != str(chat_id) or not owner_email or tr.get("email") != owner_email: text = "This trade isn't yours to close."
+            else:
+                _ok, text, _info = close_tracked_trade(owner_email, sid, None)
+
         if bot:
             try:
                 requests.post(f"https://api.telegram.org/bot{bot}/answerCallbackQuery", json={"callback_query_id":cb_id,"text":text}, timeout=5)
-                requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json={"chat_id":chat_id,"text":text}, timeout=5)
+                _pl={"chat_id":chat_id,"text":text}
+                if extra_markup: _pl["reply_markup"]=extra_markup
+                requests.post(f"https://api.telegram.org/bot{bot}/sendMessage", json=_pl, timeout=5)
             except: pass
         return jsonify({"ok":True})
     return jsonify({"ok":True})
@@ -2371,6 +2508,24 @@ def cron_track_check():
                 except Exception as e: print(f"[SMOOTH ALERT] {sym}: {e}", file=sys.stderr)
         else:
             outcome, current = check_trade_outcome(entry, candles, sl, tp)
+
+        shift = None
+        if not outcome and tm is not None:
+            try:
+                if get_user_settings(entry.get("email", "")).get("shift_guard", True):
+                    shift = tm.shift_check(entry.get("entry"), sl, tp, "BULLISH" in str(bias).upper(), candles, _safe_dt(entry.get("time", "")),
+                                           lambda k: _safe_dt(str(k.get("time", "")).replace(" ", "T")))
+            except Exception as e: print(f"[SHIFT] {sym}: {e}", file=sys.stderr)
+        if shift:
+            ok_, msg_, info_ = close_tracked_trade(entry.get("email"), signal_id, shift["price"], auto=True)
+            if ok_:
+                tracked.pop(signal_id, None); dirty = True
+                resolved.append({"symbol": sym, "outcome": "SHIFT", "pnl": info_["pnl"], "email": entry.get("email")})
+                if entry.get("chat_id") and os.getenv("TELEGRAM_BOT_TOKEN"):
+                    try: requests.post(f"https://api.telegram.org/bot{os.getenv('TELEGRAM_BOT_TOKEN')}/sendMessage", json={"chat_id": entry["chat_id"], "text":
+                        f"⚠️ MARKET SHIFT - {sym}: price had run to +{shift['peak_r']:.1f}R and has now turned back to {shift['cur_r']:+.1f}R.\nClose this trade now at market to secure what is left, instead of risking a full loss.\n\n{msg_}"}, timeout=10)
+                    except Exception: pass
+            continue
 
         if outcome:
             if outcome == "WIN": pnl = round(risk_amt * rr, 2)
