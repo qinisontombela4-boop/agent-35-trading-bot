@@ -1449,7 +1449,14 @@ def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
         target = entry + risk * c["fixed_tp"] if direction == "BULLISH" else entry - risk * c["fixed_tp"]; room = risk * c["fixed_tp"]; liq_pool = None
     if risk <= 0: return out("Rejected: invalid stop distance", common)
     if risk > 3.0 * atr_h1: return out(f"Stop would be {risk/atr_h1:.1f} ATR wide (beyond the order block) - setup too wide to trade", common)
-    if room < min_rr_of(c) * risk: return out(f"Only {room/risk:.1f}R of room to the target - need {min_rr_of(c):.1f}R", common)
+    _fast = False
+    if room < min_rr_of(c) * risk:
+        # FAST 1:1 TRADE: not enough room for the user's reward ratio, but the setup itself is valid -> send it with a 1R target instead of skipping it
+        # (backtest: ~90 extra trades, 59-62% win, +12R to +17R, +2 signals/week). Never for pullbacks. Users can switch it off in Settings.
+        if c.get("fast_trades") and not pullback and risk > 0:
+            target = entry + risk if direction == "BULLISH" else entry - risk; room = risk; liq_pool = None; _fast = True
+        else:
+            return out(f"Only {room/risk:.1f}R of room to the target - need {min_rr_of(c):.1f}R", common)
     _sp = est_spread(symbol, entry, c.get("user_settings"))
     _cap = MAX_COST_R_SCALP if c.get("scalp") else MAX_COST_R
     if _sp and risk > 0 and _sp / risk > _cap:
@@ -1459,12 +1466,13 @@ def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
     if score < c["min_score"] + (1 if pullback else 0) + (c.get("tc_extra", 0) if trend else 0):   # trading against the daily bias needs one more confirmation than a trade with it
         return out(f"{score}/10 checklist - need {c['min_score']}+ ({', '.join(k for k, v in items.items() if not v)} missing)", common)
     rr = c["rr"]
-    tp = target if (pullback or liq_pool or c.get("fixed_tp")) else (entry + risk * rr if direction == "BULLISH" else entry - risk * rr)
+    tp = target if (pullback or liq_pool or _fast or c.get("fixed_tp")) else (entry + risk * rr if direction == "BULLISH" else entry - risk * rr)
     if pullback:
         tgt_desc = (f"the untaken {pullback_target['name']} {_px(pullback_target['low'])}" if pullback_target["tf"] == "liquidity" else
                     f"the {pullback_target['tf']} {'Bull' if c['daily_bias']=='BULLISH' else 'Bear'} OB {_px(pullback_target['low'])}-{_px(pullback_target['high'])}")
         why = [f"PULLBACK {direction.lower()} with the 1H move, against the daily {c['daily_bias'].lower()} bias: price is heading toward {tgt_desc}",
                f"1H: {poi_txt}" + (" then rejected" if is_sweep else " tapped")]
+    elif _fast: why = [f"FAST 1:1 TRADE: Daily {direction.lower()} bias, 1H {zone} ({h1_pct:.0f}% of range), {poi_txt} tapped - little room to a bigger target, so this one aims for just 1R (quick, higher win rate, smaller profit)"]
     elif trend: why = [f"TREND CONTINUATION {direction.lower()}: daily, 4H and 1H all {direction.lower()}, price at {h1_pct:.0f}% of the 1H range (the far end of the move)", f"1H: {poi_txt} tapped on the retrace"]
     else: why = [f"Daily {direction.lower()} bias" + (", 4H agrees" if items["4H agrees"] else ""), f"1H: price in {zone} ({h1_pct:.0f}% of range), {poi_txt} tapped"]
     if grab: why.append(grab)
@@ -1479,10 +1487,13 @@ def _entry_from_poi(c, direction, poi, pullback_target=None, trend=False):
         "rationale": ". ".join(why) + ".", "confluence": ("PULLBACK | " if pullback else ("TREND | " if trend else "")) + " | ".join(k for k, v in items.items() if v),
         "details": {"checklist": dict(items), "notes": notes, "regular_mode": True, "poi": poi, "zone": zone, "pullback": pullback,
                     **common, "stop": stop, "target_liquidity": target, "room_r": round(room / risk, 2), "tap_index": tap},
-        "mode": "regular", "structural": True, "mode_stage": "regular", "pullback": pullback, "trend": trend, "tp_is_target": bool(pullback or liq_pool), "tp_liquidity": (liq_pool or {}).get("name"),
+        "mode": "regular", "structural": True, "mode_stage": "regular", "pullback": pullback, "trend": trend, "tp_is_target": bool(pullback or liq_pool or _fast), "fast": _fast, "tp_liquidity": (liq_pool or {}).get("name"),
         "factors": {**{n: (votes[n][0] == direction) for n in STRATEGY_NAMES}, "zone": zone, "zone_veto_blocked": False},
     }
 
+# Fast 1:1 fallback (setups with too little room get a 1R target instead of being skipped). OFF by default: the real-engine backtest found it
+# adds only ~10 trades in 8 months and they lost (20% win, -5.5R). Turn on for everyone with the env var FAST_TRADES_DEFAULT=on.
+FAST_TRADES_DEFAULT = os.getenv("FAST_TRADES_DEFAULT", "off").lower() == "on"
 def min_rr_of(c): return c["min_rr"]
 
 
@@ -1537,7 +1548,7 @@ def _regular_mode(symbol, user_settings, historical, as_of, w, cache, now, d1, h
          "rr": float(user_settings.get("rr_ratio", 2.0) or 2.0), "min_rr": float(user_settings.get("min_risk_reward", 1.5) or 1.5),
          "min_score": w.get("regular_min_score", 5), "scalp": scalp, "min_stop_atr": 1.0 if scalp else REGULAR_STOP_FLOOR_ATR,
          "require_fvg": bool(w.get("scalp_require_fvg", True) if scalp else w.get("require_fvg", True)),
-         "fixed_tp": float(w.get("fixed_tp_r") or 0)}
+         "fixed_tp": float(w.get("fixed_tp_r") or 0), "fast_trades": bool(user_settings.get("fast_trades", FAST_TRADES_DEFAULT))}
     if c["fixed_tp"]: c["min_rr"] = min(c["min_rr"], c["fixed_tp"])
     allow_pullback = bool(user_settings.get("pullback_trades", False))   # default OFF: 733 backtested pullback trades on 8 pairs lost -174R
 
